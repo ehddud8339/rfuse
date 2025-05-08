@@ -44,8 +44,8 @@ sudo apt install build-essential make ninja-build meson pkg-config autoconf kern
 
 ### 1. Clone the repository
 ```
-$ git clone https://github.com/WithoutStress/rfuse-fast24-ae.git
-$ cd rfuse-fast24-ae
+$ git clone https://github.com/snu-csl/rfuse.git
+$ cd rfuse
 ```
 
 ### 2. Install the 5.15.0 Linux kernel 
