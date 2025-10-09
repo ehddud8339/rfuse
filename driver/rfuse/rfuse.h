@@ -11,7 +11,7 @@
  
 #include "rfuse_comp.h"
 
-#define RFUSE_NUM_IQUEUE     80           // Number of rfuse iqueue
+#define RFUSE_NUM_IQUEUE     24           // Number of rfuse iqueue
 #define RFUSE_MAX_QUEUE_SIZE 1024*4      // Maximum number of requests in a queue
 
 #define RFUSE_RIQ_ID_MASK    0x00ff0000ULL

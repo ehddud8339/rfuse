@@ -1,0 +1,2 @@
+/home/ldy/src/rfuse/driver/fuse/dev.o /home/ldy/src/rfuse/driver/fuse/dir.o /home/ldy/src/rfuse/driver/fuse/file.o /home/ldy/src/rfuse/driver/fuse/inode.o /home/ldy/src/rfuse/driver/fuse/control.o /home/ldy/src/rfuse/driver/fuse/xattr.o /home/ldy/src/rfuse/driver/fuse/acl.o /home/ldy/src/rfuse/driver/fuse/readdir.o /home/ldy/src/rfuse/driver/fuse/ioctl.o /home/ldy/src/rfuse/driver/fuse/dax.o
+

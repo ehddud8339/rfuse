@@ -573,7 +573,7 @@ struct rfuse_req *rfuse_request_alloc(struct fuse_mount *fm){
 	int riq_id = riq->riq_id;
 	struct rfuse_req *r_req = NULL;
 	uint32_t req_index;
-
+  
 	req_index = rfuse_get_request_buffer(fm, riq_id); // Get a new index
 	r_req = (struct rfuse_req*)&riq->kreq[req_index]; // Get a new entry
 

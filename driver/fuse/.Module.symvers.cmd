@@ -1,0 +1,1 @@
+cmd_/home/ldy/src/rfuse/driver/fuse/Module.symvers := sed 's/\.ko$$/\.o/' /home/ldy/src/rfuse/driver/fuse/modules.order | scripts/mod/modpost -m -a  -o /home/ldy/src/rfuse/driver/fuse/Module.symvers -e -i Module.symvers   -T -

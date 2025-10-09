@@ -123,7 +123,7 @@ extern "C" {
 #define COMP_NEED_WAKEUP_FROM_USER  (1U << 3)
 #define COMP_ALL_COMP_WORKING 	    (1U << 4)
 
-#define RFUSE_NUM_IQUEUE 		80	
+#define RFUSE_NUM_IQUEUE 		24
 #define RFUSE_MAX_QUEUE_SIZE 		1024*4	
 #define RFUSE_WORKER_PER_RING		2
 

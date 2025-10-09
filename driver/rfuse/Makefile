@@ -6,13 +6,15 @@
 # Uncomment below line to compile with debug option 
 # ccflags-y += -DDEBUG
 
+DIR=$(shell pwd)
+
 obj-m += fuse.o
 
 fuse-y := dev.o dir.o file.o inode.o control.o xattr.o acl.o readdir.o ioctl.o rfuse_dev.o rfuse_dir.o rfuse_inode.o rfuse_file.o rfuse_comp.o
 fuse-$(CONFIG_FUSE_DAX) += dax.o
 
 all:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
+	make -C /lib/modules/$(shell uname -r)/build M=$(DIR) modules
  
 clean:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
+	make -C /lib/modules/$(shell uname -r)/build M=$(DIR) clean
