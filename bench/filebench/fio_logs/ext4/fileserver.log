@@ -1,0 +1,13 @@
+Filebench Version 1.4.9
+1867304: 0.000: Allocated 170MB of shared memory
+1867304: 0.001: Creating/pre-allocating files and filesets
+1867304: 0.068: Fileset bigfileset: 200000 files, 0 leafdirs, avg dir width = 20, avg dir depth = 4.1, 25028.705MB
+1867304: 0.069: Removed any existing fileset bigfileset in 1 seconds
+1867304: 0.069: making tree for filset /mnt/test/bigfileset
+1867304: 0.139: Creating fileset bigfileset...
+1867304: 7.474: Preallocated 160137 of 200000 of fileset bigfileset in 8 seconds
+1867304: 7.474: waiting for fileset pre-allocation to finish
+1867304: 7.474: Running 'sync'
+1867304: 9.224: Attempting to create fileset more than once, ignoring
+1867437: 9.224: Starting 1 fileserver instances
+1867438: 9.225: Starting 50 fileserverthread threads

@@ -1,6 +1,6 @@
 [global]
 ioengine=psync
-size=1G
+size=128M
 direct=0
 iodepth=1
 norandommap

@@ -4,18 +4,13 @@ set -euo pipefail
 
 # ===== User Config =====
 FS_TYPE=("ext4" "fuse" "rfuse")
-#FS_TYPE=("rfuse")
 FS_PATH="../../filesystems/stackfs"
 DEVICE_NAME=("/dev/nvme1n1")
 
 MOUNT_BASE="/mnt/RFUSE_EXT4"
 MOUNT_POINT="/mnt/test"
 
-SECTIONS=("read" "write" "randread" "randwrite") # 1.1
-BS_LIST=("4k" "128k")                            # 1.2
-NUM_JOBS=("1" "2" "4" "8" "16" "32")             # 1.3
-FIO_BASE="fio_scripts/basic.fio"
-RESULT_DIR="/home/ldy/src/ldy/rfuse/"
+RESULT_DIR="/home/ldy/rfuse/filebench/"
 
 # ===== Helpers =====
 function drop_all_caches() {
@@ -63,7 +58,6 @@ function init_mount_point() {
 
     echo "Mount fuse-stackfs..."
     pushd "${FS_PATH}" >/dev/null
-    cp /home/ldy/src/rfuse/filesystems/stackfs/StackFS_LowLevel.c.fuse /home/ldy/src/rfuse/filesystems/stackfs/StackFS_LowLevel.c
     make clean
     make
     ./StackFS_ll -r "${MOUNT_BASE}" "${MOUNT_POINT}" &
@@ -85,7 +79,6 @@ function init_mount_point() {
 
     echo "Mount rfuse-stackfs..."
     pushd "${FS_PATH}" >/dev/null
-    cp /home/ldy/src/rfuse/filesystems/stackfs/StackFS_LowLevel.c.rfuse /home/ldy/src/rfuse/filesystems/stackfs/StackFS_LowLevel.c
     make clean
     make
     ./StackFS_ll -r "${MOUNT_BASE}" "${MOUNT_POINT}" &
@@ -131,7 +124,7 @@ function remount_point() {
 
     echo "Mount fuse-stackfs..."
     pushd "${FS_PATH}" >/dev/null
-    cp /home/ldy/src/rfuse/filesystems/stackfs/StackFS_LowLevel.c.fuse /home/ldy/src/rfuse/filesystems/stackfs/StackFS_LowLevel.c
+    cp StackFS_LowLevel.c.fuse StackFS_LowLevel.c
     make clean
     make
     ./StackFS_ll -r "${MOUNT_BASE}" "${MOUNT_POINT}" &
@@ -152,7 +145,7 @@ function remount_point() {
 
     echo "Mount rfuse-stackfs..."
     pushd "${FS_PATH}" >/dev/null
-    cp /home/ldy/src/rfuse/filesystems/stackfs/StackFS_LowLevel.c.rfuse /home/ldy/src/rfuse/filesystems/stackfs/StackFS_LowLevel.c
+    cp StackFS_LowLevel.c.rfuse StackFS_LowLevel.c
     make clean
     make
     ./StackFS_ll -r "${MOUNT_BASE}" "${MOUNT_POINT}" &
@@ -202,51 +195,6 @@ function change_driver() {
   fi
 }
 
-# ===== FIO runners =====
-# section 반복 전, 해당 section의 최대 numjobs를 실행하여 파일을 생성 (프리필)
-# - read/randread의 경우에도 실제 파일 생성이 필요하므로 --rw=write로 오버라이드
-function prefill_for_section() {
-  local fs=$1
-  local section=$2
-  local max_nj="${NUM_JOBS[$((${#NUM_JOBS[@]} - 1))]}" # 마지막 요소 = 최대 numjobs
-  local outdir=$3
-
-  echo "[${fs}] Prefill for section=${section} (numjobs=${max_nj})"
-
-  drop_all_caches
-
-  # 프리필은 빠르게 끝내기 위해 큰 bs 사용(128k), rw=write로 강제
-  fio "${FIO_BASE}" \
-    --directory="${MOUNT_POINT}" \
-    --section="${section}" \
-    --rw=write \
-    --bs=1M \
-    --numjobs="${max_nj}" \
-    --eta=never \
-    --output="/dev/null"
-}
-
-# 실험 1회 실행 (로그 파일명은 [section]_[bs]_[numjobs].log 로 저장)
-function run_one_fio() {
-  local section=$1
-  local bs=$2
-  local nj=$3
-  local outdir=$4
-
-  drop_all_caches
-
-  local outfile="${outdir}/${section}_${bs}_${nj}.log"
-  echo "Run: section=${section}, bs=${bs}, numjobs=${nj} -> ${outfile}"
-
-  fio "${FIO_BASE}" \
-    --directory="${MOUNT_POINT}" \
-    --section="${section}" \
-    --bs="${bs}" \
-    --numjobs="${nj}" \
-    --eta=never \
-    --output="${outfile}"
-}
-
 # ===== Main =====
 mkdir -p "${RESULT_DIR}"
 
@@ -254,26 +202,22 @@ mkdir -p "${RESULT_DIR}"
 for fs in "${FS_TYPE[@]}"; do
   echo "==== FS: ${fs} ===="
   change_driver "${fs}"
-  init_mount_point "${fs}" "${DEVICE_NAME[0]}"
 
   # FS 별 결과 디렉토리
   fs_outdir="${RESULT_DIR}/${fs}"
   mkdir -p "${fs_outdir}"
 
-  for section in "${SECTIONS[@]}"; do
-    echo "== Section: ${section} =="
+  init_mount_point "${fs}" "${DEVICE_NAME[0]}"
+  filebench -f workloads/fileserver.f | tee ${fs_outdir}/fileserver.log
 
-    # 1.5 섹션 반복 전 프리필(최대 numjobs로 파일 생성)
-    prefill_for_section "${fs}" "${section}" "${fs_outdir}"
+  init_mount_point "${fs}" "${DEVICE_NAME[0]}"
+  filebench -f workloads/webserver.f | tee ${fs_outdir}/webserver.log
 
-    # 1.4 섹션 반복 안에서 (bs → numjobs) 순서
-    for bs in "${BS_LIST[@]}"; do
-      for nj in "${NUM_JOBS[@]}"; do
-        run_one_fio "${section}" "${bs}" "${nj}" "${fs_outdir}"
-      done
-    done
-  done
+  set +euo pipefail
+  sudo umount ${MOUNT_POINT}
 
+  sudo umount ${MOUNT_BASE}
+  set -euo pipefail
   echo "==== FS done: ${fs} ===="
 done
 

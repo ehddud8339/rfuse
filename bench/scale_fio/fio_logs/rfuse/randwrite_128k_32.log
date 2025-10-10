@@ -34,3 +34,9 @@ randwrite: (groupid=0, jobs=32): err= 0: pid=310827: Fri Oct 10 00:39:21 2025
 Run status group 0 (all jobs):
   WRITE: bw=668MiB/s (701MB/s), 668MiB/s-668MiB/s (701MB/s-701MB/s), io=31.0GiB (33.3GB), run=47499-47499msec
 fio: file hash not empty on exit
+randwrite: (g=0): rw=randwrite, bs=(R) 128KiB-128KiB, (W) 128KiB-128KiB, (T) 128KiB-128KiB, ioengine=psync, iodepth=1
+...
+fio-3.16
+Starting 32 processes
+
+fio: terminating on signal 15

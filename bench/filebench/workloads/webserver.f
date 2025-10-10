@@ -2,7 +2,7 @@ set mode quit alldone
 set $dir=/mnt/test
 set $nfiles=1250000
 set $meandirwidth=20
-set $nthreads=100
+set $nthreads=24
 set $size1=16k
 
 define fileset name=bigfileset, path=$dir, size=$size1, entries=$nfiles, dirwidth=$meandirwidth, prealloc=100
