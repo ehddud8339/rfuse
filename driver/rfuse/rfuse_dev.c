@@ -37,7 +37,6 @@ atomic_t rr_credit = ATOMIC_INIT(0);
 static inline int weight_for(int id) {
   return (id >= 0 && id <= 15) ? 2 : 1;
 }
-
 /* -1: (App) user syscall start 
    0: request opcode (exception, not timestamps) 
    1: enqueue complet, wait start
@@ -299,19 +298,19 @@ void *rfuse_validate_mmap_request(struct fuse_dev *fud, loff_t pgoff, size_t siz
 }
 
 /************ 2. Ring buffer ************/
-
 static int select_round_robin(struct fuse_conn *fc){
 	int id, ret;
 
 	spin_lock(&fc->lock);
   // 원본 RFUSE
+  /*
   if(atomic_read(&rr_id) == RFUSE_NUM_IQUEUE) 
 		atomic_set(&rr_id, 0);
 
 	ret = atomic_read(&rr_id);
 	atomic_add(1, &rr_id);
-
-  /*
+  */ 
+  
   id = atomic_read(&rr_id);
 
   if (id >= RFUSE_NUM_IQUEUE) {
@@ -332,7 +331,23 @@ static int select_round_robin(struct fuse_conn *fc){
     atomic_set(&rr_id, next);
     atomic_set(&rr_credit, weight_for(next));
   }
-  */
+  
+	spin_unlock(&fc->lock);
+
+	return ret;
+}
+static int select_round_robin(struct fuse_conn *fc){
+	int ret;
+
+	spin_lock(&fc->lock);
+
+	if(atomic_read(&rr_id) == RFUSE_NUM_IQUEUE) 
+		atomic_set(&rr_id, 0);
+
+	ret = atomic_read(&rr_id);
+	atomic_add(1, &rr_id);
+
+
 	spin_unlock(&fc->lock);
 
 	return ret;
@@ -348,7 +363,7 @@ static int select_cpu_id(void){
 	int ret = task_cpu(current);
   //pr_info("ret=%d\n", ret);
   //return (ret % RFUSE_NUM_IQUEUE);
-  return ret;
+  return (ret % 12);
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc){
