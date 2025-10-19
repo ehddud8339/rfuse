@@ -3,8 +3,8 @@
 set -euo pipefail
 
 # ===== User Config =====
-FS_TYPE=("ext4" "fuse" "rfuse" "rfuse_busy")
-#FS_TYPE=("rfuse")
+#FS_TYPE=("ext4" "fuse" "rfuse" "rfuse_busy")
+FS_TYPE=("ext4")
 FS_PATH="../../filesystems/stackfs"
 DEVICE_NAME=("/dev/nvme1n1")
 
@@ -120,7 +120,7 @@ function init_mount_point() {
   fi
 
   echo "Waiting Initialization..."
-  sleep 60
+  sleep 30
 }
 
 function remount_point() {
@@ -283,7 +283,6 @@ function run_one_fio() {
     --section="${section}" \
     --bs="${bs}" \
     --numjobs="${nj}" \
-    --eta=never \
     --output="${outfile}"
 }
 

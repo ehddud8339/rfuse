@@ -336,22 +336,6 @@ static int select_round_robin(struct fuse_conn *fc){
 
 	return ret;
 }
-static int select_round_robin(struct fuse_conn *fc){
-	int ret;
-
-	spin_lock(&fc->lock);
-
-	if(atomic_read(&rr_id) == RFUSE_NUM_IQUEUE) 
-		atomic_set(&rr_id, 0);
-
-	ret = atomic_read(&rr_id);
-	atomic_add(1, &rr_id);
-
-
-	spin_unlock(&fc->lock);
-
-	return ret;
-}
 
 static int select_thread_id(void){
 	int ret = current->pid;
