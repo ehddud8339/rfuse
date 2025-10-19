@@ -15,12 +15,14 @@ directory=/mnt/test/
 
 [read]
 rw=read
+invalidate=0
 
 [write]
 rw=write
 
 [randread]
 rw=randread
+invalidate=0
 
 [randwrite]
 rw=randwrite

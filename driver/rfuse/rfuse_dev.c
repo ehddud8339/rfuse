@@ -20,6 +20,8 @@
 #include <linux/time.h>
 #include <linux/timekeeping.h>
 
+#include <linux/smp.h>
+
 #define RFUSE_INT_REQ_BIT (1ULL << 0)
 #define RFUSE_REQ_ID_STEP (1ULL << 1)
 /*
@@ -30,6 +32,11 @@
 
 #define RFUSE_SELECTION_ALGO 2
 atomic_t rr_id = ATOMIC_INIT(0);
+atomic_t rr_credit = ATOMIC_INIT(0);
+
+static inline int weight_for(int id) {
+  return (id >= 0 && id <= 15) ? 2 : 1;
+}
 
 /* -1: (App) user syscall start 
    0: request opcode (exception, not timestamps) 
@@ -294,15 +301,38 @@ void *rfuse_validate_mmap_request(struct fuse_dev *fud, loff_t pgoff, size_t siz
 /************ 2. Ring buffer ************/
 
 static int select_round_robin(struct fuse_conn *fc){
-	int ret;
+	int id, ret;
 
 	spin_lock(&fc->lock);
-
-	if(atomic_read(&rr_id) == RFUSE_NUM_IQUEUE) 
+  // 원본 RFUSE
+  if(atomic_read(&rr_id) == RFUSE_NUM_IQUEUE) 
 		atomic_set(&rr_id, 0);
 
 	ret = atomic_read(&rr_id);
 	atomic_add(1, &rr_id);
+
+  /*
+  id = atomic_read(&rr_id);
+
+  if (id >= RFUSE_NUM_IQUEUE) {
+    id = 0;
+    atomic_set(&rr_id, 0);
+    atomic_set(&rr_credit, 0);
+  }
+
+  if (atomic_read(&rr_credit) <= 0)
+    atomic_set(&rr_credit, weight_for(id));
+
+  ret = id;
+
+  if (atomic_dec_and_test(&rr_credit)) {
+    int next = id + 1;
+    if (next >= RFUSE_NUM_IQUEUE)
+      next = 0;
+    atomic_set(&rr_id, next);
+    atomic_set(&rr_credit, weight_for(next));
+  }
+  */
 	spin_unlock(&fc->lock);
 
 	return ret;
@@ -316,14 +346,15 @@ static int select_thread_id(void){
 
 static int select_cpu_id(void){
 	int ret = task_cpu(current);
-	
-	return (ret % RFUSE_NUM_IQUEUE);
+  //pr_info("ret=%d\n", ret);
+  //return (ret % RFUSE_NUM_IQUEUE);
+  return ret;
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc){
 	int id = 0;
-
-	id = select_round_robin(fc);
+	//id = select_round_robin(fc);
+  id = select_cpu_id();
 
 	return fc->riq[id];
 }
@@ -437,6 +468,8 @@ struct rfuse_address_entry *rfuse_read_complete_head(struct rfuse_iqueue *riq){
 	struct rfuse_address_entry *ret = NULL;
 	if(head < tail){
 		ret = &completes->kaddr[head & completes->mask];
+    //printk(KERN_INFO "rfuse: DEQ_REPLY riq=%d cpu=%d idx=%u\n",
+      //         riq->riq_id, smp_processor_id(), head & completes->mask);
 		// printk("complete head: %u\n",head & completes->mask);
 	}
 
@@ -959,7 +992,8 @@ static void rfuse_queue_request(struct rfuse_req *r_req){
 		__rfuse_get_request(r_req);
 	rfuse_submit_pending_tail(riq);				// Commit entry
 	spin_unlock(&riq->lock);					// unlock
-	
+  //printk(KERN_INFO "rfuse: ENQ riq=%d cpu=%d reqidx=%u uniq=%llu\n",
+  //         r_req->riq_id, smp_processor_id(), r_req->index, r_req->in.unique);
 	if(waitqueue_active(&riq->idle_user_waitq)){
 		wake_up(&riq->idle_user_waitq);		// Wake up idle user thread
 	}

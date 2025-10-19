@@ -10,7 +10,7 @@ DEVICE_NAME=("/dev/nvme1n1")
 MOUNT_BASE="/mnt/RFUSE_EXT4"
 MOUNT_POINT="/mnt/test"
 
-RESULT_DIR="/home/ldy/rfuse/filebench/"
+RESULT_DIR="/home/ldy/rfuse"
 
 # ===== Helpers =====
 function drop_all_caches() {
@@ -58,6 +58,8 @@ function init_mount_point() {
 
     echo "Mount fuse-stackfs..."
     pushd "${FS_PATH}" >/dev/null
+
+    cp StackFS_LowLevel.c.fuse StackFS_LowLevel.c
     make clean
     make
     ./StackFS_ll -r "${MOUNT_BASE}" "${MOUNT_POINT}" &
@@ -79,6 +81,8 @@ function init_mount_point() {
 
     echo "Mount rfuse-stackfs..."
     pushd "${FS_PATH}" >/dev/null
+
+    cp StackFS_LowLevel.c.rfuse StackFS_LowLevel.c
     make clean
     make
     ./StackFS_ll -r "${MOUNT_BASE}" "${MOUNT_POINT}" &
@@ -145,6 +149,7 @@ function remount_point() {
 
     echo "Mount rfuse-stackfs..."
     pushd "${FS_PATH}" >/dev/null
+
     cp StackFS_LowLevel.c.rfuse StackFS_LowLevel.c
     make clean
     make
@@ -197,6 +202,8 @@ function change_driver() {
 
 # ===== Main =====
 mkdir -p "${RESULT_DIR}"
+
+echo 0 | sudo tee /proc/sys/kernel/randomize_va_space
 
 # (FS) → (section → prefill → (bs → (numjobs))) → next FS   # 1.4
 for fs in "${FS_TYPE[@]}"; do

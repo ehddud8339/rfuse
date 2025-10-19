@@ -1,4 +1,4 @@
-Build started at 2025-10-10T11:50:41.695981
+Build started at 2025-10-19T19:24:56.976740
 Main binary: /usr/bin/python3
 Build Options: 
 Python system: Linux
@@ -46,8 +46,8 @@ Host machine cpu: x86_64
 Target machine cpu family: x86_64
 Target machine cpu: x86_64
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpziizw4cn
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpziizw4cn/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpziizw4cn/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp2i8h6_ke
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp2i8h6_ke/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp2i8h6_ke/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
 
 Code:
  
@@ -76,8 +76,8 @@ Compiler stderr:
  
 Checking for function "fork" : YES 
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpk5b5zpm0
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpk5b5zpm0/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpk5b5zpm0/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpdilv8ju5
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpdilv8ju5/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpdilv8ju5/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
 
 Code:
  
@@ -106,8 +106,8 @@ Compiler stderr:
  
 Checking for function "fstatat" : YES 
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp1oqnuint
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp1oqnuint/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp1oqnuint/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp_rq6cxqo
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp_rq6cxqo/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp_rq6cxqo/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
 
 Code:
  
@@ -136,8 +136,8 @@ Compiler stderr:
  
 Checking for function "openat" : YES 
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp8806ulbj
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp8806ulbj/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp8806ulbj/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpa5ovsavl
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpa5ovsavl/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpa5ovsavl/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
 
 Code:
  
@@ -166,8 +166,8 @@ Compiler stderr:
  
 Checking for function "readlinkat" : YES 
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpz5z6fgv2
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpz5z6fgv2/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpz5z6fgv2/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp841h0z17
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp841h0z17/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp841h0z17/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
 
 Code:
  
@@ -196,8 +196,8 @@ Compiler stderr:
  
 Checking for function "pipe2" : YES 
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp8r72139k
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp8r72139k/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp8r72139k/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpg3g188ij
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpg3g188ij/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpg3g188ij/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
 
 Code:
  
@@ -226,8 +226,8 @@ Compiler stderr:
  
 Checking for function "splice" : YES 
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp_l7dx5ah
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp_l7dx5ah/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp_l7dx5ah/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpuxvy72jb
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpuxvy72jb/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpuxvy72jb/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
 
 Code:
  
@@ -256,8 +256,8 @@ Compiler stderr:
  
 Checking for function "vmsplice" : YES 
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpc0brawuc
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpc0brawuc/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpc0brawuc/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmppwggk5pd
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmppwggk5pd/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmppwggk5pd/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
 
 Code:
  
@@ -286,8 +286,8 @@ Compiler stderr:
  
 Checking for function "posix_fallocate" : YES 
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp9oq2rgzu
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp9oq2rgzu/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp9oq2rgzu/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmprqg9ummk
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmprqg9ummk/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmprqg9ummk/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
 
 Code:
  
@@ -316,8 +316,8 @@ Compiler stderr:
  
 Checking for function "fdatasync" : YES 
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpp_qtym05
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpp_qtym05/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpp_qtym05/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp5fs2y5xx
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp5fs2y5xx/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp5fs2y5xx/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
 
 Code:
  
@@ -346,8 +346,8 @@ Compiler stderr:
  
 Checking for function "utimensat" : YES 
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpxuc6cf7a
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpxuc6cf7a/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpxuc6cf7a/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp0apkjwdo
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp0apkjwdo/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp0apkjwdo/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
 
 Code:
  
@@ -376,8 +376,8 @@ Compiler stderr:
  
 Checking for function "copy_file_range" : YES 
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpyqcgdkid
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpyqcgdkid/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpyqcgdkid/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpfe0ja528
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpfe0ja528/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpfe0ja528/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
 
 Code:
  
@@ -406,8 +406,8 @@ Compiler stderr:
  
 Checking for function "fallocate" : YES 
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpmihdc8d6
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpmihdc8d6/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpmihdc8d6/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp0x85kv6z
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp0x85kv6z/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp0x85kv6z/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 
 
 Code:
  #include <sys/xattr.h>
@@ -428,8 +428,8 @@ Compiler stderr:
  
 Checking for function "setxattr" : YES 
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpe4zpx7gn
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpe4zpx7gn/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpe4zpx7gn/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpgyh2w6_2
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpgyh2w6_2/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpgyh2w6_2/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 
 
 Code:
  #include <iconv.h>
@@ -450,8 +450,8 @@ Compiler stderr:
  
 Checking for function "iconv" : YES 
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp3c07q0t_
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp3c07q0t_/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp3c07q0t_/output.obj -pipe -c -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp3xf2m9qk
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp3xf2m9qk/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp3xf2m9qk/output.obj -pipe -c -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
 
 Code:
  
@@ -474,8 +474,8 @@ Compiler stderr:
  
 Checking whether type "struct stat" has member "st_atim" : YES 
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpvl0p_b2y
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpvl0p_b2y/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpvl0p_b2y/output.obj -pipe -c -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpwzptjo73
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpwzptjo73/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpwzptjo73/output.obj -pipe -c -D_FILE_OFFSET_BITS=64 -O0 -D_GNU_SOURCE 
 
 Code:
  
@@ -495,16 +495,16 @@ Code:
 Compiler stdout:
  
 Compiler stderr:
- /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpvl0p_b2y/testfile.c: In function 'bar':
-/home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpvl0p_b2y/testfile.c:12:16: error: 'struct stat' has no member named 'st_atimespec'
+ /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpwzptjo73/testfile.c: In function 'bar':
+/home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpwzptjo73/testfile.c:12:16: error: 'struct stat' has no member named 'st_atimespec'
    12 |             foo.st_atimespec;
       |                ^
 
 Checking whether type "struct stat" has member "st_atimespec" : NO 
 Configuring config.h using configuration
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpikq04rf_
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpikq04rf_/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpikq04rf_/output.obj -pipe -c -D_FILE_OFFSET_BITS=64 -O0 -O0 -Werror=unused-result 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp_ulqzjoq
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp_ulqzjoq/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp_ulqzjoq/output.obj -pipe -c -D_FILE_OFFSET_BITS=64 -O0 -O0 -Werror=unused-result 
 
 Code:
  
@@ -518,16 +518,16 @@ int main(void) {
 Compiler stdout:
  
 Compiler stderr:
- /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpikq04rf_/testfile.c: In function 'main':
-/home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpikq04rf_/testfile.c:6:12: error: ignoring return value of 'get_4', declared with attribute warn_unused_result [-Werror=unused-result]
+ /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp_ulqzjoq/testfile.c: In function 'main':
+/home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp_ulqzjoq/testfile.c:6:12: error: ignoring return value of 'get_4', declared with attribute warn_unused_result [-Werror=unused-result]
     6 |     (void) get_4();
       |            ^~~~~~~
 cc1: some warnings being treated as errors
 
 Message: Compiler warns about unused result even when casting to void
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpd4cnru0o
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpd4cnru0o/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpd4cnru0o/output.obj -pipe -c -D_FILE_OFFSET_BITS=64 -O0 -O0 -Werror 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpu9x38ghz
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpu9x38ghz/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpu9x38ghz/output.obj -pipe -c -D_FILE_OFFSET_BITS=64 -O0 -O0 -Werror 
 
 Code:
  
@@ -541,7 +541,7 @@ int main(void) {
 Compiler stdout:
  
 Compiler stderr:
- /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpd4cnru0o/testfile.c:3:1: error: 'symver' attribute directive ignored [-Werror=attributes]
+ /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpu9x38ghz/testfile.c:3:1: error: 'symver' attribute directive ignored [-Werror=attributes]
     3 | void foo(void) {
       | ^~~~
 cc1: all warnings being treated as errors
@@ -549,8 +549,8 @@ cc1: all warnings being treated as errors
 Message: Compiler does not support symver attribute
 Run-time dependency threads found: YES
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpzscyghqx
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpzscyghqx/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpzscyghqx/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -Wl,--start-group -liconv -Wl,--end-group -Wl,--allow-shlib-undefined 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp8x0kzccr
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp8x0kzccr/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp8x0kzccr/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -Wl,--start-group -liconv -Wl,--end-group -Wl,--allow-shlib-undefined 
 
 Code:
  int main(void) { return 0; }
@@ -561,8 +561,8 @@ Compiler stderr:
 collect2: error: ld returned 1 exit status
 
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp90wp9l1u
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp90wp9l1u/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp90wp9l1u/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp_ujsza6t
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp_ujsza6t/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp_ujsza6t/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 
 
 Code:
  #include<stdio.h>
@@ -583,8 +583,8 @@ Program stderr:
 
 
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp8rp71xem
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp8rp71xem/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp8rp71xem/output.obj -pipe -c -D_FILE_OFFSET_BITS=64 -O0 --print-search-dirs 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp3ga8j84h
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp3ga8j84h/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp3ga8j84h/output.obj -pipe -c -D_FILE_OFFSET_BITS=64 -O0 --print-search-dirs 
 
 Code:
  
@@ -597,8 +597,8 @@ Compiler stderr:
  
 Library iconv found: NO
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpvyb1f7l3
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpvyb1f7l3/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpvyb1f7l3/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -Wl,--start-group -ldl -Wl,--end-group -Wl,--allow-shlib-undefined 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpie9y6zu4
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpie9y6zu4/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpie9y6zu4/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -Wl,--start-group -ldl -Wl,--end-group -Wl,--allow-shlib-undefined 
 
 Code:
  int main(void) { return 0; }
@@ -608,8 +608,8 @@ Compiler stderr:
  
 Library dl found: YES
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpyt5_6rcy
-Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpyt5_6rcy/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpyt5_6rcy/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -Wl,--start-group -lrt -Wl,--end-group -Wl,--allow-shlib-undefined 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpgmacst6m
+Command line:  cc /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpgmacst6m/testfile.c -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpgmacst6m/output.exe -pipe -D_FILE_OFFSET_BITS=64 -O0 -Wl,--start-group -lrt -Wl,--end-group -Wl,--allow-shlib-undefined 
 
 Code:
  int main(void) { return 0; }
@@ -677,8 +677,8 @@ Build targets in project: 27
 
 Found ninja-1.10.0 at /usr/bin/ninja
 Running compile:
-Working directory:  /tmp/tmp42ww_i8p
-Command line:  c++ /tmp/tmp42ww_i8p/testfile.cpp -o /tmp/tmp42ww_i8p/output.obj -pipe -D_FILE_OFFSET_BITS=64 -c -std=c++11 
+Working directory:  /tmp/tmp24oo4jz7
+Command line:  c++ /tmp/tmp24oo4jz7/testfile.cpp -o /tmp/tmp24oo4jz7/output.obj -pipe -D_FILE_OFFSET_BITS=64 -c -std=c++11 
 
 Code:
  int i = static_cast<int>(0);
@@ -688,8 +688,8 @@ Compiler stderr:
  
 Compiler accepts -std=c++11: YES
 Running compile:
-Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpbb29gids
-Command line:  c++ /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpbb29gids/testfile.cpp -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmpbb29gids/output.obj -pipe -c -D_FILE_OFFSET_BITS=64 -O0 -fpermissive --print-search-dirs 
+Working directory:  /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp_au683am
+Command line:  c++ /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp_au683am/testfile.cpp -o /home/ldy/src/rfuse/lib/libfuse/build/meson-private/tmp_au683am/output.obj -pipe -c -D_FILE_OFFSET_BITS=64 -O0 -fpermissive --print-search-dirs 
 
 Code:
  

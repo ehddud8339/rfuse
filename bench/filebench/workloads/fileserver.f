@@ -1,8 +1,8 @@
 set mode quit alldone
 set $dir=/mnt/test
-set $nfiles=200000
-set $meandirwidth=20
-set $nthreads=16
+set $nfiles=100000
+set $meandirwidth=10
+set $nthreads=8
 set $size1=128k
 
 define fileset name=bigfileset, path=$dir, size=$size1, entries=$nfiles, dirwidth=$meandirwidth, prealloc=80
@@ -22,7 +22,7 @@ define process name=fileserver,instances=1
                 flowop closefile name=closefile3,fd=1
                 flowop deletefile name=deletefile1,filesetname=bigfileset
                 flowop statfile name=statfile1,filesetname=bigfileset
-                flowop finishoncount name=finish, value=10000000
+                flowop finishoncount name=finish, value=1000000
                 #So all the above operations will happen together for 3 M (SSD) times 
         }
 }

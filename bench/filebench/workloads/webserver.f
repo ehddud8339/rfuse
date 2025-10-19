@@ -1,8 +1,8 @@
 set mode quit alldone
 set $dir=/mnt/test
-set $nfiles=1250000
-set $meandirwidth=20
-set $nthreads=24
+set $nfiles=900000
+set $meandirwidth=10
+set $nthreads=16
 set $size1=16k
 
 define fileset name=bigfileset, path=$dir, size=$size1, entries=$nfiles, dirwidth=$meandirwidth, prealloc=100
@@ -43,7 +43,7 @@ define process name=webserver,instances=1
                 flowop readwholefile name=readfile10,fd=1,iosize=1m
                 flowop closefile name=closefile10,fd=1
                 flowop appendfilerand name=appendlog,filesetname=logfiles,iosize=16k,fd=2
-                flowop finishoncount name=finish, value=8000000
+                flowop finishoncount name=finish, value=800000
                 #so that all the above operations will together complete 8 M(SSD) ops 
         }
 }

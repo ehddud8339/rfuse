@@ -16,7 +16,7 @@ if [ "$1" == "ssd" ]; then
   sudo sync
   sudo echo 3 >/proc/sys/vm/drop_caches
 
-  taskset -c 0-9 ./StackFS_ll -r ${MOUNT_BASE} ${MOUNT_POINT}
+  ./StackFS_ll -r ${MOUNT_BASE} ${MOUNT_POINT}
 elif [ "$1" == "ssd-noclean" ]; then
   ./StackFS_ll -r ${MOUNT_BASE} ${MOUNT_POINT}
 else
