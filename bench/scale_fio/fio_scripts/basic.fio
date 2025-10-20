@@ -8,10 +8,11 @@ group_reporting=1
 end_fsync=1
 
 directory=/mnt/test/
+filename_format=fio_$jobnum
 
 #time_based=1
 #runtime=60
-#ramp_time=5
+#ramp_time=10
 
 [read]
 rw=read

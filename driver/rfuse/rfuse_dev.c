@@ -30,12 +30,12 @@
    2: Application CPU ID
  */
 
-#define RFUSE_SELECTION_ALGO 2
+#define RFUSE_SELECTION_ALGO 0
 atomic_t rr_id = ATOMIC_INIT(0);
 atomic_t rr_credit = ATOMIC_INIT(0);
 
 static inline int weight_for(int id) {
-  return (id >= 0 && id <= 15) ? 2 : 1;
+  return (id >= 16 && id <= 23) ? 5 : 1;
 }
 /* -1: (App) user syscall start 
    0: request opcode (exception, not timestamps) 
@@ -346,14 +346,14 @@ static int select_thread_id(void){
 static int select_cpu_id(void){
 	int ret = task_cpu(current);
   //pr_info("ret=%d\n", ret);
-  //return (ret % RFUSE_NUM_IQUEUE);
-  return (ret % 12);
+  return (ret % RFUSE_NUM_IQUEUE);
+  //return (ret % 12);
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc){
 	int id = 0;
-	//id = select_round_robin(fc);
-  id = select_cpu_id();
+	id = select_round_robin(fc);
+  //id = select_cpu_id();
 
 	return fc->riq[id];
 }
