@@ -4,7 +4,7 @@ set -euo pipefail
 
 # ===== User Config =====
 #FS_TYPE=("ext4" "fuse" "rfuse")
-FS_TYPE=("rfuse_Ecore")
+FS_TYPE=("rfuse")
 FS_PATH="../../filesystems/stackfs"
 DEVICE_NAME=("/dev/nvme1n1")
 

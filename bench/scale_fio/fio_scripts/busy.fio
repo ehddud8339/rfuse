@@ -1,6 +1,7 @@
 [global]
 ioengine=psync
 size=1G
+bs=16k
 direct=0
 iodepth=1
 norandommap
@@ -10,7 +11,7 @@ end_fsync=1
 directory=/mnt/test/
 
 time_based=1
-runtime=600
+runtime=6000
 #ramp_time=5
 
 [read]

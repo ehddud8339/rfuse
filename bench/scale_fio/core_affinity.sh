@@ -3,45 +3,32 @@
 set -euo pipefail
 
 # ===== User Config =====
-FS_TYPE=("ext4" "fuse" "rfuse")
-#FS_TYPE=("rfuse")
+#FS_TYPE=("ext4" "fuse" "rfuse")
+FS_TYPE=("rfuse_busy_5")
 FS_PATH="../../filesystems/stackfs"
 DEVICE_NAME=("/dev/nvme1n1")
 
 MOUNT_BASE="/mnt/RFUSE_EXT4"
 MOUNT_POINT="/mnt/test"
 
-SECTIONS=("read" "write" "randread" "randwrite")
-BS_LIST=("4k" "128k")
-NUM_JOBS=("1" "2" "3" "4")
-BUSY_SET=("0" "2" "4" "6")
-IDLE_SET=("8" "10" "12" "14")
-FIO_BUSY_BASE="fio_scripts/busy.fio"
-FIO_IDLE_BASE="fio_scripts/idle.fio"
+SECTIONS=("read" "randread" "write" "randwrite") # 1.1
+BS_LIST=("4k" "128k")                            # 1.2
+NUM_JOBS=("1" "2" "4" "8" "16" "32")             # 1.3
+FIO_BASE="fio_scripts/basic.fio"
 RESULT_DIR="/home/ldy/src/ldy/rfuse"
 
 # ===== Helpers =====
 function drop_all_caches() {
   sudo sh -c 'sync'
   sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
-  sleep 2
+  sleep 3
 }
 
-# === [추가] 배열 앞 n개를 콤마로 이어 반환: join_first_n BUSY_SET 3 -> "0,2,4"
-join_first_n() {
-  local -n _arr="$1"
-  local _n="$2"
-  local _len="${#_arr[@]}"
-  local _use=$_n
-  if ((_n > _len)); then
-    echo "[WARN] requested numjobs=${_n} > CPU list size=${_len}. using all CPUs in ${1}." >&2
-    _use=$_len
-  fi
-  local _out=""
-  for ((i = 0; i < _use; i++)); do
-    if [[ -z "${_out}" ]]; then _out="${_arr[i]}"; else _out+=",${_arr[i]}"; fi
-  done
-  echo "${_out}"
+function kill_stackfs_if_running() {
+  set +e
+  pkill -f "StackFS_ll" 2>/dev/null
+  sleep 1
+  set -e
 }
 
 # ===== Mount helpers (from your base) =====
@@ -84,7 +71,7 @@ function init_mount_point() {
     popd >/dev/null
     sudo sync
 
-  elif [ "${fs}" == "rfuse" ]; then
+  else
     set +e
     echo "Unmount rfuse-stackfs..."
     sudo umount "${MOUNT_POINT}" 2>/dev/null
@@ -105,14 +92,10 @@ function init_mount_point() {
     ./StackFS_ll -r "${MOUNT_BASE}" "${MOUNT_POINT}" &
     popd >/dev/null
     sudo sync
-
-  else
-    echo "Wrong file system type: ( ext4 | fuse | rfuse )"
-    exit 1
   fi
 
   echo "Waiting Initialization..."
-  sleep 60
+  sleep 15
 }
 
 function remount_point() {
@@ -152,7 +135,7 @@ function remount_point() {
     popd >/dev/null
     sudo sync
 
-  elif [ "${fs}" == "rfuse" ]; then
+  else
     set +e
     echo "Unmount rfuse-stackfs..."
     sudo umount "${MOUNT_POINT}" 2>/dev/null
@@ -173,9 +156,6 @@ function remount_point() {
     popd >/dev/null
     sudo sync
 
-  else
-    echo "Wront file system type: ( ext4 | fuse | rfuse )"
-    exit 1
   fi
 
   echo "Waiting Initialization..."
@@ -207,51 +187,82 @@ function change_driver() {
     popd >/dev/null
 
     pushd "../../driver/rfuse" >/dev/null
+    cp /home/ldy/src/rfuse/driver/copy/rfuse_dev_basic.c /home/ldy/src/rfuse/driver/rfuse/rfuse_dev.c
+    make clean
+    make
+    ./rfuse_insmod.sh
+    popd >/dev/null
+
+  elif [ "${fs}" == "rfuse_rr" ]; then
+    echo "Change to rfuse driver"
+    pushd "../../lib/librfuse" >/dev/null
+    ./librfuse_install.sh
+    popd >/dev/null
+
+    pushd "../../driver/rfuse" >/dev/null
+    cp /home/ldy/src/rfuse/driver/copy/rfuse_dev_rr.c /home/ldy/src/rfuse/driver/rfuse/rfuse_dev.c
+    make clean
+    make
+    ./rfuse_insmod.sh
+    popd >/dev/null
+
+  elif [ "${fs}" == "rfuse_thr" ]; then
+    echo "Change to rfuse driver"
+    pushd "../../lib/librfuse" >/dev/null
+    ./librfuse_install.sh
+    popd >/dev/null
+
+    pushd "../../driver/rfuse" >/dev/null
+    cp /home/ldy/src/rfuse/driver/copy/rfuse_dev_thr.c /home/ldy/src/rfuse/driver/rfuse/rfuse_dev.c
+    make clean
+    make
+    ./rfuse_insmod.sh
+    popd >/dev/null
+  elif [ "${fs}" == "rfuse_busy" ]; then
+    echo "Change to rfuse driver"
+    pushd "../../lib/librfuse" >/dev/null
+    ./librfuse_install.sh
+    popd >/dev/null
+
+    pushd "../../driver/rfuse" >/dev/null
+    cp /home/ldy/src/rfuse/driver/copy/rfuse_dev_busy.c /home/ldy/src/rfuse/driver/rfuse/rfuse_dev.c
+    make clean
+    make
+    ./rfuse_insmod.sh
+    popd >/dev/null
+  elif [ "${fs}" == "rfuse_Ecore" ]; then
+    echo "Change to rfuse driver"
+    pushd "../../lib/librfuse" >/dev/null
+    ./librfuse_install.sh
+    popd >/dev/null
+
+    pushd "../../driver/rfuse" >/dev/null
+    cp /home/ldy/src/rfuse/driver/copy/rfuse_dev_Ecore.c /home/ldy/src/rfuse/driver/rfuse/rfuse_dev.c
+    make clean
+    make
     ./rfuse_insmod.sh
     popd >/dev/null
 
   else
-    echo "Wront file system type: ( ext4 | fuse | rfuse )"
+    echo "Wront file system type: ( ext4 | fuse | rfuse | rfuse_busy )"
     exit 1
   fi
 }
 
 # ===== FIO runners =====
-# 특정 CPU 코어에 부하를 높이기 위한 백그라운드 FIO
-function bg_load_on_cpus() {
-  echo "[BG] Run on CPUs[${BUSY_SET}]"
-
-  fio "${FIO_BUSY_BASE}" \
-    --directory="${MOUNT_POINT}" \
-    --section="randrw" \
-    --bs=4k --size=4G --numjobs=4 \
-    --cpus_allowed="0,2,4,6" --cpus_allowed_policy=split \
-    --output=/dev/null &
-  BG_PID=$!
-  echo "[BG] running... (pid=${BG_PID}"
-  sleep 3
-  # --cpus_allowed="$(IFS=, echo "${BUSY_SET[*]}")"
-}
-
 # section 반복 전, 해당 section의 최대 numjobs를 실행하여 파일을 생성 (프리필)
 # - read/randread의 경우에도 실제 파일 생성이 필요하므로 --rw=write로 오버라이드
 function prefill_for_section() {
-  local fs=$1
-  local section=$2
-  local max_nj="${NUM_JOBS[$((${#NUM_JOBS[@]} - 1))]}" # 마지막 요소 = 최대 numjobs
-  local outdir=$3
-
-  echo "[${fs}] Prefill for section=${section} (numjobs=${max_nj})"
+  echo "[BG] Prefill (numjobs=32)"
 
   drop_all_caches
 
   # 프리필은 빠르게 끝내기 위해 큰 bs 사용(128k), rw=write로 강제
-  fio "${FIO_IDLE_BASE}" \
+  fio "${FIO_BASE}" \
     --directory="${MOUNT_POINT}" \
-    --section="${section}" \
-    --rw=write \
+    --section="write" \
     --bs=1M \
-    --numjobs="${max_nj}" \
+    --numjobs=32 \
     --eta=never \
     --output="/dev/null"
 }
@@ -261,21 +272,18 @@ function run_one_fio() {
   local section=$1
   local bs=$2
   local nj=$3
-  local cpus=$4
-  local outdir=$5
+  local outdir=$4
+
+  local outfile="${outdir}/${section}_${bs}_${nj}.log"
+  echo "Run: section=${section}, bs=${bs}, numjobs=${nj} -> ${outfile}"
 
   drop_all_caches
 
-  local outfile="${outdir}/${cpus}_${section}_${bs}_${nj}.log"
-  echo "Run: section=${section}, bs=${bs}, numjobs=${nj} -> ${outfile}"
-
-  fio "${FIO_IDLE_BASE}" \
+  fio "${FIO_BASE}" \
     --directory="${MOUNT_POINT}" \
     --section="${section}" \
     --bs="${bs}" \
     --numjobs="${nj}" \
-    --cpus_allowed=${cpus} --cpus_allowed_policy=split \
-    --eta=never \
     --output="${outfile}"
 }
 
@@ -285,39 +293,32 @@ mkdir -p "${RESULT_DIR}"
 # (FS) → (section → prefill → (bs → (numjobs))) → next FS   # 1.4
 for fs in "${FS_TYPE[@]}"; do
   echo "==== FS: ${fs} ===="
-  change_driver "${fs}"
-  init_mount_point "${fs}" "${DEVICE_NAME[0]}"
+  #change_driver "${fs}"
+  #init_mount_point "${fs}" "${DEVICE_NAME[0]}"
 
   # FS 별 결과 디렉토리
   fs_outdir="${RESULT_DIR}/${fs}"
   mkdir -p "${fs_outdir}"
 
-  bg_load_on_cpus
+  #prefill_for_section
+
+  drop_all_caches
 
   for section in "${SECTIONS[@]}"; do
     echo "== Section: ${section} =="
 
     # 1.5 섹션 반복 전 프리필(최대 numjobs로 파일 생성)
-    prefill_for_section "${fs}" "${section}" "${fs_outdir}"
+    # prefill_for_section "${fs}" "${section}" "${fs_outdir}"
 
     # 1.4 섹션 반복 안에서 (bs → numjobs) 순서
-    # numjobs에 따라서 BUSY_SET, IDLE_SET을 넘겨줘는 로직이 필요함
     for bs in "${BS_LIST[@]}"; do
       for nj in "${NUM_JOBS[@]}"; do
-        busy_cpus="$(join_first_n BUSY_SET "${nj}")"
-        idle_cpus="$(join_first_n IDLE_SET "${nj}")"
-
-        run_one_fio "${section}" "${bs}" "${nj}" "${busy_cpus}" "${fs_outdir}"
-
-        run_one_fio "${section}" "${bs}" "${nj}" "${idle_cpus}" "${fs_outdir}"
+        run_one_fio "${section}" "${bs}" "${nj}" "${fs_outdir}"
       done
     done
   done
 
   echo "==== FS done: ${fs} ===="
-  echo "[BG] stopping background load (pid=${BG_PID}"
-  kill ${BG_PID} >/dev/null 2>&1 || true
-  wait ${BG_PID} 2>/dev/null || true
 done
 
 echo "All experiments completed. Results in: ${RESULT_DIR}"

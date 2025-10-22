@@ -1,8 +1,8 @@
 [global]
-ioengine=libaio
-size=128M
+ioengine=psync
+size=256M
 direct=0
-iodepth=16
+iodepth=1
 norandommap
 group_reporting=1
 end_fsync=1
