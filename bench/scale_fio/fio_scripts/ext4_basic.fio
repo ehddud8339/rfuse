@@ -1,17 +1,17 @@
 [global]
 ioengine=psync
-size=1G
+size=128M
 direct=0
 iodepth=1
 norandommap
 group_reporting=1
 end_fsync=1
 
-directory=/mnt/test
-filename_format=fio_$jobnum
+directory=/mnt/ext4_test
+filename_format=ext4_$jobnum
 
-time_based=1
-runtime=30
+#time_based=1
+#runtime=60
 #ramp_time=10
 
 [read]

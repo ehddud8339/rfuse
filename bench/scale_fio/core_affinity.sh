@@ -4,9 +4,11 @@ set -euo pipefail
 
 # ===== User Config =====
 #FS_TYPE=("ext4" "fuse" "rfuse")
-FS_TYPE=("rfuse_busy_5")
+FS_TYPE=("rfuse_bg40_core5")
 FS_PATH="../../filesystems/stackfs"
 DEVICE_NAME=("/dev/nvme1n1")
+
+CPUS="4"
 
 MOUNT_BASE="/mnt/RFUSE_EXT4"
 MOUNT_POINT="/mnt/test"
@@ -15,7 +17,7 @@ SECTIONS=("read" "randread" "write" "randwrite") # 1.1
 BS_LIST=("4k" "128k")                            # 1.2
 NUM_JOBS=("1" "2" "4" "8" "16" "32")             # 1.3
 FIO_BASE="fio_scripts/basic.fio"
-RESULT_DIR="/home/ldy/src/ldy/rfuse"
+RESULT_DIR="/home/ldy/src/ldy/rfuse/log_files"
 
 # ===== Helpers =====
 function drop_all_caches() {
@@ -276,7 +278,6 @@ function run_one_fio() {
 
   local outfile="${outdir}/${section}_${bs}_${nj}.log"
   echo "Run: section=${section}, bs=${bs}, numjobs=${nj} -> ${outfile}"
-
   drop_all_caches
 
   fio "${FIO_BASE}" \
@@ -284,6 +285,7 @@ function run_one_fio() {
     --section="${section}" \
     --bs="${bs}" \
     --numjobs="${nj}" \
+    --cpus_allowed=0-${CPUS} --cpus_allowed_policy=shared \
     --output="${outfile}"
 }
 
