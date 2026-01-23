@@ -889,7 +889,7 @@ static void stackfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size,
 	int res;
 	(void) ino;
 
-	StackFS_trace("StackFS Read start on inode : %llu", get_lower_fuse_inode_no(req, ino));
+	//StackFS_trace("StackFS Read start on inode : %llu", get_lower_fuse_inode_no(req, ino));
 	if (USE_SPLICE) {
 		struct fuse_bufvec buf = FUSE_BUFVEC_INIT(size);
 
@@ -912,7 +912,7 @@ static void stackfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size,
 		res = fuse_reply_buf(req, buf, res);
 		free(buf);
 	}
-	StackFS_trace("StackFS Read end on inode : %llu", get_lower_fuse_inode_no(req, ino));
+	//StackFS_trace("StackFS Read end on inode : %llu", get_lower_fuse_inode_no(req, ino));
 }
 
 
