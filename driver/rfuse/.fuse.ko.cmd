@@ -1,0 +1,1 @@
+cmd_/home/ldy/src/rfuse/driver/rfuse/fuse.ko := ld -r  -m elf_x86_64  --build-id=sha1  -T scripts/module.lds -o /home/ldy/src/rfuse/driver/rfuse/fuse.ko /home/ldy/src/rfuse/driver/rfuse/fuse.o /home/ldy/src/rfuse/driver/rfuse/fuse.mod.o;  true
