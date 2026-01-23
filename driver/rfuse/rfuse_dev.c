@@ -518,7 +518,7 @@ void rfuse_put_argument_buffer(struct fuse_mount *fm, uint32_t arg_index, int ri
 	__clear_bit(arg_index,riq->argbm.bitmap);
 	
 	if(riq->argbm.full == 1){
-		riq->reqbm.full = 0;
+		riq->argbm.full = 0;
 		wake_up(&riq->waitq);
 	}
 	spin_unlock(&riq->lock);
