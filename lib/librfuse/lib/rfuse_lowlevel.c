@@ -397,12 +397,28 @@ int fuse_reply_buf(fuse_req_t u_req, const char *buf, size_t size){
 	// Write to the kernel buffer
 	struct fuse_chan *ch = u_req->ch;
 	struct fuse_session *se = u_req->se;
+	struct rfuse_iqueue *riq = u_req->riq;
+	struct rfuse_req *r_req = &riq->ureq[u_req->index];
+	struct fuse_read_in *inarg = (struct fuse_read_in *)&r_req->args;
 	int req_index = u_req->index;
 	int riq_id = u_req->riq->riq_id;
 	long long int pp_req_index = ((long long int)req_index << 32) & RFUSE_REQ_IDX_MASK;
 	int pp_riq_id = (riq_id << 16) & RFUSE_RIQ_ID_MASK;
 
-	ssize_t res = pwrite(ch ? ch->fd : se->fd, buf, size, (long long int)pp_riq_id | pp_req_index);
+	if ((inarg->read_flags & RFUSE_USE_SLOT) && riq->payload_pool_uaddr &&
+	    r_req->slot_index != RFUSE_SLOT_INVALID &&
+	    size <= RFUSE_PAYLOAD_SLOT_SIZE) {
+		// LDY - ~~slot에 read 데이터를 복사한 뒤 완료만 통지한다.
+		memcpy((char *)riq->payload_pool_uaddr +
+		       (r_req->slot_index * RFUSE_PAYLOAD_SLOT_SIZE),
+		       buf, size);
+		r_req->slot_len = size;
+		r_req->out.arglen = size;
+		return rfuse_send_reply_ok(u_req);
+	}
+
+	ssize_t res = pwrite(ch ? ch->fd : se->fd, buf, size,
+			     (long long int)pp_riq_id | pp_req_index);
 	int err = errno;
 	if(res == -1){
 		if(!fuse_session_exited(se) && err != ENOENT)
@@ -1098,6 +1114,7 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 	int riq_id = u_req->riq->riq_id;
 	long long int pp_req_index = ((long long int)req_index << 32) & RFUSE_REQ_IDX_MASK;
 	int pp_riq_id = (riq_id << 16) & RFUSE_RIQ_ID_MASK;
+	bool use_slot = (arg->write_flags & RFUSE_USE_SLOT) != 0;
 	
 	if(!u_req->w->fbuf.mem) {
 		u_req->w->fbuf.mem = malloc(FUSE_MAX_MAX_PAGES * getpagesize());
@@ -1109,10 +1126,21 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 	}
 
 	// 1.Call a system call to receive the data from the kernel page
-	res = pread(ch ? ch->fd : se->fd, u_req->w->fbuf.mem, u_req->w->fbuf.size, (long long int)pp_riq_id | pp_req_index);
-	if(res == -1) {
-		printf("Error : pread for write I/O failed\n");
-		fuse_reply_err(u_req, EIO);
+	if (use_slot && riq->payload_pool_uaddr &&
+	    r_req->slot_index != RFUSE_SLOT_INVALID) {
+		// LDY - ~~payload slot을 통해 write 데이터를 소비한다.
+		param = (char *)riq->payload_pool_uaddr +
+			(r_req->slot_index * RFUSE_PAYLOAD_SLOT_SIZE);
+		res = (int)r_req->slot_len;
+	} else {
+		res = pread(ch ? ch->fd : se->fd, u_req->w->fbuf.mem,
+			    u_req->w->fbuf.size,
+			    (long long int)pp_riq_id | pp_req_index);
+		if(res == -1) {
+			printf("Error : pread for write I/O failed\n");
+			fuse_reply_err(u_req, EIO);
+		}
+		param = (char *)u_req->w->fbuf.mem;
 	}
 
 	// 2. Call "u_req->se->op.write" to process write
@@ -1123,8 +1151,6 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 		fi.lock_owner = arg->lock_owner;
 		fi.flags = arg->flags;
 	}
-	param = (char *)u_req->w->fbuf.mem;
-
 	if (u_req->se->op.write)
 		u_req->se->op.write(u_req, nodeid, param, res,
 				arg->offset, &fi);

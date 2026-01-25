@@ -15,6 +15,7 @@
 #include <linux/sched.h>
 #include <linux/random.h>
 #include <asm/atomic.h>
+#include <linux/bitmap.h>
 
 #include <linux/ktime.h>
 #include <linux/time.h>
@@ -30,6 +31,80 @@
 
 #define RFUSE_SELECTION_ALGO 2
 atomic_t rr_id = ATOMIC_INIT(0);
+
+int rfuse_payload_slot_alloc(struct rfuse_iqueue *riq, u32 *slot_index)
+{
+	unsigned long index;
+
+	spin_lock(&riq->payload_lock);
+	index = find_first_zero_bit(riq->payloadbm.bitmap,
+				    riq->payloadbm.bitmap_size);
+	if (index >= riq->payloadbm.bitmap_size) {
+		spin_unlock(&riq->payload_lock);
+		return -ENOSPC;
+	}
+	set_bit(index, riq->payloadbm.bitmap);
+	spin_unlock(&riq->payload_lock);
+
+	*slot_index = index;
+	return 0;
+}
+
+void rfuse_payload_slot_free(struct rfuse_iqueue *riq, u32 slot_index)
+{
+	if (slot_index >= riq->payloadbm.bitmap_size)
+		return;
+
+	spin_lock(&riq->payload_lock);
+	clear_bit(slot_index, riq->payloadbm.bitmap);
+	spin_unlock(&riq->payload_lock);
+}
+
+void *rfuse_payload_slot_ptr(struct rfuse_iqueue *riq, u32 slot_index)
+{
+	return (char *)riq->payload_pool_kaddr +
+		(slot_index * RFUSE_PAYLOAD_SLOT_SIZE);
+}
+
+static void rfuse_copy_read_slot_to_pages(struct rfuse_req *r_req)
+{
+	struct fuse_read_in *inarg;
+	struct rfuse_iqueue *riq;
+	struct rfuse_pages *rp = r_req->rp;
+	char *src;
+	size_t remaining;
+	unsigned int i;
+
+	if (!rp || !rp->num_pages)
+		return;
+
+	inarg = (struct fuse_read_in *)&r_req->args;
+	if (!(inarg->read_flags & RFUSE_USE_SLOT))
+		return;
+
+	if (r_req->slot_index == RFUSE_SLOT_INVALID)
+		return;
+
+	riq = rfuse_get_specific_iqueue(r_req->fm->fc, r_req->riq_id);
+	if (!riq || !riq->payload_pool_kaddr)
+		return;
+
+	src = rfuse_payload_slot_ptr(riq, r_req->slot_index);
+	remaining = min_t(size_t, r_req->out.arglen, r_req->slot_len);
+	for (i = 0; i < rp->num_pages && remaining; i++) {
+		struct page *page = rp->pages[i];
+		unsigned int offset = rp->descs[i].offset;
+		unsigned int len = min_t(size_t, rp->descs[i].length, remaining);
+		void *mapaddr = kmap_atomic(page);
+
+		memcpy(mapaddr + offset, src, len);
+		kunmap_atomic(mapaddr);
+
+		src += len;
+		remaining -= len;
+	}
+	// LDY - ~~slot에서 page로 복사 후 나머지 처리는 기존 경로에 맡긴다.
+}
 
 /* -1: (App) user syscall start 
    0: request opcode (exception, not timestamps) 
@@ -174,6 +249,9 @@ void rfuse_iqueue_init(struct fuse_conn *fc, void *priv){
 		riq[i]->completes.kaddr = kmalloc_node(sizeof(struct rfuse_address_entry) * RFUSE_MAX_QUEUE_SIZE, GFP_KERNEL, node_id);
 		riq[i]->karg = kmalloc_node(sizeof(struct rfuse_arg)*RFUSE_MAX_QUEUE_SIZE * 2, GFP_KERNEL, node_id);
 		riq[i]->kreq = kmalloc_node(sizeof(struct rfuse_req)*RFUSE_MAX_QUEUE_SIZE * 2, GFP_KERNEL, node_id);
+		riq[i]->payload_pool_size = RFUSE_PAYLOAD_SLOT_SIZE * RFUSE_PAYLOAD_SLOT_COUNT;
+		riq[i]->payload_pool_kaddr = kmalloc_node(riq[i]->payload_pool_size,
+							  GFP_KERNEL | __GFP_ZERO, node_id);
 	
 		// init bitmaps
 		riq[i]->argbm.bitmap_size = RFUSE_MAX_QUEUE_SIZE * 2;
@@ -182,6 +260,11 @@ void rfuse_iqueue_init(struct fuse_conn *fc, void *priv){
 		riq[i]->argbm.full=0;
 		riq[i]->argbm.bitmap = kzalloc_node((RFUSE_MAX_QUEUE_SIZE*2)>>3, GFP_KERNEL, node_id);
 		riq[i]->reqbm.bitmap = kzalloc_node((RFUSE_MAX_QUEUE_SIZE*2)>>3, GFP_KERNEL, node_id);
+		riq[i]->payloadbm.bitmap_size = RFUSE_PAYLOAD_SLOT_COUNT;
+		riq[i]->payloadbm.full = 0;
+		riq[i]->payloadbm.bitmap = kzalloc_node(BITS_TO_LONGS(RFUSE_PAYLOAD_SLOT_COUNT) * sizeof(unsigned long),
+							GFP_KERNEL, node_id);
+		spin_lock_init(&riq[i]->payload_lock);
 
 		// init background queue
 		INIT_LIST_HEAD(&riq[i]->bg_queue);
@@ -210,9 +293,11 @@ void rfuse_iqueue_release(struct fuse_conn *fc){
 		kfree(riq[i]->completes.kaddr);
 		kfree(riq[i]->karg);
 		kfree(riq[i]->kreq);
+		kfree(riq[i]->payload_pool_kaddr);
 	
 		kfree(riq[i]->argbm.bitmap);
 		kfree(riq[i]->reqbm.bitmap);
+		kfree(riq[i]->payloadbm.bitmap);
 	}
 
 	kfree(riq);
@@ -278,15 +363,26 @@ void *rfuse_validate_mmap_request(struct fuse_dev *fud, loff_t pgoff, size_t siz
 		case RFUSE_REQ:
 			ptr = fud->fc->riq[riq_id]->kreq;
 			break;
+		case RFUSE_PAYLOAD:
+			ptr = fud->fc->riq[riq_id]->payload_pool_kaddr;
+			if (!ptr)
+				return ERR_PTR(-ENOMEM);
+			break;
 		default:
 			printk("Invalid map_queue argument\n");
 			return ERR_PTR(-EINVAL);
 	}
 
-	// Check if the virtual memory space is big enough
-	page = virt_to_head_page(ptr);
-	if(size > page_size(page))
-		return ERR_PTR(-EINVAL);
+	// LDY - ~~payload pool은 연속 영역 크기로 검증한다.
+	if (map_queue == RFUSE_PAYLOAD) {
+		if (size > fud->fc->riq[riq_id]->payload_pool_size)
+			return ERR_PTR(-EINVAL);
+	} else {
+		// Check if the virtual memory space is big enough
+		page = virt_to_head_page(ptr);
+		if(size > page_size(page))
+			return ERR_PTR(-EINVAL);
+	}
 
 	return ptr;
 }
@@ -586,6 +682,7 @@ struct rfuse_req *rfuse_request_alloc(struct fuse_mount *fm){
 		r_req->fm = fm;
 		r_req->index = req_index;
 		r_req->riq_id = riq_id;
+		r_req->slot_index = RFUSE_SLOT_INVALID;
 	}
 
 	// INITIALIZE DONE
@@ -725,6 +822,7 @@ static struct rfuse_req *try_rfuse_request_alloc(struct fuse_mount *fm, spinlock
 		r_req->fm = fm;
 		r_req->index = req_index;
 		r_req->riq_id = riq_id;
+		r_req->slot_index = RFUSE_SLOT_INVALID;
 	}
 
 	// INITIALIZE DONE
@@ -974,6 +1072,7 @@ ssize_t rfuse_simple_request(struct rfuse_req *r_req){
 	rfuse_request_wait_answer(r_req);
 	smp_rmb();
 
+	rfuse_copy_read_slot_to_pages(r_req);
 	ret = r_req->out.error;
 	if (!ret && r_req->out_argvar) {
 		ret = r_req->out.arglen;
@@ -1056,6 +1155,13 @@ void rfuse_request_end(struct rfuse_req *r_req){
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
 	GET_TIMESTAMPS(6)
+
+	if (r_req->slot_index != RFUSE_SLOT_INVALID) {
+		// LDY - ~~요청 종료 시 payload slot을 반환한다.
+		rfuse_payload_slot_free(riq, r_req->slot_index);
+		r_req->slot_index = RFUSE_SLOT_INVALID;
+		r_req->slot_len = 0;
+	}
 	
 	if(test_bit(FR_BACKGROUND, &r_req->flags)){
 		spin_lock(&riq->bg_lock);
@@ -1083,6 +1189,9 @@ void rfuse_request_end(struct rfuse_req *r_req){
 		rfuse_flush_bg_queue(fc, r_req->riq_id);
 		spin_unlock(&riq->bg_lock);
 	}
+
+	if (test_bit(FR_ASYNC, &r_req->flags))
+		rfuse_copy_read_slot_to_pages(r_req);
 
 	if (test_bit(FR_ASYNC, &r_req->flags))
 		r_req->end(r_req->fm, r_req, r_req->out.error);

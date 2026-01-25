@@ -3147,6 +3147,16 @@ int fuse_session_mount(struct fuse_session *se, const char *mountpoint)
 			goto error_out;
 		}
 
+		// LDY - ~~payload slot pool을 사용자 공간에 매핑한다.
+		riq[i]->payload_pool_uaddr = mmap(0,
+				RFUSE_PAYLOAD_SLOT_SIZE * RFUSE_PAYLOAD_SLOT_COUNT,
+				PROT_READ | PROT_WRITE, MAP_SHARED,
+				fd, RFUSE_PAYLOAD | riq_id);
+		if(riq[i]->payload_pool_uaddr == MAP_FAILED){
+			fuse_log(FUSE_LOG_ERR, "rfuse: failed to mmap payload pool, errno: %d\n", errno);
+			goto error_out;
+		}
+
 		printf("Complete mmap riq, mapped riq_id: %d\n", riq[i]->riq_id);
 	}
 
@@ -3185,6 +3195,8 @@ void fuse_session_unmount(struct fuse_session *se)
 			munmap(se->riq[i]->completes.uaddr,sizeof(struct rfuse_address_entry)*RFUSE_MAX_QUEUE_SIZE);
 			munmap(se->riq[i]->uarg,2*sizeof(struct rfuse_arg)*RFUSE_MAX_QUEUE_SIZE);
 			munmap(se->riq[i]->ureq,2*sizeof(struct rfuse_req)*RFUSE_MAX_QUEUE_SIZE);
+			munmap(se->riq[i]->payload_pool_uaddr,
+			       RFUSE_PAYLOAD_SLOT_SIZE * RFUSE_PAYLOAD_SLOT_COUNT);
 		}
 		//munmap(se->riq, sizeof(struct rfuse_iqueue) * RFUSE_NUM_IQUEUE);	
 		free(se->riq);
