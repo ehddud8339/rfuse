@@ -227,7 +227,7 @@ void rfuse_iqueue_init(struct fuse_conn *fc, void *priv){
     		}
 		node_id = cpu_to_node(i);
 
-		riq[i] = kzalloc_node(4096, GFP_KERNEL, node_id);
+		riq[i] = kzalloc_node(sizeof(struct rfuse_iqueue), GFP_KERNEL, node_id);
 
 		spin_lock_init(&riq[i]->lock);
 		riq[i]->riq_id = i;
