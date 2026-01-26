@@ -16,6 +16,7 @@
 #include <sys/uio.h>
 #include <unistd.h>
 #include <semaphore.h>
+#include <stdbool.h>
 
 
 
@@ -115,6 +116,27 @@ static inline void rfuse_smp_mb()
 extern "C" {
 #endif
 
+/* Layout-compatible placeholders for kernel-only types. */
+typedef struct {
+	uint32_t counter;
+} rfuse_refcount_t;
+
+typedef struct {
+	uint64_t __data[3];
+} rfuse_wait_queue_head_t;
+
+typedef struct {
+	uint32_t __lock;
+} rfuse_spinlock_t;
+
+struct list_head {
+	struct list_head *next;
+	struct list_head *prev;
+};
+
+struct fuse_mount;
+struct rfuse_pages;
+
 #define RFUSE_WAKE_UP_COMP 			37
 #define RFUSE_REPLY_ASYNC		 	38
 #define RFUSE_DAEMON_SLEEP 			39
@@ -180,19 +202,30 @@ struct rfuse_req{
 	unsigned long flags; // 8
 
 	/** refcount **/
-	int no_touch_1; // 4
+	rfuse_refcount_t count; // 4
 
 	/** fuse_mount this request belongs to **/
-	int *no_touch_2; // 8
+	struct fuse_mount *fm; // 8
 
 	/** Used to wake up the task waiting for completion of request **/
-	char no_touch_3[24];
+	rfuse_wait_queue_head_t waitq; // 24
 
 	struct{
-		uint8_t argument_space[120];
-	}args; // 120
-	
-	uint64_t padding[2];
+		uint8_t argument_space[112];
+	}args; // 112
+
+	bool force:1;
+	bool noreply:1;
+	bool nocreds:1;
+	bool in_pages:1;
+	bool out_pages:1;
+	bool out_argvar:1;
+	bool page_zeroing:1;
+	bool page_replace:1;
+	bool may_block:1;
+
+	struct rfuse_pages *rp;
+	void (*end)(struct fuse_mount *fm, struct rfuse_req *r_req, int error);
 };
 
 struct rfuse_interrupt_entry{
@@ -264,27 +297,65 @@ struct rfuse_iqueue{
 	/** Dyanmic argument space **/
 	struct rfuse_arg *uarg; // user address
 	struct rfuse_arg *karg; // kernel address
-	struct rfuse_req *ureq;
-	struct rfuse_req *kreq;
+	struct rfuse_req *ureq;	// user address
+	struct rfuse_req *kreq; // kernel address
 	unsigned long arg_pool_size;
 	unsigned long req_pool_size;
-	void *payload_pool_uaddr;
-	void *payload_pool_kaddr;
+	void *payload_pool_uaddr; // user address
+	void *payload_pool_kaddr; // kernel address
 	unsigned long payload_pool_size;
 	
-	/** unused **/
-	const unsigned connected;
-	const int garbage;
-	const uint64_t reqctr;
-	const void *priv;
-	const struct{
+	/** Connection established **/
+	unsigned connected;
+
+	/** wait queue for requests to wait to receive a request buffer **/
+	rfuse_wait_queue_head_t waitq;
+
+	/** Lock protecting accesses to members of this structure **/
+	rfuse_spinlock_t lock;
+
+	/** The next unique request id **/
+	uint64_t reqctr;
+
+	/** Device specific state */
+	void *priv;
+
+	struct {
 		unsigned long bitmap_size;
+		unsigned full;
 		unsigned long *bitmap;
 	}argbm;
-	const struct{
+
+	struct {
 		unsigned long bitmap_size;
+		unsigned full;
 		unsigned long *bitmap;
 	}reqbm;
+
+	struct {
+		unsigned long bitmap_size;
+		unsigned full;
+		unsigned long *bitmap;
+	}payloadbm;
+	rfuse_spinlock_t payload_lock;
+
+	rfuse_wait_queue_head_t idle_user_waitq;
+
+	/** synchronous request congestion control */
+	int num_sync_sleeping;
+
+	/** background request congestion control */
+	struct list_head bg_queue; 
+	rfuse_spinlock_t bg_lock;
+
+	unsigned max_background;
+	unsigned congestion_threshold;
+	unsigned num_background;
+	unsigned active_background;
+	int blocked;
+
+	/** waitq for congested asynchronous requests*/
+	rfuse_wait_queue_head_t blocked_waitq;
 };
 
 struct rfuse_loop_args{
