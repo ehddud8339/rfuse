@@ -266,6 +266,8 @@ struct rfuse_iqueue{
 	struct rfuse_arg *karg; // kernel address
 	struct rfuse_req *ureq;
 	struct rfuse_req *kreq;
+	unsigned long arg_pool_size;
+	unsigned long req_pool_size;
 	void *payload_pool_uaddr;
 	void *payload_pool_kaddr;
 	unsigned long payload_pool_size;

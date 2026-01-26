@@ -247,8 +247,10 @@ void rfuse_iqueue_init(struct fuse_conn *fc, void *priv){
 		riq[i]->interrupts.kaddr = kmalloc_node(sizeof(struct rfuse_interrupt_entry) * RFUSE_MAX_QUEUE_SIZE, GFP_KERNEL, node_id);
 		riq[i]->forgets.kaddr = kmalloc_node(sizeof(struct rfuse_forget_entry) * RFUSE_MAX_QUEUE_SIZE, GFP_KERNEL, node_id);
 		riq[i]->completes.kaddr = kmalloc_node(sizeof(struct rfuse_address_entry) * RFUSE_MAX_QUEUE_SIZE, GFP_KERNEL, node_id);
-		riq[i]->karg = kmalloc_node(sizeof(struct rfuse_arg)*RFUSE_MAX_QUEUE_SIZE * 2, GFP_KERNEL, node_id);
-		riq[i]->kreq = kmalloc_node(sizeof(struct rfuse_req)*RFUSE_MAX_QUEUE_SIZE * 2, GFP_KERNEL, node_id);
+		riq[i]->arg_pool_size = sizeof(struct rfuse_arg) * RFUSE_MAX_QUEUE_SIZE * 2;
+		riq[i]->req_pool_size = sizeof(struct rfuse_req) * RFUSE_MAX_QUEUE_SIZE * 2;
+		riq[i]->karg = kmalloc_node(riq[i]->arg_pool_size, GFP_KERNEL, node_id);
+		riq[i]->kreq = kmalloc_node(riq[i]->req_pool_size, GFP_KERNEL, node_id);
 		riq[i]->payload_pool_size = RFUSE_PAYLOAD_SLOT_SIZE * RFUSE_PAYLOAD_SLOT_COUNT;
 		riq[i]->payload_pool_kaddr = kmalloc_node(riq[i]->payload_pool_size,
 							  GFP_KERNEL | __GFP_ZERO, node_id);
@@ -373,9 +375,15 @@ void *rfuse_validate_mmap_request(struct fuse_dev *fud, loff_t pgoff, size_t siz
 			return ERR_PTR(-EINVAL);
 	}
 
-	// LDY - ~~payload pool은 연속 영역 크기로 검증한다.
+	// LDY - ~~mmap 요청은 각 풀의 실제 크기로 검증한다.
 	if (map_queue == RFUSE_PAYLOAD) {
 		if (size > fud->fc->riq[riq_id]->payload_pool_size)
+			return ERR_PTR(-EINVAL);
+	} else if (map_queue == RFUSE_ARG) {
+		if (size > fud->fc->riq[riq_id]->arg_pool_size)
+			return ERR_PTR(-EINVAL);
+	} else if (map_queue == RFUSE_REQ) {
+		if (size > fud->fc->riq[riq_id]->req_pool_size)
 			return ERR_PTR(-EINVAL);
 	} else {
 		// Check if the virtual memory space is big enough

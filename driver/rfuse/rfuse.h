@@ -170,6 +170,8 @@ struct rfuse_iqueue{
 	/** Dynamic request buffer **/
 	struct rfuse_req *ureq;	// user address
 	struct rfuse_req *kreq; // kernel address
+	unsigned long arg_pool_size;
+	unsigned long req_pool_size;
 	void *payload_pool_uaddr; // user address
 	void *payload_pool_kaddr; // kernel address
 	unsigned long payload_pool_size;
