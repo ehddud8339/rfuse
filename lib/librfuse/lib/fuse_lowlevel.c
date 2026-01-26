@@ -3085,7 +3085,7 @@ int fuse_session_mount(struct fuse_session *se, const char *mountpoint)
 	for(i = 0; i < RFUSE_NUM_IQUEUE; i++) {
 		riq_id = (i << 16) & RFUSE_RIQ_ID_MASK;
 		
-		riq[i] = (struct rfuse_iqueue*)mmap(0, 4096,
+		riq[i] = (struct rfuse_iqueue*)mmap(0, sizeof(struct rfuse_iqueue),
 			PROT_READ | PROT_WRITE, MAP_SHARED,
 			fd, RFUSE_IQUEUE | riq_id);
 		if(riq[i] == MAP_FAILED) {
@@ -3130,7 +3130,8 @@ int fuse_session_mount(struct fuse_session *se, const char *mountpoint)
 		}
 	
 		riq[i]->uarg = (struct rfuse_arg*)mmap(0,
-				2*sizeof(struct rfuse_arg) * RFUSE_MAX_QUEUE_SIZE,
+				riq[i]->arg_pool_size ? riq[i]->arg_pool_size :
+				(2 * sizeof(struct rfuse_arg) * RFUSE_MAX_QUEUE_SIZE),
 	            PROT_READ | PROT_WRITE, MAP_SHARED,
 	            fd, RFUSE_ARG | riq_id);
 		if(riq[i]->uarg == MAP_FAILED){
@@ -3139,7 +3140,8 @@ int fuse_session_mount(struct fuse_session *se, const char *mountpoint)
 		}
 	
 		riq[i]->ureq = (struct rfuse_req*)mmap(0,
-				2*sizeof(struct rfuse_req) * RFUSE_MAX_QUEUE_SIZE,
+				riq[i]->req_pool_size ? riq[i]->req_pool_size :
+				(2 * sizeof(struct rfuse_req) * RFUSE_MAX_QUEUE_SIZE),
 	            PROT_READ | PROT_WRITE, MAP_SHARED,
 	            fd, RFUSE_REQ | riq_id);
 		if(riq[i]->ureq == MAP_FAILED){
@@ -3149,7 +3151,9 @@ int fuse_session_mount(struct fuse_session *se, const char *mountpoint)
 
 		// LDY - ~~payload slot pool을 사용자 공간에 매핑한다.
 		riq[i]->payload_pool_uaddr = mmap(0,
-				RFUSE_PAYLOAD_SLOT_SIZE * RFUSE_PAYLOAD_SLOT_COUNT,
+				riq[i]->payload_pool_size ?
+				riq[i]->payload_pool_size :
+				(RFUSE_PAYLOAD_SLOT_SIZE * RFUSE_PAYLOAD_SLOT_COUNT),
 				PROT_READ | PROT_WRITE, MAP_SHARED,
 				fd, RFUSE_PAYLOAD | riq_id);
 		if(riq[i]->payload_pool_uaddr == MAP_FAILED){
