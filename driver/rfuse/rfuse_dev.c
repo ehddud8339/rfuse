@@ -14,6 +14,7 @@
 #include <linux/splice.h>
 #include <linux/sched.h>
 #include <linux/random.h>
+#include <linux/bitmap.h>
 #include <asm/atomic.h>
 
 #include <linux/ktime.h>
@@ -174,6 +175,14 @@ void rfuse_iqueue_init(struct fuse_conn *fc, void *priv){
 		riq[i]->completes.kaddr = kmalloc_node(sizeof(struct rfuse_address_entry) * RFUSE_MAX_QUEUE_SIZE, GFP_KERNEL, node_id);
 		riq[i]->karg = kmalloc_node(sizeof(struct rfuse_arg)*RFUSE_MAX_QUEUE_SIZE * 2, GFP_KERNEL, node_id);
 		riq[i]->kreq = kmalloc_node(sizeof(struct rfuse_req)*RFUSE_MAX_QUEUE_SIZE * 2, GFP_KERNEL, node_id);
+    /* LDY - allocate payload slots */
+    riq[i]->kpayload = kmalloc_node(sizeof(struct rfuse_payload_slot) * RFUSE_SLOT_COUNT,
+						GFP_KERNEL, node_id);
+		if (!riq[i]->kpayload)
+			printk("RFUSE ERROR: payload slot allocation failed, riq_id: %d\n", i);
+		else
+			printk("RFUSE: payload slot allocation success, riq_id: %d, slots: %u\n",
+			       i, RFUSE_SLOT_COUNT);
 	
 		// init bitmaps
 		riq[i]->argbm.bitmap_size = RFUSE_MAX_QUEUE_SIZE * 2;
@@ -182,6 +191,15 @@ void rfuse_iqueue_init(struct fuse_conn *fc, void *priv){
 		riq[i]->argbm.full=0;
 		riq[i]->argbm.bitmap = kzalloc_node((RFUSE_MAX_QUEUE_SIZE*2)>>3, GFP_KERNEL, node_id);
 		riq[i]->reqbm.bitmap = kzalloc_node((RFUSE_MAX_QUEUE_SIZE*2)>>3, GFP_KERNEL, node_id);
+    /* LDY - allocate payload bitmap */
+    riq[i]->payloadbm.bitmap_size = RFUSE_SLOT_COUNT;
+		riq[i]->payloadbm.full = 0;
+		riq[i]->payloadbm.bitmap = kzalloc_node(BITS_TO_LONGS(RFUSE_SLOT_COUNT) * sizeof(unsigned long),
+							GFP_KERNEL, node_id);
+		if (!riq[i]->payloadbm.bitmap)
+			printk("RFUSE ERROR: payload bitmap allocation failed, riq_id: %d\n", i);
+		else
+			printk("RFUSE: payload bitmap allocation success, riq_id: %d\n", i);
 
 		// init background queue
 		INIT_LIST_HEAD(&riq[i]->bg_queue);
@@ -210,9 +228,13 @@ void rfuse_iqueue_release(struct fuse_conn *fc){
 		kfree(riq[i]->completes.kaddr);
 		kfree(riq[i]->karg);
 		kfree(riq[i]->kreq);
+    /* LDY - free payload slot */
+    kfree(riq[i]->kpayload);
 	
 		kfree(riq[i]->argbm.bitmap);
 		kfree(riq[i]->reqbm.bitmap);
+    /* LDY - free payload bitmap */
+    kfree(riq[i]->payloadbm.bitmap);
 	}
 
 	kfree(riq);
@@ -278,6 +300,13 @@ void *rfuse_validate_mmap_request(struct fuse_dev *fud, loff_t pgoff, size_t siz
 		case RFUSE_REQ:
 			ptr = fud->fc->riq[riq_id]->kreq;
 			break;
+    /* LDY */
+    case RFUSE_PAYLOAD:
+			ptr = fud->fc->riq[riq_id]->kpayload;
+			break;
+		case RFUSE_PAYLOAD_BM:
+			ptr = fud->fc->riq[riq_id]->payloadbm.bitmap;
+			break;
 		default:
 			printk("Invalid map_queue argument\n");
 			return ERR_PTR(-EINVAL);
@@ -289,6 +318,62 @@ void *rfuse_validate_mmap_request(struct fuse_dev *fud, loff_t pgoff, size_t siz
 		return ERR_PTR(-EINVAL);
 
 	return ptr;
+}
+
+/* LDY - payload helpers */
+int rfuse_payload_slot_alloc(struct rfuse_iqueue *riq)
+{
+	int slot;
+
+	if (!riq->payloadbm.bitmap) {
+		printk("RFUSE ERROR: payload bitmap not initialized, riq_id: %d\n", riq->riq_id);
+		return -ENOMEM;
+	}
+
+	for(;;){
+		spin_lock(&riq->lock);
+		slot = find_next_zero_bit(riq->payloadbm.bitmap, riq->payloadbm.bitmap_size, 0);
+
+		if (slot == riq->payloadbm.bitmap_size) {
+			riq->payloadbm.full = 1;
+			spin_unlock(&riq->lock);
+			printk("RFUSE WARN: payload slots full, riq_id: %d\n", riq->riq_id);
+			wait_event_interruptible(riq->waitq, !READ_ONCE(riq->payloadbm.full));
+		} else {
+			__set_bit(slot, riq->payloadbm.bitmap);
+			spin_unlock(&riq->lock);
+			printk("RFUSE: payload slot allocated, riq_id: %d, slot: %d\n",
+			       riq->riq_id, slot);
+			break;
+		}
+	}
+
+	return slot;
+}
+
+void rfuse_payload_slot_release(struct rfuse_iqueue *riq, int slot)
+{
+	if (slot < 0 || slot >= RFUSE_SLOT_COUNT) {
+		printk("RFUSE ERROR: invalid payload slot release, riq_id: %d, slot: %d\n",
+		       riq->riq_id, slot);
+		return;
+	}
+
+	if (!riq->payloadbm.bitmap) {
+		printk("RFUSE ERROR: payload bitmap not initialized, riq_id: %d\n", riq->riq_id);
+		return;
+	}
+
+	spin_lock(&riq->lock);
+	__clear_bit(slot, riq->payloadbm.bitmap);
+
+	if (riq->payloadbm.full == 1) {
+		riq->payloadbm.full = 0;
+		wake_up(&riq->waitq);
+	}
+	spin_unlock(&riq->lock);
+	printk("RFUSE: payload slot released, riq_id: %d, slot: %d\n",
+	       riq->riq_id, slot);
 }
 
 /************ 2. Ring buffer ************/

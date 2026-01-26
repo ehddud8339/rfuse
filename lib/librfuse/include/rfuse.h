@@ -140,6 +140,15 @@ extern "C" {
 #define RFUSE_REQ					0x38000000ULL
 #define RFUSE_READ					0x40000000ULL
 #define RFUSE_WRITE					0x48000000ULL
+/* LDY - payload macros */
+#define RFUSE_PAYLOAD				0x50000000ULL
+#define RFUSE_PAYLOAD_BM			0x58000000ULL
+
+#define RFUSE_SLOT_SIZE				(16 * 1024)
+#define RFUSE_SLOT_COUNT			32
+#ifndef BITS_TO_LONGS
+#define BITS_TO_LONGS(nr)		(((nr) + (sizeof(long) * 8) - 1) / (sizeof(long) * 8))
+#endif
 
 struct rfuse_req{
 	/** Request input header **/
@@ -165,6 +174,9 @@ struct rfuse_req{
 	/** request buffer index **/
 	uint32_t index; // 4
 	int32_t riq_id;
+
+  uint32_t payload_index;
+	uint32_t payload_len;
 
 	/** Request flags, updated with test/set/clear_bit() **/
 	unsigned long flags; // 8
@@ -237,6 +249,10 @@ struct rfuse_arg{
 	uint8_t garbage[256];
 };
 
+struct rfuse_payload_slot{
+	uint8_t data[RFUSE_SLOT_SIZE];
+};
+
 /**
   mmap the total rfuse_iqueue to fuse daemon
  **/
@@ -256,6 +272,8 @@ struct rfuse_iqueue{
 	struct rfuse_arg *karg; // kernel address
 	struct rfuse_req *ureq;
 	struct rfuse_req *kreq;
+  struct rfuse_payload_slot *upayload;
+	struct rfuse_payload_slot *kpayload;
 	
 	/** unused **/
 	const unsigned connected;
@@ -270,6 +288,11 @@ struct rfuse_iqueue{
 		unsigned long bitmap_size;
 		unsigned long *bitmap;
 	}reqbm;
+  const struct{
+		unsigned long bitmap_size;
+		unsigned full;
+		unsigned long *bitmap;
+	}payloadbm;
 };
 
 struct rfuse_loop_args{

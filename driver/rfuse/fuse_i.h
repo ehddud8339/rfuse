@@ -1340,6 +1340,10 @@ int rfuse_io_mmap(struct vm_area_struct *vma, struct fuse_dev *fud, int req_inde
 void rfuse_iqueue_release(struct fuse_conn *fc);
 struct rfuse_iqueue *rfuse_get_iqueue(struct fuse_conn *fc);
 struct rfuse_iqueue *rfuse_get_specific_iqueue(struct fuse_conn *fc, int riq_id);
+/* LDY */
+int rfuse_payload_slot_alloc(struct rfuse_iqueue *riq);
+void rfuse_payload_slot_release(struct rfuse_iqueue *riq, int slot);
+/* LDY */
 
 // OPERATIONS
 int rfuse_do_getattr(struct inode *inode, struct kstat *stat, struct file *file);

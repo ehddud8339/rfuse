@@ -2436,6 +2436,10 @@ static int rfuse_dev_mmap(struct file *file, struct vm_area_struct *vma){
 			return -EAGAIN;
 		}
 		else{
+      /* LDY */
+      printk("RFUSE: data mapping success, riq_id: %d, req_index: %d\n",
+             riq_id, req_index);
+      /* LDY */
 			return 0;
 		}
 	}
@@ -2450,7 +2454,9 @@ static int rfuse_dev_mmap(struct file *file, struct vm_area_struct *vma){
 		printk("rfuse mmap: mmap failed\n");
 		return -EAGAIN;
 	}
-
+  /* LDY */
+  printk("RFUSE: mmap success, riq_id: %d, map_queue: 0x%llx\n",
+         riq_id, (unsigned long long)map_queue);
 	return 0;
 }
 
