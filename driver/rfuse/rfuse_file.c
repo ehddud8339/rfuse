@@ -922,6 +922,78 @@ static ssize_t rfuse_async_req_send(struct fuse_mount *fm,
 
 /************ 4. WRITE ************/
 
+static void rfuse_log_payload_snippet(const char *label, const u8 *data, size_t len)
+{
+	size_t dump_len = min_t(size_t, len, 30);
+
+	print_hex_dump(KERN_INFO, label, DUMP_PREFIX_OFFSET, 16, 1,
+		       data, dump_len, true);
+}
+
+static ssize_t rfuse_send_write_slot(struct kiocb *iocb, struct iov_iter *ii, loff_t pos)
+{
+	struct file *file = iocb->ki_filp;
+	struct fuse_file *ff = file->private_data;
+	struct fuse_mount *fm = ff->fm;
+	struct fuse_conn *fc = fm->fc;
+	struct rfuse_req *r_req;
+	struct rfuse_iqueue *riq;
+	struct fuse_write_in *in;
+	struct fuse_write_out *out;
+	ssize_t outsize;
+	ssize_t err;
+	size_t count = iov_iter_count(ii);
+	size_t copied;
+	int slot;
+
+	r_req = rfuse_get_req(fm, false, false);
+	if (IS_ERR(r_req))
+		return PTR_ERR(r_req);
+
+	riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
+	slot = rfuse_payload_slot_alloc(riq);
+	if (slot < 0) {
+		rfuse_put_request(r_req);
+		return -EAGAIN;
+	}
+
+	copied = copy_from_iter(riq->kpayload[slot].data, count, ii);
+	if (copied != count) {
+		iov_iter_revert(ii, copied);
+		rfuse_payload_slot_release(riq, slot);
+		rfuse_put_request(r_req);
+		return -EFAULT;
+	}
+
+	r_req->payload_index = slot;
+	r_req->payload_len = count;
+
+	in = (struct fuse_write_in *)&r_req->args;
+	in->fh = ff->fh;
+	in->offset = pos;
+	in->size = count;
+
+	r_req->in.opcode = FUSE_WRITE;
+	r_req->in.nodeid = ff->nodeid;
+	r_req->in.arglen[0] = count;
+
+	in->flags = rfuse_write_flags(iocb);
+	if (fc->handle_killpriv_v2 && !capable(CAP_FSETID))
+		in->write_flags |= FUSE_WRITE_KILL_SUIDGID;
+
+  // rfuse_log_payload_snippet("RFUSE write payload: ", riq->kpayload[slot].data, count);
+
+	err = rfuse_simple_request(r_req);
+	out = (struct fuse_write_out *)&r_req->args;
+	if (!err && out->size > count)
+		err = -EIO;
+	outsize = out->size;
+
+	rfuse_payload_slot_release(riq, slot);
+	rfuse_put_request(r_req);
+
+	return err ?: outsize;
+}
 
 static ssize_t rfuse_fill_write_pages(struct rfuse_io_args *ria, struct address_space *mapping,
 				     struct iov_iter *ii, loff_t pos, unsigned int max_pages)
@@ -1098,15 +1170,37 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 		struct rfuse_io_args ria = {};
 		struct rfuse_pages *rp = &ria.rp;
 		struct rfuse_req *r_req;
-		unsigned int nr_pages = rfuse_wr_pages(pos, iov_iter_count(ii), fc->max_pages);
+		unsigned int nr_pages;
 
-		rp->pages = fuse_pages_alloc(nr_pages, GFP_KERNEL, &rp->descs);
+		count = iov_iter_count(ii);
+		if (count <= RFUSE_SLOT_SIZE) {
+			ssize_t slot_res = rfuse_send_write_slot(iocb, ii, pos);
+			if (slot_res == -EAGAIN)
+				goto fallback_pages;
+			if (slot_res < 0) {
+				err = slot_res;
+				break;
+			}
+
+			res += slot_res;
+			pos += slot_res;
+
+			if (slot_res != count)
+				err = -EIO;
+
+			continue;
+		}
+
+fallback_pages:
+		nr_pages = rfuse_wr_pages(pos, iov_iter_count(ii), fc->max_pages);
+
+    rp->pages = fuse_pages_alloc(nr_pages, GFP_KERNEL, &rp->descs);
 		if (!rp->pages) {
 			err = -ENOMEM;
 			break;
 		}
 
-   		r_req = rfuse_get_req(fm, false, false); 
+   	r_req = rfuse_get_req(fm, false, false);
 		ria.r_req = r_req;
 
 		count = rfuse_fill_write_pages(&ria, mapping, ii, pos, nr_pages);
