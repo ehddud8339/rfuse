@@ -4,15 +4,15 @@
 
 ## 1. 프로젝트의 최상위 목적 (What)
 
-**RFUSE에서 16KB 이하 small I/O의 지배적 오버헤드(`/dev/fuse` read/write 진입 + user↔kernel 전환 + daemon wakeup/스케줄링)를 낮추기 위해**, per-CPU ring channel에 **고정 크기(16KB) payload slot pool(고정 32개)**을 추가하고, **데이터 복사(copy)를 daemon이 아니라 kernel thread/kworker가 수행하도록 데이터 경로를 재설계**하는 것이 프로젝트의 핵심 목적이다.
+**RFUSE에서 16KB 이하 small I/O의 지배적 오버헤드(`/dev/fuse` read/write 진입 + user↔kernel 전환 + daemon wakeup/스케줄링)를 낮추기 위해**, per-CPU ring channel에 **고정 크기(16KB) payload slot pool(고정 32개)** 을 추가하고, **데이터 복사(copy)를 daemon이 아니라 kernel thread/kworker가 수행하도록 데이터 경로를 재설계**하는 것이 프로젝트의 핵심 목적이다.
 
 ---
 
 ## 2. 목적이 필요한 이유 (Why: 문제 정의)
 
-1. RFUSE는 **제어 경로(control path)**에서 shared memory ring channel로 이미 상당한 개선(복사/컨텍스트 스위치 감소)을 달성했다.
+1. RFUSE는 **제어 경로(control path)** 에서 shared memory ring channel로 이미 상당한 개선(복사/컨텍스트 스위치 감소)을 달성했다.
 2. 그러나 **데이터 경로(data path)**(read/write payload)는 여전히 `/dev/fuse` 기반 read()/write()를 통해 daemon이 커널 모드로 들어가 복사를 수행한다.
-3. 특히 **small I/O(≤16KB)**에서는 memcpy 자체보다 **syscall 진입 및 user↔kernel 전환**이 더 지배적이므로, 데이터 복사 “자체”를 없애기보다 **복사를 수행하는 주체/문맥을 바꿔 오버헤드를 줄이는 것**이 목표가 된다.
+3. 특히 **small I/O(≤16KB)** 에서는 memcpy 자체보다 **syscall 진입 및 user↔kernel 전환**이 더 지배적이므로, 데이터 복사 “자체”를 없애기보다 **복사를 수행하는 주체/문맥을 바꿔 오버헤드를 줄이는 것**이 목표가 된다.
 
 ---
 
