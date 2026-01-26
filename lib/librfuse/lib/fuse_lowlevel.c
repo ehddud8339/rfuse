@@ -3085,7 +3085,7 @@ int fuse_session_mount(struct fuse_session *se, const char *mountpoint)
 	for(i = 0; i < RFUSE_NUM_IQUEUE; i++) {
 		riq_id = (i << 16) & RFUSE_RIQ_ID_MASK;
 		
-		riq[i] = (struct rfuse_iqueue*)mmap(0, 4096,
+		riq[i] = (struct rfuse_iqueue*)mmap(0, sizeof(struct rfuse_iqueue),
 			PROT_READ | PROT_WRITE, MAP_SHARED,
 			fd, RFUSE_IQUEUE | riq_id);
 		if(riq[i] == MAP_FAILED) {
@@ -3130,23 +3130,59 @@ int fuse_session_mount(struct fuse_session *se, const char *mountpoint)
 		}
 	
 		riq[i]->uarg = (struct rfuse_arg*)mmap(0,
-				2*sizeof(struct rfuse_arg) * RFUSE_MAX_QUEUE_SIZE,
+				riq[i]->arg_pool_size ? riq[i]->arg_pool_size :
+				(2 * sizeof(struct rfuse_arg) * RFUSE_MAX_QUEUE_SIZE),
 	            PROT_READ | PROT_WRITE, MAP_SHARED,
 	            fd, RFUSE_ARG | riq_id);
 		if(riq[i]->uarg == MAP_FAILED){
+			fuse_log(FUSE_LOG_ERR,
+				"rfuse: failed to mmap dynamic argument buffer, size=%lu errno: %d\n",
+				riq[i]->arg_pool_size ? riq[i]->arg_pool_size :
+				(2 * sizeof(struct rfuse_arg) * RFUSE_MAX_QUEUE_SIZE),
+				errno);
 			fuse_log(FUSE_LOG_ERR, "rfuse: failed to mmap dynamic argument buffer, errno: %d\n", errno);
 			goto error_out;
 		}
 	
 		riq[i]->ureq = (struct rfuse_req*)mmap(0,
-				2*sizeof(struct rfuse_req) * RFUSE_MAX_QUEUE_SIZE,
+				riq[i]->req_pool_size ? riq[i]->req_pool_size :
+				(2 * sizeof(struct rfuse_req) * RFUSE_MAX_QUEUE_SIZE),
 	            PROT_READ | PROT_WRITE, MAP_SHARED,
 	            fd, RFUSE_REQ | riq_id);
 		if(riq[i]->ureq == MAP_FAILED){
+			fuse_log(FUSE_LOG_ERR,
+				"rfuse: failed to mmap dynamic request buffer, size=%lu errno: %d\n",
+				riq[i]->req_pool_size ? riq[i]->req_pool_size :
+				(2 * sizeof(struct rfuse_req) * RFUSE_MAX_QUEUE_SIZE),
+				errno);
 			fuse_log(FUSE_LOG_ERR, "rfuse: failed to mmap dynamic request buffer, errno: %d\n", errno);
 			goto error_out;
 		}
 
+		// LDY - ~~payload slot pool을 사용자 공간에 매핑한다.
+		riq[i]->payload_pool_uaddr = mmap(0,
+				riq[i]->payload_pool_size ?
+				riq[i]->payload_pool_size :
+				(RFUSE_PAYLOAD_SLOT_SIZE * RFUSE_PAYLOAD_SLOT_COUNT),
+				PROT_READ | PROT_WRITE, MAP_SHARED,
+				fd, RFUSE_PAYLOAD | riq_id);
+		if(riq[i]->payload_pool_uaddr == MAP_FAILED){
+			fuse_log(FUSE_LOG_ERR,
+				"rfuse: failed to mmap payload pool, size=%lu errno: %d\n",
+				riq[i]->payload_pool_size ?
+				riq[i]->payload_pool_size :
+				(RFUSE_PAYLOAD_SLOT_SIZE * RFUSE_PAYLOAD_SLOT_COUNT),
+				errno);
+			fuse_log(FUSE_LOG_ERR, "rfuse: failed to mmap payload pool, errno: %d\n", errno);
+			goto error_out;
+		}
+
+		fuse_log(FUSE_LOG_DEBUG,
+			"rfuse: mmap sizes riq_id=%d iqueue=%zu arg=%lu req=%lu payload=%lu\n",
+			i, sizeof(struct rfuse_iqueue),
+			riq[i]->arg_pool_size,
+			riq[i]->req_pool_size,
+			riq[i]->payload_pool_size);
 		printf("Complete mmap riq, mapped riq_id: %d\n", riq[i]->riq_id);
 	}
 
@@ -3185,6 +3221,8 @@ void fuse_session_unmount(struct fuse_session *se)
 			munmap(se->riq[i]->completes.uaddr,sizeof(struct rfuse_address_entry)*RFUSE_MAX_QUEUE_SIZE);
 			munmap(se->riq[i]->uarg,2*sizeof(struct rfuse_arg)*RFUSE_MAX_QUEUE_SIZE);
 			munmap(se->riq[i]->ureq,2*sizeof(struct rfuse_req)*RFUSE_MAX_QUEUE_SIZE);
+			munmap(se->riq[i]->payload_pool_uaddr,
+			       RFUSE_PAYLOAD_SLOT_SIZE * RFUSE_PAYLOAD_SLOT_COUNT);
 		}
 		//munmap(se->riq, sizeof(struct rfuse_iqueue) * RFUSE_NUM_IQUEUE);	
 		free(se->riq);

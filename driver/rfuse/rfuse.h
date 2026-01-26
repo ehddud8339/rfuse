@@ -27,6 +27,12 @@
 #define RFUSE_REQ	     0x38000000ULL
 #define RFUSE_READ	     0x40000000ULL
 #define RFUSE_WRITE	     0x48000000ULL
+#define RFUSE_PAYLOAD        0x50000000ULL
+
+#define RFUSE_PAYLOAD_SLOT_SIZE   (16 * 1024)
+#define RFUSE_PAYLOAD_SLOT_COUNT  32
+#define RFUSE_USE_SLOT            (1U << 16)
+#define RFUSE_SLOT_INVALID        0xffffffffU
 
 struct rfuse_req{
 	/** Request input header **/
@@ -48,6 +54,10 @@ struct rfuse_req{
 		uint32_t	arglen;	// Size of out operation-specific argument
 		uint32_t	padding;	
 	}out; // 16
+
+	/** payload slot metadata **/
+	uint32_t slot_index;
+	uint32_t slot_len;
 
 	/** request buffer index **/
 	uint32_t index; // 4
@@ -160,6 +170,11 @@ struct rfuse_iqueue{
 	/** Dynamic request buffer **/
 	struct rfuse_req *ureq;	// user address
 	struct rfuse_req *kreq; // kernel address
+	unsigned long arg_pool_size;
+	unsigned long req_pool_size;
+	void *payload_pool_uaddr; // user address
+	void *payload_pool_kaddr; // kernel address
+	unsigned long payload_pool_size;
 
 	/** Connection established **/
 	unsigned connected;
@@ -187,6 +202,13 @@ struct rfuse_iqueue{
 		unsigned full;
 		unsigned long *bitmap;
 	}reqbm;
+
+	struct {
+		unsigned long bitmap_size;
+		unsigned full;
+		unsigned long *bitmap;
+	}payloadbm;
+	spinlock_t payload_lock;
 
 	wait_queue_head_t idle_user_waitq;
 

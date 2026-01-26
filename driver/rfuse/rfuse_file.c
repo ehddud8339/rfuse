@@ -46,6 +46,59 @@ static unsigned int rfuse_write_flags(struct kiocb *iocb)
 	return flags;
 }
 
+static bool rfuse_try_attach_payload_slot(struct rfuse_req *r_req,
+					  struct rfuse_pages *rp, size_t count)
+{
+	struct rfuse_iqueue *riq;
+	char *dst;
+	size_t remaining = count;
+	u32 slot_index;
+	unsigned int i;
+	int err;
+
+	if (count > RFUSE_PAYLOAD_SLOT_SIZE || !rp || !rp->num_pages) {
+		r_req->slot_index = RFUSE_SLOT_INVALID;
+		return false;
+	}
+
+	riq = rfuse_get_specific_iqueue(r_req->fm->fc, r_req->riq_id);
+	if (!riq || !riq->payload_pool_kaddr) {
+		r_req->slot_index = RFUSE_SLOT_INVALID;
+		return false;
+	}
+
+	err = rfuse_payload_slot_alloc(riq, &slot_index);
+	if (err) {
+		// LDY - ~~slot 부족 시 즉시 fallback 경로를 사용한다.
+		r_req->slot_index = RFUSE_SLOT_INVALID;
+		return false;
+	}
+
+	dst = rfuse_payload_slot_ptr(riq, slot_index);
+	for (i = 0; i < rp->num_pages && remaining; i++) {
+		struct page *page = rp->pages[i];
+		unsigned int offset = rp->descs[i].offset;
+		unsigned int len = min_t(size_t, rp->descs[i].length, remaining);
+		void *mapaddr = kmap_atomic(page);
+
+		memcpy(dst, mapaddr + offset, len);
+		kunmap_atomic(mapaddr);
+
+		dst += len;
+		remaining -= len;
+	}
+
+	if (remaining) {
+		// LDY - ~~copy 실패 시 slot을 반환하고 fallback 경로로 전환한다.
+		rfuse_payload_slot_free(riq, slot_index);
+		return false;
+	}
+
+	r_req->slot_index = slot_index;
+	r_req->slot_len = count;
+	return true;
+}
+
 static inline unsigned int rfuse_wr_pages(loff_t pos, size_t len,
 				     unsigned int max_pages)
 {
@@ -68,6 +121,37 @@ static void rfuse_read_update_size(struct inode *inode, loff_t size,
 		i_size_write(inode, size);
 	}
 	spin_unlock(&fi->lock);
+}
+
+static bool rfuse_try_attach_read_slot(struct rfuse_req *r_req,
+				       struct fuse_read_in *in, size_t count)
+{
+	struct rfuse_iqueue *riq;
+	u32 slot_index;
+	int err;
+
+	if (count > RFUSE_PAYLOAD_SLOT_SIZE) {
+		r_req->slot_index = RFUSE_SLOT_INVALID;
+		return false;
+	}
+
+	riq = rfuse_get_specific_iqueue(r_req->fm->fc, r_req->riq_id);
+	if (!riq || !riq->payload_pool_kaddr) {
+		r_req->slot_index = RFUSE_SLOT_INVALID;
+		return false;
+	}
+
+	err = rfuse_payload_slot_alloc(riq, &slot_index);
+	if (err) {
+		// LDY - ~~slot 부족 시 즉시 fallback 경로를 사용한다.
+		r_req->slot_index = RFUSE_SLOT_INVALID;
+		return false;
+	}
+
+	r_req->slot_index = slot_index;
+	r_req->slot_len = count;
+	in->read_flags |= RFUSE_USE_SLOT;
+	return true;
 }
 
 static struct fuse_file *rfuse_file_get(struct fuse_file *ff)
@@ -1050,6 +1134,9 @@ static ssize_t rfuse_send_write_pages(struct rfuse_io_args *ria,
 	in->flags = rfuse_write_flags(iocb);
 	if (fm->fc->handle_killpriv_v2 && !capable(CAP_FSETID))
 		in->write_flags |= FUSE_WRITE_KILL_SUIDGID;
+	// LDY - ~~pending queue에 넣기 전에 slot을 할당/복사한다.
+	if (rfuse_try_attach_payload_slot(ria->r_req, rp, count))
+		in->write_flags |= RFUSE_USE_SLOT;
 
 	err = rfuse_simple_request(ria->r_req);
 	out = (struct fuse_write_out *)&ria->r_req->args;
@@ -1170,6 +1257,9 @@ static ssize_t rfuse_send_write(struct rfuse_io_args *ria, loff_t pos, size_t co
 	}
 	if (!capable(CAP_FSETID))
 		inarg->write_flags |= FUSE_WRITE_KILL_SUIDGID;
+	// LDY - ~~pending queue에 넣기 전에 slot을 할당/복사한다.
+	if (rfuse_try_attach_payload_slot(r_req, &ria->rp, count))
+		inarg->write_flags |= RFUSE_USE_SLOT;
 
 	/* Send request */
 	if (ria->io->async)
@@ -1908,6 +1998,7 @@ void rfuse_read_args_fill(struct rfuse_io_args *ria, struct file *file, loff_t p
 	in->offset = pos;
 	in->size = count;
 	in->flags = file->f_flags;
+	in->read_flags = 0;
 
 	r_req->in.opcode = opcode;
 	r_req->in.nodeid = ff->nodeid;
@@ -1959,6 +2050,9 @@ int rfuse_do_readpage(struct file *file, struct page *page){
 		desc.length--;
 
 	rfuse_read_args_fill(&ria, file, pos, desc.length, FUSE_READ);
+	// LDY - ~~READ 요청 생성 시 slot을 할당하고 플래그를 설정한다.
+	rfuse_try_attach_read_slot(r_req, (struct fuse_read_in *)&r_req->args,
+				   desc.length);
 	res = rfuse_simple_request(r_req);
 	rfuse_put_request(r_req);
 	if (res < 0)
@@ -2075,6 +2169,9 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file){
 	WARN_ON((loff_t) (pos + count) < 0);
 
 	rfuse_read_args_fill(ria, file, pos, count, FUSE_READ);
+	// LDY - ~~READ 요청 생성 시 slot을 할당하고 플래그를 설정한다.
+	rfuse_try_attach_read_slot(r_req, (struct fuse_read_in *)&r_req->args,
+				   count);
 	ria->read.attr_ver = fuse_get_attr_version(fm->fc);
 	if (fm->fc->async_read) {
 		ria->ff = rfuse_file_get(ff);
@@ -2149,6 +2246,8 @@ static ssize_t rfuse_send_read(struct rfuse_io_args *ria, loff_t pos, size_t cou
 
 	inarg = (struct fuse_read_in *)&r_req->args;
 	rfuse_read_args_fill(ria, file, pos, count, FUSE_READ);
+	// LDY - ~~READ 요청 생성 시 slot을 할당하고 플래그를 설정한다.
+	rfuse_try_attach_read_slot(r_req, inarg, count);
 	if (owner != NULL) {
 		inarg->read_flags |= FUSE_READ_LOCKOWNER;
 		inarg->lock_owner = fuse_lock_owner_id(fm->fc, owner);

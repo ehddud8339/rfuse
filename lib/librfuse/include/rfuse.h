@@ -140,6 +140,12 @@ extern "C" {
 #define RFUSE_REQ					0x38000000ULL
 #define RFUSE_READ					0x40000000ULL
 #define RFUSE_WRITE					0x48000000ULL
+#define RFUSE_PAYLOAD               0x50000000ULL
+
+#define RFUSE_PAYLOAD_SLOT_SIZE    (16 * 1024)
+#define RFUSE_PAYLOAD_SLOT_COUNT   32
+#define RFUSE_USE_SLOT             (1U << 16)
+#define RFUSE_SLOT_INVALID         0xffffffffU
 
 struct rfuse_req{
 	/** Request input header **/
@@ -161,6 +167,10 @@ struct rfuse_req{
 		uint32_t	arglen;	// Size of out argument
 		uint32_t	padding;	
 	}out; // 16
+
+	/** payload slot metadata **/
+	uint32_t slot_index;
+	uint32_t slot_len;
 
 	/** request buffer index **/
 	uint32_t index; // 4
@@ -256,6 +266,11 @@ struct rfuse_iqueue{
 	struct rfuse_arg *karg; // kernel address
 	struct rfuse_req *ureq;
 	struct rfuse_req *kreq;
+	unsigned long arg_pool_size;
+	unsigned long req_pool_size;
+	void *payload_pool_uaddr;
+	void *payload_pool_kaddr;
+	unsigned long payload_pool_size;
 	
 	/** unused **/
 	const unsigned connected;
