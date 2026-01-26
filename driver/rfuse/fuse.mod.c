@@ -201,7 +201,6 @@ __used __section("__versions") = {
 	{ 0x7cd8d75e, "page_offset_base" },
 	{ 0x5e332b52, "__var_waitqueue" },
 	{ 0x87a21cb3, "__ubsan_handle_out_of_bounds" },
-	{ 0x167c5967, "print_hex_dump" },
 	{ 0xc6cbbc89, "capable" },
 	{ 0x23b4e0d7, "clear_page_rep" },
 	{ 0x989b4261, "capable_wrt_inode_uidgid" },
@@ -350,4 +349,4 @@ __used __section("__versions") = {
 MODULE_INFO(depends, "");
 
 
-MODULE_INFO(srcversion, "FF75344A10DE8063D2A9638");
+MODULE_INFO(srcversion, "25A9A87971F0D82CB9E1407");

@@ -1098,9 +1098,11 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 	int riq_id = u_req->riq->riq_id;
 	long long int pp_req_index = ((long long int)req_index << 32) & RFUSE_REQ_IDX_MASK;
 	int pp_riq_id = (riq_id << 16) & RFUSE_RIQ_ID_MASK;
+  /*
   char snippet[3 * 30 + 1];
 	int snippet_len = 0;
 	int i;
+  */
 	size_t payload_len = r_req->payload_len;
 
 	if (payload_len > 0 && r_req->payload_index < RFUSE_SLOT_COUNT) {

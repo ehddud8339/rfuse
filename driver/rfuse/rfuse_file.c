@@ -981,7 +981,7 @@ static ssize_t rfuse_send_write_slot(struct kiocb *iocb, struct iov_iter *ii, lo
 	if (fc->handle_killpriv_v2 && !capable(CAP_FSETID))
 		in->write_flags |= FUSE_WRITE_KILL_SUIDGID;
 
-  // rfuse_log_payload_snippet("RFUSE write payload: ", riq->kpayload[slot].data, count);
+  //rfuse_log_payload_snippet("RFUSE write payload: ", riq->kpayload[slot].data, count);
 
 	err = rfuse_simple_request(r_req);
 	out = (struct fuse_write_out *)&r_req->args;
