@@ -17,6 +17,7 @@
 #include <linux/bitmap.h>
 #include <asm/atomic.h>
 
+#include <linux/delay.h>
 #include <linux/ktime.h>
 #include <linux/time.h>
 #include <linux/timekeeping.h>
@@ -304,9 +305,6 @@ void *rfuse_validate_mmap_request(struct fuse_dev *fud, loff_t pgoff, size_t siz
     case RFUSE_PAYLOAD:
 			ptr = fud->fc->riq[riq_id]->kpayload;
 			break;
-		case RFUSE_PAYLOAD_BM:
-			ptr = fud->fc->riq[riq_id]->payloadbm.bitmap;
-			break;
 		default:
 			printk("Invalid map_queue argument\n");
 			return ERR_PTR(-EINVAL);
@@ -330,25 +328,21 @@ int rfuse_payload_slot_alloc(struct rfuse_iqueue *riq)
 		return -ENOMEM;
 	}
 
-	for(;;){
-		spin_lock(&riq->lock);
-		slot = find_next_zero_bit(riq->payloadbm.bitmap, riq->payloadbm.bitmap_size, 0);
+	spin_lock(&riq->lock);
+	slot = find_next_zero_bit(riq->payloadbm.bitmap, riq->payloadbm.bitmap_size, 0);
 
-		if (slot == riq->payloadbm.bitmap_size) {
-			riq->payloadbm.full = 1;
-			spin_unlock(&riq->lock);
-			printk("RFUSE WARN: payload slots full, riq_id: %d\n", riq->riq_id);
-			wait_event_interruptible(riq->waitq, !READ_ONCE(riq->payloadbm.full));
-		} else {
-			__set_bit(slot, riq->payloadbm.bitmap);
-			spin_unlock(&riq->lock);
-			//printk("RFUSE: payload slot allocated, riq_id: %d, slot: %d\n",
-			  //     riq->riq_id, slot);
-			break;
-		}
+  if (slot == riq->payloadbm.bitmap_size) {
+		riq->payloadbm.full = 1;
+		spin_unlock(&riq->lock);
+		printk("RFUSE WARN: payload slots full, riq_id: %d\n", riq->riq_id);
+		return -EAGAIN;
 	}
 
-	return slot;
+	__set_bit(slot, riq->payloadbm.bitmap);
+	spin_unlock(&riq->lock);
+	printk("RFUSE: payload slot allocated, riq_id: %d, slot: %d\n",
+	       riq->riq_id, slot);
+  return slot;
 }
 
 void rfuse_payload_slot_release(struct rfuse_iqueue *riq, int slot)
@@ -369,11 +363,11 @@ void rfuse_payload_slot_release(struct rfuse_iqueue *riq, int slot)
 
 	if (riq->payloadbm.full == 1) {
 		riq->payloadbm.full = 0;
-		wake_up(&riq->waitq);
+		//wake_up(&riq->waitq);
 	}
 	spin_unlock(&riq->lock);
-	//printk("RFUSE: payload slot released, riq_id: %d, slot: %d\n",
-	  //     riq->riq_id, slot);
+	printk("RFUSE: payload slot released, riq_id: %d, slot: %d\n",
+	       riq->riq_id, slot);
 }
 
 /************ 2. Ring buffer ************/

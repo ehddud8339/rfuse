@@ -79,7 +79,6 @@ __used __section("__versions") = {
 	{ 0x698bc347, "posix_acl_access_xattr_handler" },
 	{ 0x67c243fb, "no_llseek" },
 	{ 0x696b1581, "pid_nr_ns" },
-	{ 0x33c769, "_copy_from_iter" },
 	{ 0xefec2b6a, "__lock_page" },
 	{ 0xd3812956, "set_page_dirty_lock" },
 	{ 0x1f12bb46, "__percpu_down_read" },
@@ -329,7 +328,6 @@ __used __section("__versions") = {
 	{ 0x7de51ad5, "d_instantiate" },
 	{ 0x7b4da6ff, "__init_rwsem" },
 	{ 0xc878c836, "d_alloc_parallel" },
-	{ 0x88db9f48, "__check_object_size" },
 	{ 0x320e4b20, "__put_page" },
 	{ 0xd8482ad7, "file_check_and_advance_wb_err" },
 	{ 0x87e216ee, "clear_nlink" },
@@ -349,4 +347,4 @@ __used __section("__versions") = {
 MODULE_INFO(depends, "");
 
 
-MODULE_INFO(srcversion, "25A9A87971F0D82CB9E1407");
+MODULE_INFO(srcversion, "9279CF52EA21527C22B6532");

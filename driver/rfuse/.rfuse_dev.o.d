@@ -295,4 +295,6 @@ rfuse_dev.o: /home/ldy/rfuse/driver/rfuse/rfuse_dev.c \
  include/linux/vmpressure.h include/linux/eventfd.h include/linux/node.h \
  include/uapi/linux/mempolicy.h include/linux/splice.h \
  include/linux/random.h include/linux/once.h include/uapi/linux/random.h \
- include/linux/prandom.h arch/x86/include/asm/archrandom.h
+ include/linux/prandom.h arch/x86/include/asm/archrandom.h \
+ include/linux/delay.h arch/x86/include/asm/delay.h \
+ include/asm-generic/delay.h

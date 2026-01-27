@@ -145,7 +145,7 @@ extern "C" {
 #define RFUSE_PAYLOAD_BM			0x58000000ULL
 
 #define RFUSE_SLOT_SIZE				(16 * 1024)
-#define RFUSE_SLOT_COUNT			32
+#define RFUSE_SLOT_COUNT			64
 #ifndef BITS_TO_LONGS
 #define BITS_TO_LONGS(nr)		(((nr) + (sizeof(long) * 8) - 1) / (sizeof(long) * 8))
 #endif

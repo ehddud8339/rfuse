@@ -1197,6 +1197,9 @@ deps_/home/ldy/rfuse/driver/rfuse/rfuse_dev.o := \
   include/uapi/linux/random.h \
   include/linux/prandom.h \
   arch/x86/include/asm/archrandom.h \
+  include/linux/delay.h \
+  arch/x86/include/asm/delay.h \
+  include/asm-generic/delay.h \
 
 /home/ldy/rfuse/driver/rfuse/rfuse_dev.o: $(deps_/home/ldy/rfuse/driver/rfuse/rfuse_dev.o)
 

@@ -1098,14 +1098,14 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 	int riq_id = u_req->riq->riq_id;
 	long long int pp_req_index = ((long long int)req_index << 32) & RFUSE_REQ_IDX_MASK;
 	int pp_riq_id = (riq_id << 16) & RFUSE_RIQ_ID_MASK;
-  /*
   char snippet[3 * 30 + 1];
 	int snippet_len = 0;
 	int i;
-  */
 	size_t payload_len = r_req->payload_len;
 
-	if (payload_len > 0 && r_req->payload_index < RFUSE_SLOT_COUNT) {
+	if (payload_len > 0 &&
+	    payload_len <= RFUSE_SLOT_SIZE &&
+	    r_req->payload_index < RFUSE_SLOT_COUNT) {
 		param = (char *)riq->upayload[r_req->payload_index].data;
 		res = payload_len;
     /*
@@ -1129,21 +1129,18 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 				printf("Error : malloc for write I/O failed\n");
 				fuse_reply_err(u_req, EIO);
 			}
-			u_req->w->fbuf.size = FUSE_MAX_MAX_PAGES * getpagesize();
-		}
-	} 
+      u_req->w->fbuf.size =FUSE_MAX_MAX_PAGES * getpagesize();
+    }
 
-	// 1.Call a system call to receive the data from the kernel page
-	if (payload_len == 0 || r_req->payload_index >= RFUSE_SLOT_COUNT) {
-		// 1.Call a system call to receive the data from the kernel page
-		res = pread(ch ? ch->fd : se->fd, u_req->w->fbuf.mem, u_req->w->fbuf.size,
+    res = pread(ch ? ch->fd : se->fd, u_req->w->fbuf.mem, u_req->w->fbuf.size,
 			    (long long int)pp_riq_id | pp_req_index);
-		if(res == -1) {
-			printf("Error : pread for write I/O failed\n");
-			fuse_reply_err(u_req, EIO);
-		}
-		param = (char *)u_req->w->fbuf.mem;
-	} 
+  	if(res == -1) {
+	  	printf("Error : pread for write I/O failed\n");
+		  fuse_reply_err(u_req, EIO);
+      return;
+  	}
+	  param = (char *)u_req->w->fbuf.mem;
+	}
 
 	// 2. Call "u_req->se->op.write" to process write
 	memset(&fi, 0, sizeof(fi));

@@ -3157,18 +3157,8 @@ int fuse_session_mount(struct fuse_session *se, const char *mountpoint)
 			goto error_out;
 		}
 		fuse_log(FUSE_LOG_INFO, "rfuse: payload slot mmap success, riq_id: %d\n", riq[i]->riq_id);
-    /*
-		riq[i]->payloadbm.bitmap = (unsigned long *)mmap(0,
-				sizeof(unsigned long) * BITS_TO_LONGS(RFUSE_SLOT_COUNT),
-				PROT_READ | PROT_WRITE, MAP_SHARED,
-				fd, RFUSE_PAYLOAD_BM | riq_id);
-		if(riq[i]->payloadbm.bitmap == MAP_FAILED){
-			fuse_log(FUSE_LOG_ERR, "rfuse: failed to mmap payload bitmap, errno: %d\n", errno);
-			goto error_out;
-		}
-		fuse_log(FUSE_LOG_INFO, "rfuse: payload bitmap mmap success, riq_id: %d\n", riq[i]->riq_id);
-    */
-		printf("Complete mmap riq, mapped riq_id: %d\n", riq[i]->riq_id);
+
+    printf("Complete mmap riq, mapped riq_id: %d\n", riq[i]->riq_id);
 	}
 
 	se->riq = riq;
@@ -3207,11 +3197,7 @@ void fuse_session_unmount(struct fuse_session *se)
 			munmap(se->riq[i]->uarg,2*sizeof(struct rfuse_arg)*RFUSE_MAX_QUEUE_SIZE);
 			munmap(se->riq[i]->ureq,2*sizeof(struct rfuse_req)*RFUSE_MAX_QUEUE_SIZE);
       munmap(se->riq[i]->upayload, sizeof(struct rfuse_payload_slot) * RFUSE_SLOT_COUNT);
-      /*
-			munmap(se->riq[i]->payloadbm.bitmap,
-			       sizeof(unsigned long) * BITS_TO_LONGS(RFUSE_SLOT_COUNT));
-      */
-		}
+      }
 		//munmap(se->riq, sizeof(struct rfuse_iqueue) * RFUSE_NUM_IQUEUE);	
 		free(se->riq);
 		free(se->mountpoint);

@@ -32,7 +32,7 @@
 #define RFUSE_PAYLOAD_BM     0x58000000ULL
 
 #define RFUSE_SLOT_SIZE	     (16 * 1024)
-#define RFUSE_SLOT_COUNT     32
+#define RFUSE_SLOT_COUNT     64
 /* LDY */
 
 struct rfuse_req{
