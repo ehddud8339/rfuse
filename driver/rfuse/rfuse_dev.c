@@ -340,8 +340,7 @@ int rfuse_payload_slot_alloc(struct rfuse_iqueue *riq)
 
 	__set_bit(slot, riq->payloadbm.bitmap);
 	spin_unlock(&riq->lock);
-	printk("RFUSE: payload slot allocated, riq_id: %d, slot: %d\n",
-	       riq->riq_id, slot);
+	// printk("RFUSE: payload slot allocated, riq_id: %d, slot: %d\n", riq->riq_id, slot);
   return slot;
 }
 
@@ -366,8 +365,7 @@ void rfuse_payload_slot_release(struct rfuse_iqueue *riq, int slot)
 		//wake_up(&riq->waitq);
 	}
 	spin_unlock(&riq->lock);
-	printk("RFUSE: payload slot released, riq_id: %d, slot: %d\n",
-	       riq->riq_id, slot);
+	// printk("RFUSE: payload slot released, riq_id: %d, slot: %d\n", riq->riq_id, slot);
 }
 
 /************ 2. Ring buffer ************/
