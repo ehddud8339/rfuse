@@ -139,6 +139,28 @@ void fuse_cmdline_help(void)
 	       "                           allowed (default: 10)\n");
 }
 
+int rfuse_req_get_payload(fuse_req_t req, void **buf, size_t *len)
+{
+	struct rfuse_iqueue *riq;
+	struct rfuse_req *r_req;
+
+	if (!req)
+		return -EINVAL;
+
+	riq = req->riq;
+	r_req = &riq->ureq[req->index];
+
+	if (!r_req->payload_len || r_req->payload_index >= RFUSE_SLOT_COUNT)
+		return -ENOENT;
+
+	if (buf)
+		*buf = riq->upayload[r_req->payload_index].data;
+	if (len)
+		*len = r_req->payload_len;
+
+	return 0;
+}
+
 static int fuse_helper_opt_proc(void *data, const char *arg, int key,
 				struct fuse_args *outargs)
 {

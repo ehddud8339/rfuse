@@ -401,6 +401,34 @@ int fuse_reply_buf(fuse_req_t u_req, const char *buf, size_t size){
 	int riq_id = u_req->riq->riq_id;
 	long long int pp_req_index = ((long long int)req_index << 32) & RFUSE_REQ_IDX_MASK;
 	int pp_riq_id = (riq_id << 16) & RFUSE_RIQ_ID_MASK;
+	struct rfuse_iqueue *riq = u_req->riq;
+	struct rfuse_req *r_req = &riq->ureq[req_index];
+
+	if (size > 0 &&
+	    size <= RFUSE_SLOT_SIZE &&
+	    r_req->payload_index < RFUSE_SLOT_COUNT) {
+		struct ioctl_args {
+			int riq_id;
+			int req_index;
+		} args = { .riq_id = riq_id, .req_index = req_index };
+		int ioctl_res;
+
+		memcpy(riq->upayload[r_req->payload_index].data, buf, size);
+		r_req->payload_len = size;
+		r_req->out.arglen = size;
+		r_req->out.error = 0;
+		rfuse_smp_mb();
+
+		ioctl_res = ioctl(se->fd, RFUSE_READ_COMP_SIGNAL, &args);
+		if (ioctl_res != 0) {
+			if (errno == EAGAIN)
+				return -EAGAIN;
+			return -errno;
+		}
+
+		rfuse_free_req(u_req);
+		return 0;
+	}
 
 	ssize_t res = pwrite(ch ? ch->fd : se->fd, buf, size, (long long int)pp_riq_id | pp_req_index);
 	int err = errno;

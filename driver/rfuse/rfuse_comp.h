@@ -11,6 +11,7 @@
 #define RFUSE_WAKE_UP_COMP			37 
 #define RFUSE_REPLY_ASYNC		 	38 
 #define RFUSE_DAEMON_SLEEP			39 
+#define RFUSE_READ_COMP_SIGNAL		40
 
 // completion thread must only be set to one of the following states
 #define COMP_NEED_WAKEUP 			(1U << 0)

@@ -13,6 +13,7 @@
 #include <linux/swap.h>
 #include <linux/splice.h>
 #include <linux/sched.h>
+#include <linux/kthread.h>
 #include <linux/random.h>
 #include <linux/bitmap.h>
 #include <asm/atomic.h>
@@ -160,6 +161,8 @@ void rfuse_iqueue_init(struct fuse_conn *fc, void *priv){
 		riq[i]->riq_id = i;
 		init_waitqueue_head(&riq[i]->waitq);
 		init_waitqueue_head(&riq[i]->idle_user_waitq);
+		init_waitqueue_head(&riq[i]->read_comp_waitq);
+		atomic_set(&riq[i]->read_comp_pending, 0);
 		riq[i]->connected=1;
 		riq[i]->priv=priv;
 	
@@ -213,6 +216,15 @@ void rfuse_iqueue_init(struct fuse_conn *fc, void *priv){
 		riq[i]->active_background = 0;
 
 		riq[i]->num_sync_sleeping = 0;
+
+		riq[i]->read_comp_kthread =
+			kthread_run(rfuse_read_comp_kthread, riq[i],
+				    "rfuse_rdcomp/%d", i);
+		if (IS_ERR(riq[i]->read_comp_kthread)) {
+			printk("RFUSE ERROR: read comp kthread start failed, riq_id: %d\n",
+			       i);
+			riq[i]->read_comp_kthread = NULL;
+		}
 	}
 
 	fc->riq = riq;
@@ -223,6 +235,8 @@ void rfuse_iqueue_release(struct fuse_conn *fc){
 	struct rfuse_iqueue **riq = fc->riq;
 	
 	for(i = 0; i < RFUSE_NUM_IQUEUE; i++) {
+		if (riq[i]->read_comp_kthread)
+			kthread_stop(riq[i]->read_comp_kthread);
 		kfree(riq[i]->pending.kaddr);
 		kfree(riq[i]->interrupts.kaddr);
 		kfree(riq[i]->forgets.kaddr);
@@ -524,6 +538,43 @@ void rfuse_extract_complete_head(struct rfuse_iqueue *riq){
 	struct ring_buffer_1 *completes = &riq->completes;
 	unsigned int next = completes->head + 1;
 	smp_store_release(&completes->head,next);
+}
+
+static struct rfuse_address_entry *rfuse_read_complete_tail(struct rfuse_iqueue *riq){
+	struct ring_buffer_1 *completes = &riq->completes;
+	struct rfuse_address_entry *ret = NULL;
+	unsigned int head;
+	unsigned int next;
+
+	head = smp_load_acquire(&completes->head);
+	next = completes->tail + 1;
+
+	if (next - head <= completes->entries)
+		ret = &completes->kaddr[completes->tail & completes->mask];
+
+	return ret;
+}
+
+static void rfuse_submit_complete_tail(struct rfuse_iqueue *riq){
+	struct ring_buffer_1 *completes = &riq->completes;
+	unsigned int next = completes->tail + 1;
+
+	smp_store_release(&completes->tail, next);
+}
+
+int rfuse_queue_read_complete(struct rfuse_iqueue *riq,
+			      struct rfuse_req *r_req)
+{
+	struct rfuse_address_entry *entry;
+
+	entry = rfuse_read_complete_tail(riq);
+	if (!entry)
+		return -EAGAIN;
+
+	entry->request = r_req->index;
+	rfuse_submit_complete_tail(riq);
+
+	return 0;
 }
 
 /************ 3. Request & Argument ************/
@@ -960,6 +1011,7 @@ static void rfuse_request_wait_answer(struct rfuse_req *r_req){
 	struct fuse_conn *fc = r_req->fm->fc;
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
 	int err;
+	size_t payload_len;
 
 #ifdef DEBUG
 	int i;
@@ -980,8 +1032,21 @@ static void rfuse_request_wait_answer(struct rfuse_req *r_req){
 		}
 #endif
 
-		if (!err)
+		if (!err) {
+			if (!test_bit(FR_ASYNC, &r_req->flags) &&
+			    r_req->in.opcode == FUSE_READ) {
+				smp_rmb();
+				payload_len = r_req->payload_len;
+				if (payload_len &&
+				    payload_len <= RFUSE_SLOT_SIZE &&
+				    r_req->payload_index < RFUSE_SLOT_COUNT) {
+					rfuse_copy_slot_to_pages(riq, r_req, payload_len);
+					rfuse_payload_slot_release(riq, r_req->payload_index);
+					rfuse_request_end(r_req);
+				}
+			}
 			return;
+		}
 
 		set_bit(FR_INTERRUPTED, &r_req->flags);
 		smp_mb__after_atomic();
@@ -993,8 +1058,21 @@ static void rfuse_request_wait_answer(struct rfuse_req *r_req){
 		/* Only fatal signals may interrupt this */
 		err = wait_event_killable(r_req->waitq,
 				test_bit(FR_FINISHED, &r_req->flags));
-		if (!err)
+		if (!err) {
+			if (!test_bit(FR_ASYNC, &r_req->flags) &&
+			    r_req->in.opcode == FUSE_READ) {
+				smp_rmb();
+				payload_len = r_req->payload_len;
+				if (payload_len &&
+				    payload_len <= RFUSE_SLOT_SIZE &&
+				    r_req->payload_index < RFUSE_SLOT_COUNT) {
+					rfuse_copy_slot_to_pages(riq, r_req, payload_len);
+					rfuse_payload_slot_release(riq, r_req->payload_index);
+					rfuse_request_end(r_req);
+				}
+			}
 			return;
+		}
 
 		spin_lock(&riq->lock);
 		/* Request is not yet in userspace, bail out */
@@ -1012,6 +1090,18 @@ static void rfuse_request_wait_answer(struct rfuse_req *r_req){
 	 * Wait it out.
 	 */
 	wait_event(r_req->waitq, test_bit(FR_FINISHED, &r_req->flags));
+	if (!test_bit(FR_ASYNC, &r_req->flags) &&
+	    r_req->in.opcode == FUSE_READ) {
+		smp_rmb();
+		payload_len = r_req->payload_len;
+		if (payload_len &&
+		    payload_len <= RFUSE_SLOT_SIZE &&
+		    r_req->payload_index < RFUSE_SLOT_COUNT) {
+			rfuse_copy_slot_to_pages(riq, r_req, payload_len);
+			rfuse_payload_slot_release(riq, r_req->payload_index);
+			rfuse_request_end(r_req);
+		}
+	}
 }
 
 static void rfuse_queue_request(struct rfuse_req *r_req){
@@ -1507,6 +1597,57 @@ static int rfuse_copy_page(struct rfuse_copy_state *rcs, struct page **pagep,
 	return 0;
 }
 
+int rfuse_copy_slot_to_pages(struct rfuse_iqueue *riq, struct rfuse_req *r_req,
+			     size_t count)
+{
+	struct rfuse_pages *rp = r_req->rp;
+	size_t copied = 0;
+	unsigned int i;
+
+	if (!rp)
+		return 0;
+
+	if (count > RFUSE_SLOT_SIZE)
+		count = RFUSE_SLOT_SIZE;
+
+	for (i = 0; i < rp->num_pages && copied < count; i++) {
+		struct page *page = rp->pages[i];
+		unsigned int offset = rp->descs[i].offset;
+		unsigned int len = min_t(size_t, rp->descs[i].length,
+					 count - copied);
+		void *mapaddr;
+
+		mapaddr = kmap_atomic(page);
+		memcpy(mapaddr + offset,
+		       riq->kpayload[r_req->payload_index].data + copied,
+		       len);
+		kunmap_atomic(mapaddr);
+		copied += len;
+	}
+
+	return copied;
+}
+
+int rfuse_get_payload_slot(struct rfuse_iqueue *riq, struct rfuse_req *r_req,
+			   void **slot_buf, size_t *len)
+{
+	if (!riq || !r_req)
+		return -EINVAL;
+
+	if (!r_req->payload_len || r_req->payload_len > RFUSE_SLOT_SIZE)
+		return -EINVAL;
+
+	if (r_req->payload_index >= RFUSE_SLOT_COUNT)
+		return -EINVAL;
+
+	if (slot_buf)
+		*slot_buf = riq->kpayload[r_req->payload_index].data;
+	if (len)
+		*len = r_req->payload_len;
+
+	return r_req->payload_index;
+}
+
 static int rfuse_copy_pages(struct rfuse_copy_state *rcs, unsigned nbytes,
 		int zeroing)
 {
@@ -1529,6 +1670,14 @@ static int rfuse_copy_pages(struct rfuse_copy_state *rcs, unsigned nbytes,
 		nbytes -= count;
 	}
 	return 0;
+}
+
+static bool rfuse_read_uses_payload_slot(struct rfuse_req *r_req)
+{
+	return r_req->in.opcode == FUSE_READ &&
+		r_req->payload_len &&
+		r_req->payload_len <= RFUSE_SLOT_SIZE &&
+		r_req->payload_index < RFUSE_SLOT_COUNT;
 }
 
 ssize_t rfuse_dev_do_read(struct fuse_dev *fud, struct file *file, struct iov_iter *to, size_t garbage, loff_t index)
@@ -1645,6 +1794,16 @@ ssize_t rfuse_dev_do_write(struct fuse_dev *fud, struct iov_iter *from, unsigned
 	int req_index = (int)((index & RFUSE_REQ_IDX_MASK) >> 32);
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, riq_id);
 	struct rfuse_req *r_req = (struct rfuse_req*)&riq->kreq[req_index];
+
+	if (rfuse_read_uses_payload_slot(r_req)) {
+		u32 out_len = r_req->out.arglen ? r_req->out.arglen
+						: r_req->payload_len;
+
+		r_req->out.arglen = min_t(u32, r_req->payload_len, out_len);
+		if (!rfuse_queue_read_complete(riq, r_req))
+			rfuse_read_comp_signal(riq);
+		return nbytes;
+	}
 
 	rp = r_req->rp;
 	rfuse_copy_init(&rcs, 0 ,from);	

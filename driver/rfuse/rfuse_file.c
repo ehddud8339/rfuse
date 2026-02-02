@@ -2393,6 +2393,7 @@ static ssize_t rfuse_send_read(struct rfuse_io_args *ria, loff_t pos, size_t cou
 	struct fuse_mount *fm = ff->fm;
 	struct fuse_read_in *inarg;
 	struct rfuse_req *r_req;
+	struct rfuse_iqueue *riq;
 	int res;
 
 	/* Allocate rfuse request for write) */
@@ -2403,6 +2404,20 @@ static ssize_t rfuse_send_read(struct rfuse_io_args *ria, loff_t pos, size_t cou
 	}
 	ria->r_req = r_req;
 	ria->r_req->out_pages = true;
+
+	if (count <= RFUSE_SLOT_SIZE) {
+		riq = rfuse_get_specific_iqueue(fm->fc, r_req->riq_id);
+		r_req->payload_index = rfuse_payload_slot_alloc(riq);
+		if (r_req->payload_index >= 0)
+			r_req->payload_len = count;
+		else {
+			r_req->payload_index = RFUSE_SLOT_COUNT;
+			r_req->payload_len = 0;
+		}
+	} else {
+		r_req->payload_index = RFUSE_SLOT_COUNT;
+		r_req->payload_len = 0;
+	}
 
 	inarg = (struct fuse_read_in *)&r_req->args;
 	rfuse_read_args_fill(ria, file, pos, count, FUSE_READ);

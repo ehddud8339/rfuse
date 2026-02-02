@@ -1343,6 +1343,13 @@ struct rfuse_iqueue *rfuse_get_specific_iqueue(struct fuse_conn *fc, int riq_id)
 /* LDY */
 int rfuse_payload_slot_alloc(struct rfuse_iqueue *riq);
 void rfuse_payload_slot_release(struct rfuse_iqueue *riq, int slot);
+int rfuse_read_comp_kthread(void *data);
+void rfuse_read_comp_signal(struct rfuse_iqueue *riq);
+int rfuse_copy_slot_to_pages(struct rfuse_iqueue *riq, struct rfuse_req *r_req,
+			     size_t count);
+int rfuse_get_payload_slot(struct rfuse_iqueue *riq, struct rfuse_req *r_req,
+			   void **slot_buf, size_t *len);
+int rfuse_queue_read_complete(struct rfuse_iqueue *riq, struct rfuse_req *r_req);
 /* LDY */
 
 // OPERATIONS

@@ -8,8 +8,11 @@
 #include <linux/wait.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
+#include <linux/atomic.h>
  
 #include "rfuse_comp.h"
+
+struct task_struct;
 
 #define RFUSE_NUM_IQUEUE     40           // Number of rfuse iqueue
 #define RFUSE_MAX_QUEUE_SIZE 1024*4      // Maximum number of requests in a queue
@@ -219,6 +222,11 @@ struct rfuse_iqueue{
   /* LDY */
 
 	wait_queue_head_t idle_user_waitq;
+
+	/** async read completion handling **/
+	wait_queue_head_t read_comp_waitq;
+	atomic_t read_comp_pending;
+	struct task_struct *read_comp_kthread;
 
 	/** synchronous request congestion control */
 	int num_sync_sleeping;

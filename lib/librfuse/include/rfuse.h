@@ -118,6 +118,7 @@ extern "C" {
 #define RFUSE_WAKE_UP_COMP 			37
 #define RFUSE_REPLY_ASYNC		 	38
 #define RFUSE_DAEMON_SLEEP 			39
+#define RFUSE_READ_COMP_SIGNAL		40
 
 // state for recognizing whether the completion thread is woken up by user request
 #define COMP_NEED_WAKEUP_FROM_USER  (1U << 3)
@@ -333,6 +334,8 @@ struct rfuse_mt {
 	int max_idle;
 	int riq_id;
 };
+
+int rfuse_req_get_payload(fuse_req_t req, void **buf, size_t *len);
 // ******************************* rfuse_lowlevel.c Operations ******************************* //
 /**
  * @brief Read pending queue's head 

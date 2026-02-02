@@ -2403,6 +2403,26 @@ static long fuse_dev_ioctl(struct file *file, unsigned int cmd,
 			res = 0;
 			// printk("RFUSE: It is time to work! Wake up user-level daemon, riq_id: %d, entries: %d\n", args.riq_id, riq->pending.tail - riq->pending.head);
 			break;
+		case RFUSE_READ_COMP_SIGNAL:
+			fud = fuse_get_dev(file);
+			res = -EFAULT;
+			if(copy_from_user(&args, (char __user *)arg, sizeof(struct ioctl_args)))
+				break;
+
+			riq = rfuse_get_specific_iqueue(fud->fc, args.riq_id);
+			r_req = (struct rfuse_req*)&riq->kreq[args.req_index];
+			if (test_bit(FR_ASYNC, &r_req->flags)) {
+				res = rfuse_queue_read_complete(riq, r_req);
+				if (!res)
+					rfuse_read_comp_signal(riq);
+			} else {
+				set_bit(FR_FINISHED, &r_req->flags);
+				smp_mb__after_atomic();
+				if (waitqueue_active(&r_req->waitq))
+					wake_up(&r_req->waitq);
+				res = 0;
+			}
+			break;
 		default:
 			res = -ENOTTY;
 			break;

@@ -902,13 +902,29 @@ static void stackfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size,
 		fuse_reply_data(req, &buf, FUSE_BUF_SPLICE_MOVE);
 	} else {
 		char *buf;
+		struct rfuse_iqueue *riq = req->riq;
+		struct rfuse_req *r_req = &riq->ureq[req->index];
+		void *slot_buf = NULL;
+		size_t slot_len = 0;
 
 		//StackFS_trace("Read on name : %s, Kernel inode : %llu, fuse inode : %llu, off : %lu, size : %zu",
 		//			lo_name(req, ino), get_lower_fuse_inode_no(req, ino), get_higher_fuse_inode_no(req, ino), offset, size);
+		if (rfuse_req_get_payload(req, &slot_buf, &slot_len) == 0) {
+			size_t read_len = size < slot_len ? size : slot_len;
+
+			res = pread(fi->fh, slot_buf, read_len, offset);
+			if (res == -1)
+				return (void) fuse_reply_err(req, errno);
+			r_req->payload_len = res;
+			res = fuse_reply_buf(req, slot_buf, res);
+			return;
+		}
+
 		buf = (char *)malloc(size);
 		res = pread(fi->fh, buf, size, offset);
 		if (res == -1)
 			return (void) fuse_reply_err(req, errno);
+		r_req->payload_len = res;
 		res = fuse_reply_buf(req, buf, res);
 		free(buf);
 	}
