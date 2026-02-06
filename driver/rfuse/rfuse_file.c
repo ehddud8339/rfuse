@@ -2045,7 +2045,7 @@ static void rfuse_readpages_end(struct fuse_mount *fm, struct rfuse_req *r_req, 
  * - This is used in the generic_file_read_iter
  **/
 
-static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file){
+static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, int is_async){
 	struct fuse_file *ff = file->private_data;
 	struct fuse_mount *fm = ff->fm;
 	struct rfuse_pages *rp = &ria->rp;
@@ -2056,7 +2056,8 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file){
 	ssize_t res;
 	int err;
 
-	if(fm->fc->async_read)
+	//if(fm->fc->async_read)
+  if(is_async)
 		r_req = try_rfuse_get_req(fm, true, false, NULL);
 	else 
 		r_req = rfuse_get_req(fm, false, false);
@@ -2076,7 +2077,8 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file){
 
 	rfuse_read_args_fill(ria, file, pos, count, FUSE_READ);
 	ria->read.attr_ver = fuse_get_attr_version(fm->fc);
-	if (fm->fc->async_read) {
+	//if (fm->fc->async_read) {
+  if (is_async) {
 		ria->ff = rfuse_file_get(ff);
 		r_req->end = rfuse_readpages_end;
 		err = rfuse_simple_background(fm, r_req);
@@ -2124,7 +2126,7 @@ void rfuse_readahead(struct readahead_control *rac)
 			rp->descs[i].length = PAGE_SIZE;
 		}
 		rp->num_pages = nr_pages;
-		rfuse_send_readpages(ria, rac->file);
+		rfuse_send_readpages(ria, rac->file, rac->ra->async_size);
 	}
 }
 
