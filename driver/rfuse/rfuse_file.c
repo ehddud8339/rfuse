@@ -2056,8 +2056,13 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, i
 	ssize_t res;
 	int err;
 
+<<<<<<< HEAD
 	if(fm->fc->async_read)
   //if(is_async)
+=======
+	//if(fm->fc->async_read)
+  if (is_async)
+>>>>>>> From local: update main
 		r_req = try_rfuse_get_req(fm, true, false, NULL);
 	else 
 		r_req = rfuse_get_req(fm, false, false);
@@ -2077,8 +2082,13 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, i
 
 	rfuse_read_args_fill(ria, file, pos, count, FUSE_READ);
 	ria->read.attr_ver = fuse_get_attr_version(fm->fc);
+<<<<<<< HEAD
 	if (fm->fc->async_read) {
   //if (is_async) {
+=======
+  if (is_async) {
+	//if (fm->fc->async_read) {
+>>>>>>> From local: update main
 		ria->ff = rfuse_file_get(ff);
 		r_req->end = rfuse_readpages_end;
 		err = rfuse_simple_background(fm, r_req);
