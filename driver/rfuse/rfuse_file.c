@@ -587,11 +587,11 @@ static int rfuse_get_user_pages(struct rfuse_io_args *ria, struct iov_iter *ii,
 		*/
 	}
 
-	printk("rfuse_get_uesr_pages: nbytesp : %ld, max_pages: %d\n", *nbytesp, max_pages);
+	//printk("rfuse_get_uesr_pages: nbytesp : %ld, max_pages: %d\n", *nbytesp, max_pages);
 	while (nbytes < *nbytesp && rp->num_pages < max_pages) {
 		unsigned npages;
 		size_t start;
-		printk("rfuse_get_user_pages: while start\n");
+		//printk("rfuse_get_user_pages: while start\n");
 		ret = iov_iter_get_pages(ii, &rp->pages[rp->num_pages],
 					*nbytesp - nbytes,
 					max_pages - rp->num_pages,
