@@ -1,8 +1,8 @@
-cmd_/home/ldy/src/rfuse/driver/fuse/control.o := gcc -Wp,-MMD,/home/ldy/src/rfuse/driver/fuse/.control.o.d  -nostdinc -isystem /usr/lib/gcc/x86_64-linux-gnu/9/include -I./arch/x86/include -I./arch/x86/include/generated  -I./include -I./arch/x86/include/uapi -I./arch/x86/include/generated/uapi -I./include/uapi -I./include/generated/uapi -include ./include/linux/compiler-version.h -include ./include/linux/kconfig.h -include ./include/linux/compiler_types.h -D__KERNEL__ -fmacro-prefix-map=./= -Wall -Wundef -Werror=strict-prototypes -Wno-trigraphs -fno-strict-aliasing -fno-common -fshort-wchar -fno-PIE -Werror=implicit-function-declaration -Werror=implicit-int -Werror=return-type -Wno-format-security -std=gnu89 -mno-sse -mno-mmx -mno-sse2 -mno-3dnow -mno-avx -fcf-protection=none -m64 -falign-jumps=1 -falign-loops=1 -mno-80387 -mno-fp-ret-in-387 -mpreferred-stack-boundary=3 -mskip-rax-setup -mtune=generic -mno-red-zone -mcmodel=kernel -DCONFIG_X86_X32_ABI -Wno-sign-compare -fno-asynchronous-unwind-tables -mindirect-branch=thunk-extern -mindirect-branch-register -fno-jump-tables -fno-delete-null-pointer-checks -Wno-frame-address -Wno-format-truncation -Wno-format-overflow -Wno-address-of-packed-member -O2 --param=allow-store-data-races=0 -Wframe-larger-than=1024 -fstack-protector-strong -Wimplicit-fallthrough=5 -Wno-main -Wno-unused-but-set-variable -Wno-unused-const-variable -fno-omit-frame-pointer -fno-optimize-sibling-calls -fno-stack-clash-protection -g -gdwarf-4 -pg -mrecord-mcount -mfentry -DCC_USING_FENTRY -Wdeclaration-after-statement -Wvla -Wno-pointer-sign -Wno-stringop-truncation -Wno-array-bounds -Wno-stringop-overflow -Wno-restrict -Wno-maybe-uninitialized -fno-strict-overflow -fno-stack-check -fconserve-stack -Werror=date-time -Werror=incompatible-pointer-types -Werror=designated-init -Wno-packed-not-aligned  -DMODULE  -DKBUILD_BASENAME='"control"' -DKBUILD_MODNAME='"fuse"' -D__KBUILD_MODNAME=kmod_fuse -c -o /home/ldy/src/rfuse/driver/fuse/control.o /home/ldy/src/rfuse/driver/fuse/control.c
+cmd_/mnt/dev250/home/ldy/rfuse/driver/fuse/control.o := gcc -Wp,-MMD,/mnt/dev250/home/ldy/rfuse/driver/fuse/.control.o.d  -nostdinc -isystem /usr/lib/gcc/x86_64-linux-gnu/9/include -I./arch/x86/include -I./arch/x86/include/generated  -I./include -I./arch/x86/include/uapi -I./arch/x86/include/generated/uapi -I./include/uapi -I./include/generated/uapi -include ./include/linux/compiler-version.h -include ./include/linux/kconfig.h -include ./include/linux/compiler_types.h -D__KERNEL__ -fmacro-prefix-map=./= -Wall -Wundef -Werror=strict-prototypes -Wno-trigraphs -fno-strict-aliasing -fno-common -fshort-wchar -fno-PIE -Werror=implicit-function-declaration -Werror=implicit-int -Werror=return-type -Wno-format-security -std=gnu89 -mno-sse -mno-mmx -mno-sse2 -mno-3dnow -mno-avx -fcf-protection=none -m64 -falign-jumps=1 -falign-loops=1 -mno-80387 -mno-fp-ret-in-387 -mpreferred-stack-boundary=3 -mskip-rax-setup -mtune=generic -mno-red-zone -mcmodel=kernel -DCONFIG_X86_X32_ABI -Wno-sign-compare -fno-asynchronous-unwind-tables -mindirect-branch=thunk-extern -mindirect-branch-register -fno-jump-tables -fno-delete-null-pointer-checks -Wno-frame-address -Wno-format-truncation -Wno-format-overflow -Wno-address-of-packed-member -O2 --param=allow-store-data-races=0 -Wframe-larger-than=1024 -fstack-protector-strong -Wimplicit-fallthrough=5 -Wno-main -Wno-unused-but-set-variable -Wno-unused-const-variable -fno-omit-frame-pointer -fno-optimize-sibling-calls -fno-stack-clash-protection -g -gdwarf-4 -pg -mrecord-mcount -mfentry -DCC_USING_FENTRY -Wdeclaration-after-statement -Wvla -Wno-pointer-sign -Wno-stringop-truncation -Wno-array-bounds -Wno-stringop-overflow -Wno-restrict -Wno-maybe-uninitialized -fno-strict-overflow -fno-stack-check -fconserve-stack -Werror=date-time -Werror=incompatible-pointer-types -Werror=designated-init -Wno-packed-not-aligned  -DMODULE  -DKBUILD_BASENAME='"control"' -DKBUILD_MODNAME='"fuse"' -D__KBUILD_MODNAME=kmod_fuse -c -o /mnt/dev250/home/ldy/rfuse/driver/fuse/control.o /mnt/dev250/home/ldy/rfuse/driver/fuse/control.c
 
-source_/home/ldy/src/rfuse/driver/fuse/control.o := /home/ldy/src/rfuse/driver/fuse/control.c
+source_/mnt/dev250/home/ldy/rfuse/driver/fuse/control.o := /mnt/dev250/home/ldy/rfuse/driver/fuse/control.c
 
-deps_/home/ldy/src/rfuse/driver/fuse/control.o := \
+deps_/mnt/dev250/home/ldy/rfuse/driver/fuse/control.o := \
   include/linux/compiler-version.h \
     $(wildcard include/config/CC_VERSION_TEXT) \
   include/linux/kconfig.h \
@@ -17,7 +17,7 @@ deps_/home/ldy/src/rfuse/driver/fuse/control.o := \
     $(wildcard include/config/RETPOLINE) \
     $(wildcard include/config/ARCH_USE_BUILTIN_BSWAP) \
     $(wildcard include/config/KCOV) \
-  /home/ldy/src/rfuse/driver/fuse/fuse_i.h \
+  /mnt/dev250/home/ldy/rfuse/driver/fuse/fuse_i.h \
     $(wildcard include/config/FUSE_DAX) \
     $(wildcard include/config/VIRTIO_FS) \
   include/uapi/linux/fuse.h \
@@ -1183,6 +1183,6 @@ deps_/home/ldy/src/rfuse/driver/fuse/control.o := \
     $(wildcard include/config/SECURITYFS) \
   include/linux/kernel_read_file.h \
 
-/home/ldy/src/rfuse/driver/fuse/control.o: $(deps_/home/ldy/src/rfuse/driver/fuse/control.o)
+/mnt/dev250/home/ldy/rfuse/driver/fuse/control.o: $(deps_/mnt/dev250/home/ldy/rfuse/driver/fuse/control.o)
 
-$(deps_/home/ldy/src/rfuse/driver/fuse/control.o):
+$(deps_/mnt/dev250/home/ldy/rfuse/driver/fuse/control.o):

@@ -1,10 +1,10 @@
-file.o: /home/ldy/src/rfuse/driver/fuse/file.c \
+file.o: /mnt/dev250/home/ldy/rfuse/driver/fuse/file.c \
  include/linux/compiler-version.h include/linux/kconfig.h \
  include/generated/autoconf.h include/linux/compiler_types.h \
  include/linux/compiler_attributes.h include/linux/compiler-gcc.h \
- /home/ldy/src/rfuse/driver/fuse/fuse_i.h include/uapi/linux/fuse.h \
- include/linux/types.h include/uapi/linux/types.h \
- arch/x86/include/generated/uapi/asm/types.h \
+ /mnt/dev250/home/ldy/rfuse/driver/fuse/fuse_i.h \
+ include/uapi/linux/fuse.h include/linux/types.h \
+ include/uapi/linux/types.h arch/x86/include/generated/uapi/asm/types.h \
  include/uapi/asm-generic/types.h include/asm-generic/int-ll64.h \
  include/uapi/asm-generic/int-ll64.h \
  arch/x86/include/uapi/asm/bitsperlong.h \

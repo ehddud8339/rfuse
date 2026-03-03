@@ -1,1 +1,1 @@
-cmd_/home/ldy/src/rfuse/driver/fuse/modules.order := {   echo /home/ldy/src/rfuse/driver/fuse/fuse.ko; :; } | awk '!x[$$0]++' - > /home/ldy/src/rfuse/driver/fuse/modules.order
+cmd_/mnt/dev250/home/ldy/rfuse/driver/fuse/modules.order := {   echo /mnt/dev250/home/ldy/rfuse/driver/fuse/fuse.ko; :; } | awk '!x[$$0]++' - > /mnt/dev250/home/ldy/rfuse/driver/fuse/modules.order
