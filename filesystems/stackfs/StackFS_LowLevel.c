@@ -28,7 +28,7 @@
 #include <errno.h>
 #include <fuse.h>
 #include <fuse_lowlevel.h>
-//#include <rfuse.h>
+#include <rfuse.h>
 #include <assert.h>
 #include <stddef.h>
 #include <fcntl.h> /* Definition of AT_* constants */
@@ -433,6 +433,8 @@ static int delete_from_hash_table(struct lo_data *lo_data,
 	prev = next = NULL;
 	size_t hash = 0;
 
+	pthread_spin_lock(&lo_data->spinlock);
+
 	prev = lo_inode->prev;
 	next = lo_inode->next;
 
@@ -460,6 +462,7 @@ del_out:
 	if (lo_data->hash_table.use < lo_data->hash_table.size / 4)
 		remerge_hash_table(lo_data);
 
+	pthread_spin_unlock(&lo_data->spinlock);
 	return 0;
 }
 
@@ -734,8 +737,6 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 		pthread_spin_lock(&lo_data->spinlock);
 
 		res = insert_to_hash_table(lo_data, lo_inode);
-		if (res != -1)
-			lo_inode->nlookup++;
 
 		pthread_spin_unlock(&lo_data->spinlock);
 
@@ -744,6 +745,7 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 			free(lo_inode);
 			fuse_reply_err(req, EBUSY);
 		} else {
+			lo_inode->nlookup++;
 			e.ino = lo_inode->lo_ino;
 			//StackFS_trace("Create called, e.ino : %llu", e.ino);
 			fi->fh = fd;
@@ -818,8 +820,6 @@ static void stackfs_ll_mkdir(fuse_req_t req, fuse_ino_t parent,
 		pthread_spin_lock(&lo_data->spinlock);
 
 		res = insert_to_hash_table(lo_data, lo_inode);
-		if (res != -1)
-			lo_inode->nlookup++;
 
 		pthread_spin_unlock(&lo_data->spinlock);
 
@@ -828,6 +828,7 @@ static void stackfs_ll_mkdir(fuse_req_t req, fuse_ino_t parent,
 			free(lo_inode);
 			fuse_reply_err(req, EBUSY);
 		} else {
+			lo_inode->nlookup++;
 			e.ino = lo_inode->lo_ino;
 			//printf("Making directory finished\n");
 			fuse_reply_entry(req, &e);
@@ -888,7 +889,7 @@ static void stackfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size,
 	int res;
 	(void) ino;
 
-	//StackFS_trace("StackFS Read start on inode : %llu", get_lower_fuse_inode_no(req, ino));
+	StackFS_trace("StackFS Read start on inode : %llu", get_lower_fuse_inode_no(req, ino));
 	if (USE_SPLICE) {
 		struct fuse_bufvec buf = FUSE_BUFVEC_INIT(size);
 
@@ -911,7 +912,7 @@ static void stackfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size,
 		res = fuse_reply_buf(req, buf, res);
 		free(buf);
 	}
-	//StackFS_trace("StackFS Read end on inode : %llu", get_lower_fuse_inode_no(req, ino));
+	StackFS_trace("StackFS Read end on inode : %llu", get_lower_fuse_inode_no(req, ino));
 }
 
 
@@ -1118,19 +1119,13 @@ static void stackfs_ll_rmdir(fuse_req_t req, fuse_ino_t parent,
 static void forget_inode(fuse_req_t req, struct lo_inode *inode,
 		uint64_t nlookup)
 {
-	struct lo_data *lo_data;
-	int res = 0;
-
-	lo_data = get_lo_data(req);
-	pthread_spin_lock(&lo_data->spinlock);
+	int res;
 
 	assert(inode->nlookup >= nlookup);
 	inode->nlookup -= nlookup;
 
-	if (!inode->nlookup && inode != &lo_data->root)
-		res = delete_from_hash_table(lo_data, inode);
-
-	pthread_spin_unlock(&lo_data->spinlock);
+	if (!inode->nlookup)
+		res = delete_from_hash_table(get_lo_data(req), inode);
 
 	(void) res;
 }
@@ -1186,11 +1181,11 @@ static void stackfs_ll_rename(fuse_req_t req, fuse_ino_t parent, const char *nam
 		      fuse_ino_t newparent, const char *newname,
 		      unsigned int flags)
 {
-	int res;
-	struct stat st;
+	struct fuse_entry_param e;
+	int res, statres;
 	char *oldPath = NULL;
 	char *newPath = NULL;
-	struct lo_data *lo_data;
+	double attr_val;
 
 	if (flags) {
 		fuse_reply_err(req, EINVAL);
@@ -1199,63 +1194,39 @@ static void stackfs_ll_rename(fuse_req_t req, fuse_ino_t parent, const char *nam
 
 	oldPath = (char*)malloc(PATH_MAX);
 	newPath = (char*)malloc(PATH_MAX);
-	if (!oldPath || !newPath) {
-		fuse_reply_err(req, ENOMEM);
-		goto rename_out;
-	}
 	
 	construct_full_path(req, parent, oldPath, name);
 	construct_full_path(req, newparent, newPath, newname);
 
 	res = rename(oldPath, newPath);
-	if (res == -1) {
-		fuse_reply_err(req, errno);
-		goto rename_out;
-	}
+	
+	attr_val = lo_attr_valid_time(req);
+	memset(&e, 0, sizeof(e));
 
-	res = stat(newPath, &st);
-	if (res == 0) {
+	e.attr_timeout = attr_val;
+	e.entry_timeout = attr_val; /* dentry timeout */
+
+	statres = stat(newPath, &e.attr);
+
+	if (statres == 0) {
 		struct lo_inode *inode;
-		struct lo_inode *prev;
-		struct lo_inode *next;
-		size_t oldhash;
-		size_t newhash;
 
-		lo_data = get_lo_data(req);
-		pthread_spin_lock(&lo_data->spinlock);
+		inode = find_lo_inode(req, &e.attr, oldPath);
 
-		inode = lookup_lo_inode(lo_data, &st, oldPath);
-		if (inode) {
-			prev = inode->prev;
-			next = inode->next;
-			oldhash = name_hash(lo_data, inode->ino, inode->name);
-
-			if (prev)
-				prev->next = next;
-			else
-				lo_data->hash_table.array[oldhash] = next;
-
-			if (next)
-				next->prev = prev;
-
+		if (!inode)
+			fuse_reply_err(req, ENOMEM);
+		else {
 			free(inode->name);
-			inode->name = newPath;
-			newPath = NULL;
-			inode->prev = NULL;
-
-			newhash = name_hash(lo_data, inode->ino, inode->name);
-			inode->next = lo_data->hash_table.array[newhash];
-			if (inode->next)
-				inode->next->prev = inode;
-			lo_data->hash_table.array[newhash] = inode;
+			inode->name = strdup(newPath);
+			// e.ino = inode->lo_ino;
+			// fuse_reply_entry(req, &e);
 		}
-
-		pthread_spin_unlock(&lo_data->spinlock);
+	} else {
+		fuse_reply_err(req, ENOENT);
 	}
 
-	fuse_reply_err(req, 0);
+	fuse_reply_err(req, res == -1 ? errno : 0);
 
-rename_out:
 	if(oldPath)
 		free(oldPath);
 	if(newPath)
@@ -1315,8 +1286,6 @@ static void stackfs_ll_symlink(fuse_req_t req, const char *link, fuse_ino_t pare
 		pthread_spin_lock(&lo_data->spinlock);
 
 		res = insert_to_hash_table(lo_data, lo_inode);
-		if (res != -1)
-			lo_inode->nlookup++;
 
 		pthread_spin_unlock(&lo_data->spinlock);
 
@@ -1325,6 +1294,7 @@ static void stackfs_ll_symlink(fuse_req_t req, const char *link, fuse_ino_t pare
 			free(lo_inode);
 			fuse_reply_err(req, EBUSY);
 		} else {
+			lo_inode->nlookup++;
 			e.ino = lo_inode->lo_ino;
 			//StackFS_trace("Create called, e.ino : %llu", e.ino);
 			fuse_reply_entry(req, &e);
@@ -1405,8 +1375,6 @@ static void stackfs_ll_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t newparent
 		pthread_spin_lock(&lo_data->spinlock);
 
 		res = insert_to_hash_table(lo_data, lo_inode);
-		if (res != -1)
-			lo_inode->nlookup++;
 
 		pthread_spin_unlock(&lo_data->spinlock);
 
@@ -1415,6 +1383,7 @@ static void stackfs_ll_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t newparent
 			free(lo_inode);
 			fuse_reply_err(req, EBUSY);
 		} else {
+			lo_inode->nlookup++;
 			e.ino = lo_inode->lo_ino;
 			//StackFS_trace("Create called, e.ino : %llu", e.ino);
 			fuse_reply_entry(req, &e);
