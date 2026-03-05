@@ -16,7 +16,6 @@
 #include <linux/random.h>
 #include <asm/atomic.h>
 
-#include <linux/ktime.h>
 #include <linux/time.h>
 #include <linux/timekeeping.h>
 
@@ -953,23 +952,11 @@ static void rfuse_queue_request(struct rfuse_req *r_req){
 	spin_lock(&riq->lock);						// set lock
 	entry = rfuse_read_pending_tail(riq);		// Get an entry
 	r_req->in.unique = rfuse_get_unique(riq); 
-	if (r_req->in.opcode == FUSE_READ || r_req->in.opcode == FUSE_WRITE) {
-		pr_info("rfuse-lat stage=req_init ts=%llu riq=%d req=%u unique=%llu opcode=%u\n",
-			ktime_get_ns(), r_req->riq_id, r_req->index, r_req->in.unique,
-			r_req->in.opcode);
-	}
-	
 	entry->request = r_req->index;				// fill entry
 	if(!test_bit(FR_BACKGROUND, &r_req->flags)) // only increase the reference count for synchronous requests
 		__rfuse_get_request(r_req);
 	rfuse_submit_pending_tail(riq);				// Commit entry
 	spin_unlock(&riq->lock);					// unlock
-	if (r_req->in.opcode == FUSE_READ || r_req->in.opcode == FUSE_WRITE) {
-		pr_info("rfuse-lat stage=enqueue ts=%llu riq=%d req=%u unique=%llu opcode=%u background=%d\n",
-			ktime_get_ns(), r_req->riq_id, r_req->index, r_req->in.unique,
-			r_req->in.opcode, test_bit(FR_BACKGROUND, &r_req->flags) ? 1 : 0);
-	}
-	
 	if(waitqueue_active(&riq->idle_user_waitq)){
 		wake_up(&riq->idle_user_waitq);		// Wake up idle user thread
 	}
@@ -1066,12 +1053,6 @@ void rfuse_request_end(struct rfuse_req *r_req){
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
 	GET_TIMESTAMPS(6)
-	if (r_req->in.opcode == FUSE_READ || r_req->in.opcode == FUSE_WRITE) {
-		pr_info("rfuse-lat stage=reply_handle ts=%llu riq=%d req=%u unique=%llu opcode=%u out_err=%d\n",
-			ktime_get_ns(), r_req->riq_id, r_req->index, r_req->in.unique,
-			r_req->in.opcode, r_req->out.error);
-	}
-	
 	if(test_bit(FR_BACKGROUND, &r_req->flags)){
 		spin_lock(&riq->bg_lock);
 		clear_bit(FR_BACKGROUND, &r_req->flags);
@@ -1101,12 +1082,6 @@ void rfuse_request_end(struct rfuse_req *r_req){
 
 	if (test_bit(FR_ASYNC, &r_req->flags))
 		r_req->end(r_req->fm, r_req, r_req->out.error);
-
-	if (r_req->in.opcode == FUSE_READ || r_req->in.opcode == FUSE_WRITE) {
-		pr_info("rfuse-lat stage=reply_handle_done ts=%llu riq=%d req=%u unique=%llu opcode=%u out_err=%d\n",
-			ktime_get_ns(), r_req->riq_id, r_req->index, r_req->in.unique,
-			r_req->in.opcode, r_req->out.error);
-	}
 
 	rfuse_put_request(r_req);
 }

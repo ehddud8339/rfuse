@@ -18,12 +18,6 @@
 #include <linux/falloc.h>
 #include <linux/uio.h>
 #include <linux/fs.h>
-#include <linux/ktime.h>
-
-static __always_inline u64 fuse_lat_now_ns(void)
-{
-	return ktime_get_ns();
-}
 
 // static int fuse_send_open(struct fuse_mount *fm, u64 nodeid,
 // 			  unsigned int open_flags, int opcode,
@@ -610,11 +604,6 @@ void fuse_read_args_fill(struct fuse_io_args *ia, struct file *file, loff_t pos,
 	args->out_argvar = true;
 	args->out_numargs = 1;
 	args->out_args[0].size = count;
-	if (opcode == FUSE_READ) {
-		pr_info("rfuse-lat stage=req_prepare ts=%llu riq=0 req=0 unique=0 opcode=%u nodeid=%llu off=%llu size=%zu\n",
-			fuse_lat_now_ns(), opcode, args->nodeid,
-			(unsigned long long)ia->read.in.offset, count);
-	}
 }
 
 static void fuse_release_user_pages(struct fuse_args_pages *ap,
@@ -926,9 +915,6 @@ static void fuse_write_args_fill(struct fuse_io_args *ia, struct fuse_file *ff,
 	args->out_numargs = 1;
 	args->out_args[0].size = sizeof(ia->write.out);
 	args->out_args[0].value = &ia->write.out;
-	pr_info("rfuse-lat stage=req_prepare ts=%llu riq=0 req=0 unique=0 opcode=%u nodeid=%llu off=%llu size=%zu\n",
-		fuse_lat_now_ns(), args->opcode, args->nodeid,
-		(unsigned long long)ia->write.in.offset, count);
 }
 
 static unsigned int fuse_write_flags(struct kiocb *iocb)

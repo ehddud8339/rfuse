@@ -10,12 +10,6 @@
 #include <linux/falloc.h>
 #include <linux/uio.h>
 #include <linux/fs.h>
-#include <linux/ktime.h>
-
-static __always_inline u64 rfuse_lat_now_ns(void)
-{
-	return ktime_get_ns();
-}
 
 struct rfuse_release_in {
 	struct fuse_release_in inarg;
@@ -1028,10 +1022,6 @@ static void rfuse_write_args_fill(struct rfuse_io_args *ria, struct fuse_file *f
 	ria->write.in.size = count;
 	ria->write.in.offset = pos;
 	r_req->rp = rp;
-	pr_info("rfuse-lat stage=req_prepare ts=%llu riq=%d req=%u unique=%llu opcode=%u nodeid=%llu off=%llu size=%zu\n",
-		rfuse_lat_now_ns(), r_req->riq_id, r_req->index, r_req->in.unique,
-		r_req->in.opcode, r_req->in.nodeid,
-		(unsigned long long)in->offset, count);
 }
 
 static ssize_t rfuse_send_write_pages(struct rfuse_io_args *ria,
@@ -1925,10 +1915,6 @@ void rfuse_read_args_fill(struct rfuse_io_args *ria, struct file *file, loff_t p
 
 	r_req->out.arglen = count;
 	r_req->rp = rp;
-	pr_info("rfuse-lat stage=req_prepare ts=%llu riq=%d req=%u unique=%llu opcode=%u nodeid=%llu off=%llu size=%zu\n",
-		rfuse_lat_now_ns(), r_req->riq_id, r_req->index, r_req->in.unique,
-		r_req->in.opcode, r_req->in.nodeid,
-		(unsigned long long)in->offset, count);
 }
 
 /**

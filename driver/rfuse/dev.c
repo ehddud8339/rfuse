@@ -21,7 +21,6 @@
 #include <linux/swap.h>
 #include <linux/splice.h>
 #include <linux/sched.h>
-#include <linux/ktime.h>
 
 
 MODULE_ALIAS_MISCDEV(FUSE_MINOR);
@@ -40,11 +39,6 @@ static struct fuse_dev *fuse_get_dev(struct file *file)
 	 * once during mount and is valid until the file is released.
 	 */
 	return READ_ONCE(file->private_data);
-}
-
-static __always_inline u64 fuse_lat_now_ns(void)
-{
-	return ktime_get_ns();
 }
 
 /*
@@ -252,11 +246,6 @@ __releases(fiq->lock)
 				(struct fuse_arg *) req->args->in_args);
 	// Add req->list at the tail of fiq->pending
 	list_add_tail(&req->list, &fiq->pending);
-	if (req->in.h.opcode == FUSE_READ || req->in.h.opcode == FUSE_WRITE) {
-		pr_info("rfuse-lat stage=enqueue ts=%llu riq=0 req=0 unique=%llu opcode=%u background=%d\n",
-			fuse_lat_now_ns(), req->in.h.unique, req->in.h.opcode,
-			test_bit(FR_BACKGROUND, &req->flags) ? 1 : 0);
-	}
 	// Then signals that a request has been queued
 	fiq->ops->wake_pending_and_unlock(fiq);
 }
@@ -309,11 +298,6 @@ void fuse_request_end(struct fuse_req *req)
 	struct fuse_conn *fc = fm->fc;
 	struct fuse_iqueue *fiq = &fc->iq;
 
-	if (req->in.h.opcode == FUSE_READ || req->in.h.opcode == FUSE_WRITE) {
-		pr_info("rfuse-lat stage=reply_handle ts=%llu riq=0 req=0 unique=%llu opcode=%u out_err=%d\n",
-			fuse_lat_now_ns(), req->in.h.unique, req->in.h.opcode,
-			req->out.h.error);
-	}
 
 	if (test_and_set_bit(FR_FINISHED, &req->flags))
 		goto put_request;
@@ -363,11 +347,6 @@ void fuse_request_end(struct fuse_req *req)
 	if (test_bit(FR_ASYNC, &req->flags))
 		req->args->end(fm, req->args, req->out.h.error);
 put_request:
-	if (req->in.h.opcode == FUSE_READ || req->in.h.opcode == FUSE_WRITE) {
-		pr_info("rfuse-lat stage=reply_handle_done ts=%llu riq=0 req=0 unique=%llu opcode=%u out_err=%d\n",
-			fuse_lat_now_ns(), req->in.h.unique, req->in.h.opcode,
-			req->out.h.error);
-	}
 	fuse_put_request(req);
 }
 EXPORT_SYMBOL_GPL(fuse_request_end);
@@ -411,13 +390,8 @@ static void request_wait_answer(struct fuse_req *req)
 	if (!fc->no_interrupt) {
 		err = wait_event_interruptible(req->waitq,
 				test_bit(FR_FINISHED, &req->flags));
-		if (!err) {
-			if (req->in.h.opcode == FUSE_READ || req->in.h.opcode == FUSE_WRITE) {
-				pr_info("rfuse-lat stage=reply_signal_recv ts=%llu riq=0 req=0 unique=%llu opcode=%u\n",
-					fuse_lat_now_ns(), req->in.h.unique, req->in.h.opcode);
-			}
+		if (!err)
 			return;
-		}
 
 		set_bit(FR_INTERRUPTED, &req->flags);
 		/* matches barrier in fuse_dev_do_read() */
@@ -430,13 +404,8 @@ static void request_wait_answer(struct fuse_req *req)
 		/* Only fatal signals may interrupt this */
 		err = wait_event_killable(req->waitq,
 				test_bit(FR_FINISHED, &req->flags));
-		if (!err) {
-			if (req->in.h.opcode == FUSE_READ || req->in.h.opcode == FUSE_WRITE) {
-				pr_info("rfuse-lat stage=reply_signal_recv ts=%llu riq=0 req=0 unique=%llu opcode=%u\n",
-					fuse_lat_now_ns(), req->in.h.unique, req->in.h.opcode);
-			}
+		if (!err)
 			return;
-		}
 
 		spin_lock(&fiq->lock);
 		/* Request is not yet in userspace, bail out */
@@ -455,10 +424,6 @@ static void request_wait_answer(struct fuse_req *req)
 	 * Wait it out.
 	 */
 	wait_event(req->waitq, test_bit(FR_FINISHED, &req->flags));
-	if (req->in.h.opcode == FUSE_READ || req->in.h.opcode == FUSE_WRITE) {
-		pr_info("rfuse-lat stage=reply_signal_recv ts=%llu riq=0 req=0 unique=%llu opcode=%u\n",
-			fuse_lat_now_ns(), req->in.h.unique, req->in.h.opcode);
-	}
 }
 
 static void __fuse_request_send(struct fuse_req *req)
@@ -472,10 +437,6 @@ static void __fuse_request_send(struct fuse_req *req)
 		req->out.h.error = -ENOTCONN;
 	} else {
 		req->in.h.unique = fuse_get_unique(fiq);
-		if (req->in.h.opcode == FUSE_READ || req->in.h.opcode == FUSE_WRITE) {
-			pr_info("rfuse-lat stage=req_init ts=%llu riq=0 req=0 unique=%llu opcode=%u\n",
-				fuse_lat_now_ns(), req->in.h.unique, req->in.h.opcode);
-		}
 		/* acquire extra reference, since request is still needed
 		   after fuse_request_end() */
 		__fuse_get_request(req);
@@ -2405,11 +2366,6 @@ static long fuse_dev_ioctl(struct file *file, unsigned int cmd,
 			res = 0;
 			riq = rfuse_get_specific_iqueue(fud->fc, args.riq_id);
 			r_req = (struct rfuse_req*)&riq->kreq[args.req_index];
-			if (r_req && (r_req->in.opcode == FUSE_READ || r_req->in.opcode == FUSE_WRITE)) {
-				pr_info("rfuse-lat stage=reply_signal_recv ts=%llu riq=%d req=%u unique=%llu opcode=%u src=ioctl_wakeup\n",
-					ktime_get_ns(), args.riq_id, args.req_index, r_req->in.unique,
-					r_req->in.opcode);
-			}
 			if(waitqueue_active(&r_req->waitq)) {
 				wake_up(&r_req->waitq);
 			}
@@ -2425,11 +2381,6 @@ static long fuse_dev_ioctl(struct file *file, unsigned int cmd,
 			riq = rfuse_get_specific_iqueue(fud->fc, args.riq_id);
 			r_req = (struct rfuse_req*)&riq->kreq[args.req_index];
 			if(r_req) {
-				if (r_req->in.opcode == FUSE_READ || r_req->in.opcode == FUSE_WRITE) {
-					pr_info("rfuse-lat stage=reply_signal_recv_async ts=%llu riq=%d req=%u unique=%llu opcode=%u src=ioctl_async\n",
-						ktime_get_ns(), args.riq_id, args.req_index, r_req->in.unique,
-						r_req->in.opcode);
-				}
 				rfuse_request_end(r_req);
 			} else {
 				printk("RFUSE: Wrong request index, riq_id: %d, req_index: %d\n", args.riq_id, args.req_index);

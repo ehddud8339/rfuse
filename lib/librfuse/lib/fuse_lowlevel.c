@@ -43,44 +43,6 @@
 
 #define PARAM(inarg) (((char *)(inarg)) + sizeof(*(inarg)))
 
-static inline long long fuse_lat_now_ns(void)
-{
-	struct timespec ts;
-
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
-}
-
-static void fuse_lat_log(const char *fmt, ...)
-{
-	static int log_fd = -2;
-	static const char *default_path = "/tmp/RFUSE/user-log.txt";
-	char buf[512];
-	va_list ap;
-	int n;
-
-	if (log_fd == -2) {
-		const char *path = default_path;
-		(void)mkdir("/tmp/RFUSE", 0755);
-
-		log_fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
-		if (log_fd < 0)
-			log_fd = -1;
-	}
-
-	va_start(ap, fmt);
-	n = vsnprintf(buf, sizeof(buf), fmt, ap);
-	va_end(ap);
-	if (n < 0)
-		return;
-
-	if (log_fd >= 0) {
-		dprintf(log_fd, "%s", buf);
-		return;
-	}
-
-	fputs(buf, stderr);
-}
 #define OFFSET_MAX 0x7fffffffffffffffLL
 
 #define container_of(ptr, type, member) ({				\
@@ -262,11 +224,6 @@ int fuse_send_reply_iov_nofree(old_fuse_req_t req, int error, struct iovec *iov,
 
 	iov[0].iov_base = &out;
 	iov[0].iov_len = sizeof(struct fuse_out_header);
-	if (req && (req->opcode == FUSE_READ || req->opcode == FUSE_WRITE)) {
-		fuse_lat_log("rfuse-lat stage=reply_signal_send ts=%lld riq=0 req=0 unique=%llu opcode=%u\n",
-			fuse_lat_now_ns(), (unsigned long long)req->unique, req->opcode);
-	}
-
 	send_res = fuse_send_msg(req->se, req->ch, iov, count);
 	return send_res;
 }
@@ -275,11 +232,6 @@ static int send_reply_iov(old_fuse_req_t req, int error, struct iovec *iov,
 			  int count)
 {
 	int res;
-	if (req && (req->opcode == FUSE_READ || req->opcode == FUSE_WRITE)) {
-		fuse_lat_log("rfuse-lat stage=io_complete ts=%lld riq=0 req=0 unique=%llu opcode=%u out_err=%d\n",
-			fuse_lat_now_ns(), (unsigned long long)req->unique, req->opcode, error);
-	}
-
 	res = fuse_send_reply_iov_nofree(req, error, iov, count);
 	fuse_free_req(req);
 	return res;
@@ -2678,10 +2630,6 @@ void fuse_session_process_buf_int(struct fuse_session *se,
 	req->ctx.gid = in->gid;
 	req->ctx.pid = in->pid;
 	req->ch = ch ? fuse_chan_get(ch) : NULL;
-	if (in->opcode == FUSE_READ || in->opcode == FUSE_WRITE) {
-		fuse_lat_log("rfuse-lat stage=dequeue ts=%lld riq=0 req=0 unique=%llu opcode=%u\n",
-			fuse_lat_now_ns(), (unsigned long long)in->unique, in->opcode);
-	}
 
 	err = EIO;
 	if (!se->got_init) {
@@ -2740,10 +2688,6 @@ void fuse_session_process_buf_int(struct fuse_session *se,
 	}
 
 	inarg = (void *) &in[1];
-	if (in->opcode == FUSE_READ || in->opcode == FUSE_WRITE) {
-		fuse_lat_log("rfuse-lat stage=io_submit ts=%lld riq=0 req=0 unique=%llu opcode=%u\n",
-			fuse_lat_now_ns(), (unsigned long long)in->unique, in->opcode);
-	}
 	if (in->opcode == FUSE_WRITE && se->op.old_write_buf)
 		do_write_buf(req, in->nodeid, inarg, buf);
 	else if (in->opcode == FUSE_NOTIFY_REPLY)
