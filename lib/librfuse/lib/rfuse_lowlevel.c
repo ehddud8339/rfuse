@@ -15,6 +15,10 @@
 #include <limits.h>
 #include <errno.h>
 #include <assert.h>
+#include <stdarg.h>
+#include <time.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
@@ -30,6 +34,43 @@
 #endif
 
 #define RFUSE_SPLICE_READ_NO_DATA 0x1000
+
+static inline long long rfuse_lat_now_ns(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+static void rfuse_lat_log(const char *fmt, ...)
+{
+	static int log_fd = -2;
+	static const char *path = "/tmp/RFUSE/user-log.txt";
+	char buf[512];
+	va_list ap;
+	int n;
+
+	if (log_fd == -2) {
+		(void)mkdir("/tmp/RFUSE", 0755);
+		log_fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+		if (log_fd < 0)
+			log_fd = -1;
+	}
+
+	va_start(ap, fmt);
+	n = vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+	if (n < 0)
+		return;
+
+	if (log_fd >= 0) {
+		dprintf(log_fd, "%s", buf);
+		return;
+	}
+
+	fputs(buf, stderr);
+}
 // ******************************* Ring buffer operations ******************************* //
 
 struct rfuse_address_entry *rfuse_read_pending_head(struct rfuse_iqueue *riq){
@@ -316,9 +357,15 @@ static int rfuse_send_msg(struct fuse_session *se, fuse_req_t u_req){
 		unsigned long tmp_flags;
 		assert(se != NULL); // Pass if only session is not NULL
 
-		r_req = &riq->ureq[u_req->index];
-		tmp_flags = RFUSE_READ_ONCE(r_req->flags);
-		SET_BIT(tmp_flags, FR_FINISHED);
+			r_req = &riq->ureq[u_req->index];
+			tmp_flags = RFUSE_READ_ONCE(r_req->flags);
+			if (r_req->in.opcode == FUSE_READ || r_req->in.opcode == FUSE_WRITE) {
+				rfuse_lat_log("rfuse-lat stage=%s ts=%lld riq=%d req=%d unique=%llu opcode=%u\n",
+					TEST_BIT(tmp_flags, FR_BACKGROUND) ? "reply_signal_send_async" : "reply_signal_send",
+					rfuse_lat_now_ns(), u_req->riq_id, u_req->index,
+					(unsigned long long)r_req->in.unique, r_req->in.opcode);
+			}
+			SET_BIT(tmp_flags, FR_FINISHED);
 		RFUSE_WRITE_ONCE(r_req->flags, tmp_flags);
 		rfuse_smp_mb();
 		GET_TIMESTAMPS(5)
@@ -369,8 +416,14 @@ static int rfuse_send_reply_iov_nofree(fuse_req_t u_req, int error){
 
 static int rfuse_send_reply_iov(fuse_req_t u_req, int error){
 	int res;
+	struct rfuse_req *r_req = &u_req->riq->ureq[u_req->index];
 
 	GET_TIMESTAMPS(4)
+	if (r_req->in.opcode == FUSE_READ || r_req->in.opcode == FUSE_WRITE) {
+		rfuse_lat_log("rfuse-lat stage=io_complete ts=%lld riq=%d req=%d unique=%llu opcode=%u out_err=%d\n",
+			rfuse_lat_now_ns(), u_req->riq_id, u_req->index,
+			(unsigned long long)r_req->in.unique, r_req->in.opcode, error);
+	}
 	res = rfuse_send_reply_iov_nofree(u_req,error);
 	rfuse_free_req(u_req);
 	return res;
@@ -1768,6 +1821,11 @@ bool rfuse_read_queue(struct rfuse_worker *w, struct rfuse_mt *mt, struct fuse_c
 #endif
 
 	GET_TIMESTAMPS(2)
+	if (r_req->in.opcode == FUSE_READ || r_req->in.opcode == FUSE_WRITE) {
+		rfuse_lat_log("rfuse-lat stage=dequeue ts=%lld riq=%d req=%d unique=%llu opcode=%u\n",
+			rfuse_lat_now_ns(), u_req->riq_id, u_req->index,
+			(unsigned long long)r_req->in.unique, r_req->in.opcode);
+	}
 	u_req->unique = r_req->in.unique;
 	u_req->ctx.uid = r_req->in.uid;
 	u_req->ctx.gid = r_req->in.gid;
@@ -1798,6 +1856,11 @@ bool rfuse_read_queue(struct rfuse_worker *w, struct rfuse_mt *mt, struct fuse_c
 		goto reply_err;
 
 	GET_TIMESTAMPS(3)
+	if (r_req->in.opcode == FUSE_READ || r_req->in.opcode == FUSE_WRITE) {
+		rfuse_lat_log("rfuse-lat stage=io_submit ts=%lld riq=%d req=%d unique=%llu opcode=%u\n",
+			rfuse_lat_now_ns(), u_req->riq_id, u_req->index,
+			(unsigned long long)r_req->in.unique, r_req->in.opcode);
+	}
 	if (r_req->in.opcode == FUSE_WRITE && se->op.write_buf) {
 		err = rfuse_prep_write_buf(u_req, se, &w->fbuf, w->ch);
 		if(err < 0)
