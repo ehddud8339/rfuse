@@ -298,6 +298,7 @@ void fuse_request_end(struct fuse_req *req)
 	struct fuse_conn *fc = fm->fc;
 	struct fuse_iqueue *fiq = &fc->iq;
 
+
 	if (test_and_set_bit(FR_FINISHED, &req->flags))
 		goto put_request;
 

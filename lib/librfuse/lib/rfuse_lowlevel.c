@@ -15,6 +15,10 @@
 #include <limits.h>
 #include <errno.h>
 #include <assert.h>
+#include <stdarg.h>
+#include <time.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
@@ -30,6 +34,7 @@
 #endif
 
 #define RFUSE_SPLICE_READ_NO_DATA 0x1000
+
 // ******************************* Ring buffer operations ******************************* //
 
 struct rfuse_address_entry *rfuse_read_pending_head(struct rfuse_iqueue *riq){
@@ -316,9 +321,9 @@ static int rfuse_send_msg(struct fuse_session *se, fuse_req_t u_req){
 		unsigned long tmp_flags;
 		assert(se != NULL); // Pass if only session is not NULL
 
-		r_req = &riq->ureq[u_req->index];
-		tmp_flags = RFUSE_READ_ONCE(r_req->flags);
-		SET_BIT(tmp_flags, FR_FINISHED);
+			r_req = &riq->ureq[u_req->index];
+			tmp_flags = RFUSE_READ_ONCE(r_req->flags);
+			SET_BIT(tmp_flags, FR_FINISHED);
 		RFUSE_WRITE_ONCE(r_req->flags, tmp_flags);
 		rfuse_smp_mb();
 		GET_TIMESTAMPS(5)
@@ -369,6 +374,7 @@ static int rfuse_send_reply_iov_nofree(fuse_req_t u_req, int error){
 
 static int rfuse_send_reply_iov(fuse_req_t u_req, int error){
 	int res;
+	struct rfuse_req *r_req = &u_req->riq->ureq[u_req->index];
 
 	GET_TIMESTAMPS(4)
 	res = rfuse_send_reply_iov_nofree(u_req,error);

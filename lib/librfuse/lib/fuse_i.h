@@ -50,6 +50,7 @@ struct rfuse_user_req{
 struct fuse_req {
 	struct fuse_session *se;
 	uint64_t unique;
+	uint32_t opcode;
 	int ctr;
 	pthread_mutex_t lock;
 	struct fuse_ctx ctx;
@@ -187,4 +188,3 @@ int rfuse_loop_start_thread(struct rfuse_mt *mt);
 
 /* room needed in buffer to accommodate header */
 #define FUSE_BUFFER_HEADER_SIZE 0x1000
-

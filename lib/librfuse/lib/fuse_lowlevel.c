@@ -26,6 +26,10 @@
 #include <limits.h>
 #include <errno.h>
 #include <assert.h>
+#include <stdarg.h>
+#include <time.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/file.h>
 #include <sys/mman.h>
 
@@ -38,6 +42,7 @@
 
 
 #define PARAM(inarg) (((char *)(inarg)) + sizeof(*(inarg)))
+
 #define OFFSET_MAX 0x7fffffffffffffffLL
 
 #define container_of(ptr, type, member) ({				\
@@ -207,6 +212,7 @@ static int fuse_send_msg(struct fuse_session *se, struct fuse_chan *ch, // RFUSE
 int fuse_send_reply_iov_nofree(old_fuse_req_t req, int error, struct iovec *iov, int count) // RFUSED // 
 {
 	struct fuse_out_header out;
+	int send_res;
 
 	if (error <= -1000 || error > 0) {
 		fuse_log(FUSE_LOG_ERR, "fuse: bad error value: %i\n",	error);
@@ -218,15 +224,14 @@ int fuse_send_reply_iov_nofree(old_fuse_req_t req, int error, struct iovec *iov,
 
 	iov[0].iov_base = &out;
 	iov[0].iov_len = sizeof(struct fuse_out_header);
-
-	return fuse_send_msg(req->se, req->ch, iov, count);
+	send_res = fuse_send_msg(req->se, req->ch, iov, count);
+	return send_res;
 }
 
 static int send_reply_iov(old_fuse_req_t req, int error, struct iovec *iov,
 			  int count)
 {
 	int res;
-
 	res = fuse_send_reply_iov_nofree(req, error, iov, count);
 	fuse_free_req(req);
 	return res;
@@ -2620,6 +2625,7 @@ void fuse_session_process_buf_int(struct fuse_session *se,
 
 	// make a new reuqest structure and move the data from 'in'
 	req->unique = in->unique;
+	req->opcode = in->opcode;
 	req->ctx.uid = in->uid;
 	req->ctx.gid = in->gid;
 	req->ctx.pid = in->pid;
