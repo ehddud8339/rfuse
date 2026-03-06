@@ -3,7 +3,7 @@
 MOUNT_BASE="/mnt/RFUSE_EXT4"
 MOUNT_POINT="/mnt/test"
 
-DEVICE_NAME="/dev/nvme0n1p3"
+DEVICE_NAME="/dev/nvme2n1"
 
 mkdir -p ${MOUNT_BASE} ${MOUNT_POINT}
 sudo sync
