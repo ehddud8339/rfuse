@@ -13,6 +13,7 @@
 
 #define RFUSE_NUM_IQUEUE     32           // Number of rfuse iqueue
 #define RFUSE_MAX_QUEUE_SIZE 1024*4      // Maximum number of requests in a queue
+#define RFUSE_WORKER_PER_RING 2
 
 #define RFUSE_RIQ_ID_MASK    0x00ff0000ULL
 #define RFUSE_QUEUE_MAP_MASK 0xff000000ULL
@@ -27,6 +28,11 @@
 #define RFUSE_REQ	     0x38000000ULL
 #define RFUSE_READ	     0x40000000ULL
 #define RFUSE_WRITE	     0x48000000ULL
+#define RFUSE_PAYLOAD       0x50000000ULL
+
+#define RFUSE_PAYLOAD_IN        (1U << 0)
+#define RFUSE_PAYLOAD_OUT       (1U << 1)
+#define RFUSE_PAYLOAD_FALLBACK  (1U << 2)
 
 struct rfuse_req{
 	/** Request input header **/
@@ -65,6 +71,12 @@ struct rfuse_req{
 	struct{
 		uint8_t argument_space[112];
 	}args; // 112
+
+	uint32_t payload_offset;
+	uint32_t payload_len;
+	uint32_t payload_capacity;
+	uint32_t payload_generation;
+	uint32_t payload_flags;
 
 	bool force:1;
 	bool noreply:1;
@@ -139,6 +151,13 @@ struct rfuse_arg{
 	uint8_t garbage[256];
 };
 
+struct rfuse_payload_map {
+	void *uaddr;
+	void *kaddr;
+	uint32_t size;
+	uint32_t used;
+};
+
 /**
   mmap the total rfuse_iqueue to fuse daemon
  **/ 
@@ -160,6 +179,9 @@ struct rfuse_iqueue{
 	/** Dynamic request buffer **/
 	struct rfuse_req *ureq;	// user address
 	struct rfuse_req *kreq; // kernel address
+
+	/** Shared payload buffer **/
+	struct rfuse_payload_map payload;
 
 	/** Connection established **/
 	unsigned connected;
@@ -205,6 +227,13 @@ struct rfuse_iqueue{
 
 	/** waitq for congested asynchronous requests*/
 	wait_queue_head_t blocked_waitq;
+
+	/** dynamic payload extent allocator */
+	spinlock_t payload_lock;
+	wait_queue_head_t payload_waitq;
+	struct list_head payload_free;
+	struct list_head payload_active;
+	uint32_t payload_next_generation;
 };
 
 #endif

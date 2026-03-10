@@ -1051,6 +1051,10 @@ static ssize_t rfuse_send_write_pages(struct rfuse_io_args *ria,
 	if (fm->fc->handle_killpriv_v2 && !capable(CAP_FSETID))
 		in->write_flags |= FUSE_WRITE_KILL_SUIDGID;
 
+	err = rfuse_prepare_payload(ria->r_req, true);
+	if (err)
+		goto out_put_pages;
+
 	err = rfuse_simple_request(ria->r_req);
 	out = (struct fuse_write_out *)&ria->r_req->args;
 	if (!err && out->size > count)
@@ -1077,6 +1081,15 @@ static ssize_t rfuse_send_write_pages(struct rfuse_io_args *ria,
 		if (ria->write.page_locked && (i == rp->num_pages - 1))
 			unlock_page(page);
 		put_page(page);
+	}
+
+	return err;
+
+out_put_pages:
+	for (i = 0; i < rp->num_pages; i++) {
+		if (ria->write.page_locked && (i == rp->num_pages - 1))
+			unlock_page(rp->pages[i]);
+		put_page(rp->pages[i]);
 	}
 
 	return err;
@@ -1172,9 +1185,17 @@ static ssize_t rfuse_send_write(struct rfuse_io_args *ria, loff_t pos, size_t co
 		inarg->write_flags |= FUSE_WRITE_KILL_SUIDGID;
 
 	/* Send request */
-	if (ria->io->async)
+	if (ria->io->async) {
+		err = rfuse_prepare_payload(r_req, false);
+		if (err)
+			goto out_put_req;
 		return rfuse_async_req_send(fm, ria, count);
+	}
 	
+	err = rfuse_prepare_payload(r_req, true);
+	if (err)
+		goto out_put_req;
+
 	err = rfuse_simple_request(r_req);
 	out = (struct fuse_write_out *)&ria->r_req->args;
 	if (!err && out->size > count)
@@ -1183,6 +1204,10 @@ static ssize_t rfuse_send_write(struct rfuse_io_args *ria, loff_t pos, size_t co
 	rfuse_put_request(r_req);
 
 	return err ?: outsize;
+
+out_put_req:
+	rfuse_put_request(r_req);
+	return err;
 }
 
 /* Writeback of dirty page*/
@@ -1402,6 +1427,10 @@ __acquires(fi->lock)
 
 	r_req->in.arglen[0] = inarg->size;
 	r_req->end = rfuse_writepage_end;
+
+	err = rfuse_prepare_payload(r_req, false);
+	if (err)
+		goto out_free;
 
 	err = rfuse_simple_background(fm, r_req);
 	/* Fails on broken connection only */
@@ -1959,6 +1988,11 @@ int rfuse_do_readpage(struct file *file, struct page *page){
 		desc.length--;
 
 	rfuse_read_args_fill(&ria, file, pos, desc.length, FUSE_READ);
+	res = rfuse_prepare_payload(r_req, true);
+	if (res) {
+		rfuse_put_request(r_req);
+		return res;
+	}
 	res = rfuse_simple_request(r_req);
 	rfuse_put_request(r_req);
 	if (res < 0)
@@ -2079,16 +2113,26 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, i
 	if (is_async) {
 		ria->ff = rfuse_file_get(ff);
 		r_req->end = rfuse_readpages_end;
+		err = rfuse_prepare_payload(r_req, false);
+		if (err)
+			goto out_end;
 		err = rfuse_simple_background(fm, r_req);
 		if (!err)
 			return;
 	} else {
+		err = rfuse_prepare_payload(r_req, true);
+		if (err) {
+			rfuse_readpages_end(fm, r_req, err);
+			rfuse_put_request(r_req);
+			return;
+		}
 		res = rfuse_simple_request(r_req);
 		err = res < 0 ? res : 0;
 		rfuse_readpages_end(fm, r_req, err);
 		rfuse_put_request(r_req);
 		return;
 	}
+out_end:
 	rfuse_readpages_end(fm, r_req, err);
 }
 
@@ -2154,11 +2198,22 @@ static ssize_t rfuse_send_read(struct rfuse_io_args *ria, loff_t pos, size_t cou
 		inarg->lock_owner = fuse_lock_owner_id(fm->fc, owner);
 	}
 
-	if (ria->io->async)
+	if (ria->io->async) {
+		res = rfuse_prepare_payload(r_req, false);
+		if (res)
+			goto out_put_req;
 		return rfuse_async_req_send(fm, ria, count);
+	}
+	res = rfuse_prepare_payload(r_req, true);
+	if (res)
+		goto out_put_req;
 	res = rfuse_simple_request(r_req);
 	rfuse_put_request(r_req);
 
+	return res;
+
+out_put_req:
+	rfuse_put_request(r_req);
 	return res;
 }
 

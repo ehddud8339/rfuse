@@ -886,32 +886,10 @@ static void stackfs_ll_opendir(fuse_req_t req, fuse_ino_t ino,
 static void stackfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size,
 		off_t offset, struct fuse_file_info *fi)
 {
-	int res;
 	(void) ino;
 
 	StackFS_trace("StackFS Read start on inode : %llu", get_lower_fuse_inode_no(req, ino));
-	if (USE_SPLICE) {
-		struct fuse_bufvec buf = FUSE_BUFVEC_INIT(size);
-
-		//StackFS_trace("Splice Read name : %s, off : %lu, size : %zu",
-		//			lo_name(req, ino), offset, size);
-
-		buf.buf[0].flags = FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK;
-		buf.buf[0].fd = fi->fh;
-		buf.buf[0].pos = offset;
-		fuse_reply_data(req, &buf, FUSE_BUF_SPLICE_MOVE);
-	} else {
-		char *buf;
-
-		//StackFS_trace("Read on name : %s, Kernel inode : %llu, fuse inode : %llu, off : %lu, size : %zu",
-		//			lo_name(req, ino), get_lower_fuse_inode_no(req, ino), get_higher_fuse_inode_no(req, ino), offset, size);
-		buf = (char *)malloc(size);
-		res = pread(fi->fh, buf, size, offset);
-		if (res == -1)
-			return (void) fuse_reply_err(req, errno);
-		res = fuse_reply_buf(req, buf, res);
-		free(buf);
-	}
+	rfuse_reply_read_from_fd(req, fi->fh, offset, size);
 	StackFS_trace("StackFS Read end on inode : %llu", get_lower_fuse_inode_no(req, ino));
 }
 

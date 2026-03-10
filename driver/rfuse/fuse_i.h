@@ -1422,6 +1422,9 @@ struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background, 
 ssize_t rfuse_simple_request(struct rfuse_req *r_req);
 bool rfuse_simple_background(struct fuse_mount *fm, struct rfuse_req *r_req);
 void rfuse_request_end(struct rfuse_req *r_req);
+int rfuse_prepare_payload(struct rfuse_req *r_req, bool may_wait);
+int rfuse_import_payload(struct rfuse_req *r_req);
+void rfuse_release_payload(struct rfuse_req *r_req);
 
 // Queue into the forget queue
 void rfuse_queue_forget(struct fuse_conn *fc, u64 nodeid, u64 nlookup);
