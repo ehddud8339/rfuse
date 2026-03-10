@@ -1,14 +1,14 @@
  0x000000000000000e (SONAME)             Library soname: [libfuse3.so.3]
-cuse_lowlevel_main T 9c
-cuse_lowlevel_new T 263
-cuse_lowlevel_setup T 1bc
-cuse_lowlevel_teardown T 16
 FUSE_3.0 A
 FUSE_3.1 A
 FUSE_3.2 A
 FUSE_3.3 A
 FUSE_3.4 A
 FUSE_3.7 A
+cuse_lowlevel_main T 9c
+cuse_lowlevel_new T 263
+cuse_lowlevel_setup T 1bc
+cuse_lowlevel_teardown T 16
 fuse_add_direntry T 9a
 fuse_add_direntry_plus T de
 fuse_apply_conn_info_opts T 149
@@ -63,8 +63,8 @@ fuse_fs_utimens T f4
 fuse_fs_write T 80
 fuse_fs_write_buf T 2ad
 fuse_get_context T f
-fuse_getgroups T 42
 fuse_get_session T 8
+fuse_getgroups T 42
 fuse_interrupted T 2f
 fuse_invalidate_path T 105
 fuse_lib_help T 12b
@@ -122,8 +122,8 @@ fuse_reply_write T 4e
 fuse_reply_xattr T 4e
 fuse_req_ctx T 9
 fuse_req_getgroups T 15b
-fuse_req_interrupted T 3b
 fuse_req_interrupt_func T 71
+fuse_req_interrupted T 3b
 fuse_req_userdata T f
 fuse_session_destroy T 94
 fuse_session_exit T c
