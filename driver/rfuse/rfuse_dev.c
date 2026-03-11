@@ -126,19 +126,15 @@ static void rfuse_payload_insert_free_extent(struct rfuse_iqueue *riq,
 	rfuse_payload_merge_free(riq);
 }
 
-static int rfuse_payload_alloc_locked(struct rfuse_req *r_req, size_t need)
+static int rfuse_payload_alloc_locked(struct rfuse_req *r_req, size_t need,
+				      struct rfuse_payload_extent *active)
 {
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(r_req->fm->fc, r_req->riq_id);
 	struct rfuse_payload_extent *extent;
-	struct rfuse_payload_extent *active;
 
 	list_for_each_entry(extent, &riq->payload_free, list) {
 		if (extent->len < need)
 			continue;
-
-		active = kmalloc(sizeof(*active), GFP_KERNEL);
-		if (!active)
-			return -ENOMEM;
 
 		active->offset = extent->offset;
 		active->len = need;
@@ -166,6 +162,7 @@ static int rfuse_payload_alloc_locked(struct rfuse_req *r_req, size_t need)
 static int rfuse_payload_alloc(struct rfuse_req *r_req, size_t need, bool may_wait)
 {
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(r_req->fm->fc, r_req->riq_id);
+	struct rfuse_payload_extent *active;
 	size_t aligned_need;
 	int ret;
 
@@ -176,21 +173,32 @@ static int rfuse_payload_alloc(struct rfuse_req *r_req, size_t need, bool may_wa
 	if (aligned_need > riq->payload.size)
 		return -E2BIG;
 
+	active = kmalloc(sizeof(*active), GFP_KERNEL);
+	if (!active)
+		return -ENOMEM;
+
 	for (;;) {
 		spin_lock(&riq->payload_lock);
-		ret = rfuse_payload_alloc_locked(r_req, aligned_need);
+		ret = rfuse_payload_alloc_locked(r_req, aligned_need, active);
 		spin_unlock(&riq->payload_lock);
+		if (!ret)
+			return 0;
 		if (ret != -EAGAIN || !may_wait)
-			return ret;
+			break;
 
 		ret = wait_event_interruptible(riq->payload_waitq,
 				!r_req->fm->fc->connected ||
 				rfuse_payload_find_extent(riq, aligned_need));
 		if (ret)
-			return ret;
-		if (!r_req->fm->fc->connected)
-			return -ENOTCONN;
+			break;
+		if (!r_req->fm->fc->connected) {
+			ret = -ENOTCONN;
+			break;
+		}
 	}
+
+	kfree(active);
+	return ret;
 }
 
 void rfuse_release_payload(struct rfuse_req *r_req)
