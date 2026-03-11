@@ -1337,7 +1337,7 @@ static void rfuse_flush_bg_queue(struct fuse_conn *fc, int riq_id){
 	}
 }
 
-
+/* Main: Async request를 할당, 초기화 후에 background list에 삽입 후 pending queue로 push */
 static bool rfuse_request_queue_background(struct rfuse_req *r_req)
 {
 	struct fuse_mount *fm = r_req->fm;
@@ -1368,6 +1368,16 @@ static bool rfuse_request_queue_background(struct rfuse_req *r_req)
 			set_bdi_congested(fm->sb->s_bdi, BLK_RW_SYNC);
 			set_bdi_congested(fm->sb->s_bdi, BLK_RW_ASYNC);
 		}
+    /* LDY: Async request merge */
+    /* Sync 요청는 merge 할 수 있는 요청이라고 하더라도, 애초에 이전 요청이 완료되야 다음 요청이 submit 된다.
+     * 하지만, async 요청은 이전 요청이 완료되지 않더라도 submit 할 수 있다.
+     * 그러므로 background queue에서 write 요청이 들어오면, 이전 tail entry를 꺼내서 offset을 확인
+     * 마지막 offset과 1이 차이가 난다면 바로 다음 chunk 이므로 요청을 하나로 합친다.
+     * 대신 최대로 늘릴 수 있는 건 1MiB, 왜냐하면 이건 제약이니까.
+     * 바로 구현하기 전에 helper 함수를 하나 추가해서, if 문으로 write 요청인지 확인, offset을 확인, 1이 차이가 나는지 확인 후
+     * merge가 가능하면, matach log 출력, 불가능하면 mismatch log 출력한다.
+     * 이게 가능하려면, 현재 async scheduling 기법인 round robin을 CPU id 기반으로 돌려야 한다.
+     */
 		list_add_tail(&bg_entry->list, &riq->bg_queue); // Add it to background queue
 		rfuse_flush_bg_queue(fc, r_req->riq_id);
 		queued = true;
