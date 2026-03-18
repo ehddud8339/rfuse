@@ -3,7 +3,7 @@
 MOUNT_BASE="/mnt/RFUSE_EXT4"
 MOUNT_POINT="/mnt/test"
 
-DEVICE_NAME="/dev/nvme1n1"
+DEVICE_NAME="/dev/nvme0n1p3"
 
 mkdir -p ${MOUNT_BASE} ${MOUNT_POINT}
 sudo sync
@@ -16,7 +16,7 @@ if [ "$1" == "ssd" ]; then
   sudo sync
   sudo echo 3 >/proc/sys/vm/drop_caches
 
-  ./StackFS_ll -r ${MOUNT_BASE} ${MOUNT_POINT} &
+  ./StackFS_ll -r ${MOUNT_BASE} ${MOUNT_POINT}
 elif [ "$1" == "ssd-noclean" ]; then
   ./StackFS_ll -r ${MOUNT_BASE} ${MOUNT_POINT}
 else
