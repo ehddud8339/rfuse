@@ -295,6 +295,9 @@ static void construct_full_path(fuse_req_t req, fuse_ino_t ino,
 	strcpy(fpath, lo_name(req, ino));
 	strncat(fpath, "/1", 1);
 	strncat(fpath, path, PATH_MAX);
+	fprintf(stderr,
+		"STACKFS_TRACE construct_full_path parent=%llu parent_path=%s name=%s full_path=%s\n",
+		(unsigned long long)ino, lo_name(req, ino), path, fpath);
 }
 
 /* Function which generates the hash depending on the ino number
@@ -564,11 +567,21 @@ static void stackfs_ll_lookup(fuse_req_t req, fuse_ino_t parent,
 	e.entry_timeout = attr_val; /* dentry timeout */
 	
 	res = lstat(fullPath, &e.attr);
+	fprintf(stderr,
+		"STACKFS_TRACE lookup parent=%llu name=%s full_path=%s lstat_res=%d errno=%d attr_valid=%.3f\n",
+		(unsigned long long)parent, name, fullPath, res,
+		res == 0 ? 0 : errno, attr_val);
 
 	if (res == 0) {
 		struct lo_inode *inode;
 
 		inode = find_lo_inode(req, &e.attr, fullPath);
+		fprintf(stderr,
+			"STACKFS_TRACE lookup_hit parent=%llu name=%s full_path=%s lo_ino=%llu st_ino=%llu st_dev=%llu\n",
+			(unsigned long long)parent, name, fullPath,
+			inode ? (unsigned long long)inode->lo_ino : 0,
+			(unsigned long long)e.attr.st_ino,
+			(unsigned long long)e.attr.st_dev);
 
 		if (fullPath)
 			free(fullPath);
@@ -691,10 +704,17 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 	fullPath = (char *)malloc(PATH_MAX);
 	construct_full_path(req, parent, fullPath, name);
 	attr_val = lo_attr_valid_time(req);
+	fprintf(stderr,
+		"STACKFS_TRACE create_begin parent=%llu name=%s full_path=%s mode=%o flags=0x%x attr_valid=%.3f\n",
+		(unsigned long long)parent, name, fullPath, mode, fi->flags, attr_val);
 
 	//struct timespec start,end;
 	//clock_gettime(CLOCK_MONOTONIC, &start);
 	fd = creat(fullPath, mode);
+	fprintf(stderr,
+		"STACKFS_TRACE create_creat parent=%llu name=%s full_path=%s fd=%d errno=%d\n",
+		(unsigned long long)parent, name, fullPath, fd,
+		fd == -1 ? errno : 0);
 	//clock_gettime(CLOCK_MONOTONIC, &end);
 	//printf("CREATE TIME: %lu\n", (end.tv_sec * 1000000000 + end.tv_nsec) - (start.tv_sec * 1000000000 + start.tv_nsec));	
 	if (fd == -1) {
@@ -709,6 +729,10 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 	e.entry_timeout = attr_val;
 
 	res = stat(fullPath, &e.attr);
+	fprintf(stderr,
+		"STACKFS_TRACE create_stat parent=%llu name=%s full_path=%s stat_res=%d errno=%d\n",
+		(unsigned long long)parent, name, fullPath, res,
+		res == 0 ? 0 : errno);
 	// generate_end_time(req);
 	// populate_time(req);
 
@@ -749,6 +773,14 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 			e.ino = lo_inode->lo_ino;
 			//StackFS_trace("Create called, e.ino : %llu", e.ino);
 			fi->fh = fd;
+			fprintf(stderr,
+				"STACKFS_TRACE create_reply parent=%llu name=%s full_path=%s lo_ino=%llu st_ino=%llu st_dev=%llu fh=%llu entry_timeout=%.3f attr_timeout=%.3f\n",
+				(unsigned long long)parent, name, lo_inode->name,
+				(unsigned long long)e.ino,
+				(unsigned long long)e.attr.st_ino,
+				(unsigned long long)e.attr.st_dev,
+				(unsigned long long)fi->fh,
+				e.entry_timeout, e.attr_timeout);
 			fuse_reply_create(req, &e, fi);
 		}
 	} else {
@@ -846,7 +878,14 @@ static void stackfs_ll_open(fuse_req_t req, fuse_ino_t ino,
 		struct fuse_file_info *fi)
 {
 	int fd;
+	fprintf(stderr,
+		"STACKFS_TRACE open_begin ino=%llu path=%s flags=0x%x\n",
+		(unsigned long long)ino, lo_name(req, ino), fi->flags);
 	fd = open(lo_name(req, ino), fi->flags);
+	fprintf(stderr,
+		"STACKFS_TRACE open_result ino=%llu path=%s fd=%d errno=%d\n",
+		(unsigned long long)ino, lo_name(req, ino), fd,
+		fd == -1 ? errno : 0);
 	
 	if (fd == -1)
 		return (void) fuse_reply_err(req, errno);

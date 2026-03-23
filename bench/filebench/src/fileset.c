@@ -462,7 +462,7 @@ fileset_openfile(fb_fdesc_t *fdesc, fileset_t *fileset,
 		    "Failed to open file %d, %s, with status %x: %s",
 		    entry->fse_index, path, entry->fse_flags, strerror(errno));
 
-		fileset_unbusy(entry, FALSE, FALSE, 0);
+		fileset_unbusy(entry, errno == ENOENT, FALSE, 0);
 		return (FILEBENCH_ERROR);
 	}
 

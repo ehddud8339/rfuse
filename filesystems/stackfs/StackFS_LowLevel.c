@@ -28,7 +28,6 @@
 #include <errno.h>
 #include <fuse.h>
 #include <fuse_lowlevel.h>
-#include <rfuse.h>
 #include <assert.h>
 #include <stddef.h>
 #include <fcntl.h> /* Definition of AT_* constants */

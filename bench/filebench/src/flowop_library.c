@@ -2161,12 +2161,14 @@ flowoplib_statfile(threadflow_t *threadflow, flowop_t *flowop)
 
 		/* stat the file */
 		flowop_beginop(threadflow, flowop);
-		if (FB_STAT(path, &statbuf) == -1)
+		if (FB_STAT(path, &statbuf) == -1) {
 			filebench_log(LOG_ERROR,
 			    "statfile flowop %s failed", flowop->fo_name);
+			fileset_unbusy(file, errno == ENOENT, FALSE, 0);
+		} else {
+			fileset_unbusy(file, FALSE, FALSE, 0);
+		}
 		flowop_endop(threadflow, flowop, 0);
-
-		fileset_unbusy(file, FALSE, FALSE, 0);
 	} else {
 		/* stat specific file */
 		flowop_beginop(threadflow, flowop);

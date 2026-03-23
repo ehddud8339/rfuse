@@ -2115,6 +2115,7 @@ void do_init(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 		outarg.flags |= FUSE_EXPLICIT_INVAL_DATA;
 	outarg.max_readahead = se->conn.max_readahead;
 	outarg.max_write = se->conn.max_write;
+  outarg.flags |= FUSE_WRITEBACK_CACHE;
 	if (se->conn.proto_minor >= 13) {
 		if (se->conn.max_background >= (1 << 16))
 			se->conn.max_background = (1 << 16) - 1;
