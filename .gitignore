@@ -1,2 +1,3 @@
 *.deb
 lib/librfuse/build
+lib/libfuse/build

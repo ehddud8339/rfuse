@@ -1046,7 +1046,7 @@ void rfuse_do_init(fuse_req_t u_req, fuse_ino_t nodeid){
 		outarg->flags |= FUSE_EXPLICIT_INVAL_DATA;
 
 	se->conn.want |= FUSE_CAP_SPLICE_WRITE | FUSE_CAP_SPLICE_MOVE;
-
+  //outarg->flags |= FUSE_WRITEBACK_CACHE;
 	outarg->flags |= FUSE_PARALLEL_DIROPS;
 	outarg->max_readahead = se->conn.max_readahead;
 	outarg->max_write = se->conn.max_write;
