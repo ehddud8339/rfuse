@@ -316,11 +316,6 @@ struct dentry *rfuse_lookup(struct inode *dir, struct dentry *entry, unsigned in
 	if (fuse_is_bad(dir))
 		return ERR_PTR(-EIO);
 
-	printk(KERN_INFO,
-	       "RFUSE_TRACE lookup_begin parent_nodeid=%llu name=%.*s flags=0x%x\n",
-	       (unsigned long long)get_node_id(dir),
-	       entry->d_name.len, entry->d_name.name, flags);
-
 	r_req = rfuse_get_req(fm, false, false); // Rfuse test
 	locked = fuse_lock_inode(dir);
 	err = rfuse_lookup_name(dir->i_sb, get_node_id(dir), &entry->d_name, r_req, &inode);
@@ -330,18 +325,9 @@ struct dentry *rfuse_lookup(struct inode *dir, struct dentry *entry, unsigned in
 	outarg = (struct fuse_entry_out*)&riq->karg[r_req->out.arg];
 
 	if (err == -ENOENT) {
-		printk(KERN_INFO,
-		       "RFUSE_TRACE lookup_enoent parent_nodeid=%llu name=%.*s\n",
-		       (unsigned long long)get_node_id(dir),
-		       entry->d_name.len, entry->d_name.name);
 		outarg_valid = false;
 		err = 0;
 	}
-	if (err)
-		printk(KERN_INFO,
-		       "RFUSE_TRACE lookup_error parent_nodeid=%llu name=%.*s err=%d\n",
-		       (unsigned long long)get_node_id(dir),
-		       entry->d_name.len, entry->d_name.name, err);
 	if (err)
 		goto out_err;
 
@@ -359,18 +345,6 @@ struct dentry *rfuse_lookup(struct inode *dir, struct dentry *entry, unsigned in
 		fuse_change_entry_timeout(entry, outarg);
 	else
 		fuse_invalidate_entry_cache(entry);
-
-	printk(KERN_INFO,
-	       "RFUSE_TRACE lookup_result parent_nodeid=%llu name=%.*s outarg_valid=%d inode_nodeid=%llu generation=%llu entry_valid=%llu.%09u attr_valid=%llu.%09u\n",
-	       (unsigned long long)get_node_id(dir),
-	       entry->d_name.len, entry->d_name.name,
-	       outarg_valid,
-	       inode ? (unsigned long long)get_node_id(inode) : 0,
-	       (unsigned long long)outarg->generation,
-	       (unsigned long long)outarg->entry_valid,
-	       outarg->entry_valid_nsec,
-	       (unsigned long long)outarg->attr_valid,
-	       outarg->attr_valid_nsec);
 
 	if (inode)
 		rfuse_advise_use_readdirplus(dir);
@@ -406,12 +380,6 @@ int rfuse_dentry_revalidate(struct dentry *entry, unsigned int flags){
 	int ret;
 
 	inode = d_inode_rcu(entry);
-	printk(KERN_INFO,
-	       "RFUSE_TRACE revalidate_begin name=%.*s flags=0x%x inode_present=%d deadline=%llu now=%llu\n",
-	       entry->d_name.len, entry->d_name.name, flags,
-	       inode ? 1 : 0,
-	       (unsigned long long)rfuse_dentry_time(entry),
-	       (unsigned long long)get_jiffies_64());
 	if (inode && fuse_is_bad(inode))
 		goto invalid;
 	else if (time_before64(rfuse_dentry_time(entry), get_jiffies_64()) ||
@@ -446,17 +414,6 @@ int rfuse_dentry_revalidate(struct dentry *entry, unsigned int flags){
 		/* Zero nodeid is same as -ENOENT */
 		if (!ret && !outarg->nodeid)
 			ret = -ENOENT;
-		printk(KERN_INFO,
-		       "RFUSE_TRACE revalidate_lookup name=%.*s parent_nodeid=%llu ret=%d out_nodeid=%llu generation=%llu entry_valid=%llu.%09u attr_valid=%llu.%09u\n",
-		       entry->d_name.len, entry->d_name.name,
-		       (unsigned long long)parent_nodeid,
-		       ret,
-		       (unsigned long long)outarg->nodeid,
-		       (unsigned long long)outarg->generation,
-		       (unsigned long long)outarg->entry_valid,
-		       outarg->entry_valid_nsec,
-		       (unsigned long long)outarg->attr_valid,
-		       outarg->attr_valid_nsec);
 		if (!ret) {
 			fi = get_fuse_inode(inode);
 			if (outarg->nodeid != get_node_id(inode) ||
@@ -861,11 +818,6 @@ int rfuse_create_open(struct inode *dir, struct dentry *entry,
 		mode &= ~current_umask();
 
 	flags &= ~O_NOCTTY;
-	printk(KERN_INFO,
-	       "RFUSE_TRACE create_begin parent_nodeid=%llu name=%.*s flags=0x%x mode=%o\n",
-	       (unsigned long long)get_node_id(dir),
-	       entry->d_name.len, entry->d_name.name, flags, mode);
-
 	r_req = rfuse_get_req(fm, false, false);
 	riq = rfuse_get_specific_iqueue(fm->fc, r_req->riq_id);
 	in_argument_index = rfuse_get_argument_buffer(fm, r_req->riq_id);
@@ -896,19 +848,6 @@ int rfuse_create_open(struct inode *dir, struct dentry *entry,
 	err = rfuse_simple_request(r_req);
 	outentry = (struct fuse_entry_out*)&riq->karg[out_argument_index];
 	outopen = (struct fuse_open_out*)&r_req->args;
-	printk(KERN_INFO,
-	       "RFUSE_TRACE create_reply parent_nodeid=%llu name=%.*s err=%d out_nodeid=%llu generation=%llu fh=%llu open_flags=0x%x entry_valid=%llu.%09u attr_valid=%llu.%09u\n",
-	       (unsigned long long)get_node_id(dir),
-	       entry->d_name.len, entry->d_name.name, err,
-	       (unsigned long long)outentry->nodeid,
-	       (unsigned long long)outentry->generation,
-	       (unsigned long long)outopen->fh,
-	       outopen->open_flags,
-	       (unsigned long long)outentry->entry_valid,
-	       outentry->entry_valid_nsec,
-	       (unsigned long long)outentry->attr_valid,
-	       outentry->attr_valid_nsec);
-
 	if (err)
 		goto out_free_ff;
 
@@ -933,17 +872,7 @@ int rfuse_create_open(struct inode *dir, struct dentry *entry,
 	d_instantiate(entry, inode);
 	fuse_change_entry_timeout(entry, outentry);
 	rfuse_dir_changed(dir);
-	printk(KERN_INFO,
-	       "RFUSE_TRACE create_publish parent_nodeid=%llu name=%.*s inode_nodeid=%llu entry_deadline=%llu\n",
-	       (unsigned long long)get_node_id(dir),
-	       entry->d_name.len, entry->d_name.name,
-	       (unsigned long long)get_node_id(inode),
-	       (unsigned long long)rfuse_dentry_time(entry));
 	err = finish_open(file, entry, generic_file_open);
-	printk(KERN_INFO,
-	       "RFUSE_TRACE create_finish parent_nodeid=%llu name=%.*s finish_open_err=%d\n",
-	       (unsigned long long)get_node_id(dir),
-	       entry->d_name.len, entry->d_name.name, err);
 	if (err) {
 		fi = get_fuse_inode(inode);
 		rfuse_sync_release(fi, ff, flags);

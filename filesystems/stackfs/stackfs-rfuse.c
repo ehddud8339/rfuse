@@ -247,6 +247,7 @@ struct lo_data {
 	struct lo_inode root;
 	/* do we still need this ? let's see*/
 	double attr_valid;
+	int writeback;
 };
 
 struct lo_dirptr {
@@ -273,6 +274,37 @@ static struct lo_inode *lo_inode(fuse_req_t req, fuse_ino_t ino)
 		return (struct lo_inode *) (uintptr_t) ino;
 }
 
+static int stackfs_backing_open_flags(fuse_req_t req, int flags)
+{
+	struct lo_data *lo = get_lo_data(req);
+
+	if (!lo->writeback)
+		return flags;
+
+	/* writeback_cache에서는 write fd로도 read 요청이 올 수 있다. */
+	if ((flags & O_ACCMODE) == O_WRONLY) {
+		flags &= ~O_ACCMODE;
+		flags |= O_RDWR;
+	}
+
+	/*
+	 * append 위치 결정은 writeback 커널 캐시가 관리한다.
+	 * backing fd에 그대로 남기면 위치 계산이 이중 적용될 수 있다.
+	 */
+	if (flags & O_APPEND)
+		flags &= ~O_APPEND;
+
+	return flags;
+}
+
+static void stackfs_ll_init(void *userdata, struct fuse_conn_info *conn)
+{
+	struct lo_data *lo = userdata;
+
+	lo->writeback = (conn->want & FUSE_CAP_WRITEBACK_CACHE) &&
+			(conn->capable & FUSE_CAP_WRITEBACK_CACHE);
+}
+
 static char *lo_name(fuse_req_t req, fuse_ino_t ino)
 {
 	return lo_inode(req, ino)->name;
@@ -295,9 +327,6 @@ static void construct_full_path(fuse_req_t req, fuse_ino_t ino,
 	strcpy(fpath, lo_name(req, ino));
 	strncat(fpath, "/1", 1);
 	strncat(fpath, path, PATH_MAX);
-	fprintf(stderr,
-		"STACKFS_TRACE construct_full_path parent=%llu parent_path=%s name=%s full_path=%s\n",
-		(unsigned long long)ino, lo_name(req, ino), path, fpath);
 }
 
 /* Function which generates the hash depending on the ino number
@@ -567,21 +596,11 @@ static void stackfs_ll_lookup(fuse_req_t req, fuse_ino_t parent,
 	e.entry_timeout = attr_val; /* dentry timeout */
 	
 	res = lstat(fullPath, &e.attr);
-	fprintf(stderr,
-		"STACKFS_TRACE lookup parent=%llu name=%s full_path=%s lstat_res=%d errno=%d attr_valid=%.3f\n",
-		(unsigned long long)parent, name, fullPath, res,
-		res == 0 ? 0 : errno, attr_val);
 
 	if (res == 0) {
 		struct lo_inode *inode;
 
 		inode = find_lo_inode(req, &e.attr, fullPath);
-		fprintf(stderr,
-			"STACKFS_TRACE lookup_hit parent=%llu name=%s full_path=%s lo_ino=%llu st_ino=%llu st_dev=%llu\n",
-			(unsigned long long)parent, name, fullPath,
-			inode ? (unsigned long long)inode->lo_ino : 0,
-			(unsigned long long)e.attr.st_ino,
-			(unsigned long long)e.attr.st_dev);
 
 		if (fullPath)
 			free(fullPath);
@@ -691,6 +710,7 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 		const char *name, mode_t mode, struct fuse_file_info *fi)
 {
 	int fd, res;
+	int backing_flags;
 	struct fuse_entry_param e;
 	char *fullPath = NULL;
 	double attr_val;
@@ -704,17 +724,10 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 	fullPath = (char *)malloc(PATH_MAX);
 	construct_full_path(req, parent, fullPath, name);
 	attr_val = lo_attr_valid_time(req);
-	fprintf(stderr,
-		"STACKFS_TRACE create_begin parent=%llu name=%s full_path=%s mode=%o flags=0x%x attr_valid=%.3f\n",
-		(unsigned long long)parent, name, fullPath, mode, fi->flags, attr_val);
-
 	//struct timespec start,end;
 	//clock_gettime(CLOCK_MONOTONIC, &start);
-	fd = creat(fullPath, mode);
-	fprintf(stderr,
-		"STACKFS_TRACE create_creat parent=%llu name=%s full_path=%s fd=%d errno=%d\n",
-		(unsigned long long)parent, name, fullPath, fd,
-		fd == -1 ? errno : 0);
+	backing_flags = stackfs_backing_open_flags(req, fi->flags);
+	fd = open(fullPath, backing_flags | O_CREAT, mode);
 	//clock_gettime(CLOCK_MONOTONIC, &end);
 	//printf("CREATE TIME: %lu\n", (end.tv_sec * 1000000000 + end.tv_nsec) - (start.tv_sec * 1000000000 + start.tv_nsec));	
 	if (fd == -1) {
@@ -729,10 +742,6 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 	e.entry_timeout = attr_val;
 
 	res = stat(fullPath, &e.attr);
-	fprintf(stderr,
-		"STACKFS_TRACE create_stat parent=%llu name=%s full_path=%s stat_res=%d errno=%d\n",
-		(unsigned long long)parent, name, fullPath, res,
-		res == 0 ? 0 : errno);
 	// generate_end_time(req);
 	// populate_time(req);
 
@@ -743,6 +752,7 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 
 		lo_inode = calloc(1, sizeof(struct lo_inode));
 		if (!lo_inode) {
+			close(fd);
 			if (fullPath)
 				free(fullPath);
 
@@ -765,6 +775,7 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 		pthread_spin_unlock(&lo_data->spinlock);
 
 		if (res == -1) {
+			close(fd);
 			free(lo_inode->name);
 			free(lo_inode);
 			fuse_reply_err(req, EBUSY);
@@ -773,17 +784,10 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 			e.ino = lo_inode->lo_ino;
 			//StackFS_trace("Create called, e.ino : %llu", e.ino);
 			fi->fh = fd;
-			fprintf(stderr,
-				"STACKFS_TRACE create_reply parent=%llu name=%s full_path=%s lo_ino=%llu st_ino=%llu st_dev=%llu fh=%llu entry_timeout=%.3f attr_timeout=%.3f\n",
-				(unsigned long long)parent, name, lo_inode->name,
-				(unsigned long long)e.ino,
-				(unsigned long long)e.attr.st_ino,
-				(unsigned long long)e.attr.st_dev,
-				(unsigned long long)fi->fh,
-				e.entry_timeout, e.attr_timeout);
 			fuse_reply_create(req, &e, fi);
 		}
 	} else {
+		close(fd);
 		if (fullPath)
 			free(fullPath);
 		fuse_reply_err(req, errno);
@@ -878,14 +882,9 @@ static void stackfs_ll_open(fuse_req_t req, fuse_ino_t ino,
 		struct fuse_file_info *fi)
 {
 	int fd;
-	fprintf(stderr,
-		"STACKFS_TRACE open_begin ino=%llu path=%s flags=0x%x\n",
-		(unsigned long long)ino, lo_name(req, ino), fi->flags);
-	fd = open(lo_name(req, ino), fi->flags);
-	fprintf(stderr,
-		"STACKFS_TRACE open_result ino=%llu path=%s fd=%d errno=%d\n",
-		(unsigned long long)ino, lo_name(req, ino), fd,
-		fd == -1 ? errno : 0);
+	int backing_flags;
+	backing_flags = stackfs_backing_open_flags(req, fi->flags);
+	fd = open(lo_name(req, ino), backing_flags);
 	
 	if (fd == -1)
 		return (void) fuse_reply_err(req, errno);
@@ -1435,6 +1434,7 @@ static void stackfs_ll_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t newparent
 
 }
 static struct fuse_lowlevel_ops hello_ll_oper = {
+	.init		=	stackfs_ll_init,
 	.lookup		=	stackfs_ll_lookup,
 	.getattr	=	stackfs_ll_getattr,	
 	.statfs		=	stackfs_ll_statfs,	

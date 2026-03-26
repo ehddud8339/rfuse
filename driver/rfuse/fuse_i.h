@@ -52,7 +52,7 @@
 #define FUSE_CTL_NUM_DENTRIES 5
 
 /** Maximum number of outstanding background requests */
-#define FUSE_DEFAULT_MAX_BACKGROUND 32
+#define FUSE_DEFAULT_MAX_BACKGROUND 128
 
 /** Congestion starts at 75% of maximum */
 #define FUSE_DEFAULT_CONGESTION_THRESHOLD (FUSE_DEFAULT_MAX_BACKGROUND * 3 / 4)
@@ -327,8 +327,10 @@ struct fuse_io_priv {
 	bool should_dirty;
 	int err;
 	struct kiocb *iocb;
+	struct inode *inode;
 	struct completion *done;
 	bool blocking;
+	bool bwrite_async;
 };
 
 #define FUSE_IO_PRIV_SYNC(i) \

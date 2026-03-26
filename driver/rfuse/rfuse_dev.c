@@ -29,6 +29,8 @@
 
 #define RFUSE_SELECTION_ALGO 2
 atomic_t rr_id = ATOMIC_INIT(0);
+static atomic64_t rfuse_bwrite_bg_full_count = ATOMIC64_INIT(0);
+
 
 /* -1: (App) user syscall start 
    0: request opcode (exception, not timestamps) 
@@ -968,6 +970,7 @@ ssize_t rfuse_simple_request(struct rfuse_req *r_req){
 	ssize_t ret=0;
 
 	rfuse_queue_request(r_req);
+  /* LDY: FUSE_WRITE인 경우에 sync to async */
 	rfuse_request_wait_answer(r_req);
 	smp_rmb();
 

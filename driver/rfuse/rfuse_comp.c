@@ -20,10 +20,16 @@ void rfuse_sleep_comp(struct fuse_conn *fc, struct rfuse_iqueue *riq, struct rfu
 }
 
 int rfuse_completion_poll(struct fuse_conn *fc, struct rfuse_iqueue *riq, struct rfuse_req *r_req)
-{   
+{
 	unsigned long max_idle_due = jiffies + usecs_to_jiffies(RFUSE_COMP_MAX_IDLE);
-	
 	while(fc->connected) {
+    /*
+    // DK
+    if(r_req->in.opcode == FUSE_WRITE) {
+      printk("RFUSE: FUSE_WRITE \n");
+      set_bit(FR_FINISHED, &r_req->flags);
+    }
+    */
 		if(test_bit(FR_FINISHED, &r_req->flags)){
 			rfuse_request_end(r_req);
 			return 0;

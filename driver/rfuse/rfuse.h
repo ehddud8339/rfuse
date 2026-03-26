@@ -14,6 +14,10 @@
 #define RFUSE_NUM_IQUEUE     32           // Number of rfuse iqueue
 #define RFUSE_MAX_QUEUE_SIZE 1024*4      // Maximum number of requests in a queue
 
+#ifndef LOOKUP_LOG
+#define LOOKUP_LOG 0
+#endif
+
 #define RFUSE_RIQ_ID_MASK    0x00ff0000ULL
 #define RFUSE_QUEUE_MAP_MASK 0xff000000ULL
 #define RFUSE_REQ_IDX_MASK   0x0000ffff00000000ULL

@@ -46,6 +46,10 @@ enum fuse_req_flag {
 #define CLEAR_BIT(x, pos) (x &= (~(1U << pos)))
 #define TEST_BIT(x, pos) (x & (1UL << pos) )
 
+#ifndef LOOKUP_LOG
+#define LOOKUP_LOG 0
+#endif
+
 /**
  * The following MACROs are used in "liburing/src/include/liburing/barrier.h"
  * The io_uring 'modifies' the ring buffers 'head' in the user space and 
