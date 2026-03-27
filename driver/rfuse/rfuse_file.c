@@ -10,6 +10,7 @@
 #include <linux/falloc.h>
 #include <linux/uio.h>
 #include <linux/fs.h>
+#include <linux/timekeeping.h>
 
 struct rfuse_release_in {
 	struct fuse_release_in inarg;
@@ -20,21 +21,6 @@ static atomic64_t rfuse_bwrite_submit_count = ATOMIC64_INIT(0);
 static atomic64_t rfuse_bwrite_submit_fail_count = ATOMIC64_INIT(0);
 static atomic64_t rfuse_bwrite_page_locked_count = ATOMIC64_INIT(0);
 static atomic64_t rfuse_bwrite_complete_count = ATOMIC64_INIT(0);
-
-static void rfuse_bwrite_stats_log_sample(void)
-{
-	long long complete = atomic64_read(&rfuse_bwrite_complete_count);
-
-	/* 샘플 로그 빈도를 낮춰 hot path 오염을 줄인다. */
-	if ((complete & 0xfff) != 0)
-		return;
-
-	pr_info("rfuse_bwrite stats submit=%lld submit_fail=%lld page_locked=%lld complete=%lld\n",
-		atomic64_read(&rfuse_bwrite_submit_count),
-		atomic64_read(&rfuse_bwrite_submit_fail_count),
-		atomic64_read(&rfuse_bwrite_page_locked_count),
-		complete);
-}
 
 
 /************ 0. Copy of original fuse functions ************/
@@ -1136,6 +1122,7 @@ static ssize_t rfuse_send_write_pages(struct rfuse_io_args *ria,
 	unsigned int offset, i;
 	bool short_write;
 	int err;
+	u64 now_ns;
 
 	ria->r_req->in_pages = true;
 
@@ -1148,6 +1135,15 @@ static ssize_t rfuse_send_write_pages(struct rfuse_io_args *ria,
 	in->flags = rfuse_write_flags(iocb);
 	if (fm->fc->handle_killpriv_v2 && !capable(CAP_FSETID))
 		in->write_flags |= FUSE_WRITE_KILL_SUIDGID;
+
+	now_ns = ktime_get_ns();
+	if (ria->r_req->write_lat.valid &&
+	    ria->r_req->write_lat.branch == RFUSE_WRITE_LAT_SYNC &&
+	    ria->r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_PREPARE]) {
+		rfuse_write_lat_commit(RFUSE_WRITE_LAT_SYNC,
+				      RFUSE_WRITE_LAT_PREPARE,
+				      now_ns - ria->r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_PREPARE]);
+	}
 
 	err = rfuse_simple_request(ria->r_req);
 	out = (struct fuse_write_out *)&ria->r_req->args;
@@ -1220,6 +1216,24 @@ static void rfuse_bwrite_complete_req(struct fuse_mount *fm, struct rfuse_req *r
 		put_page(page);
 	}
 
+	if (r_req->write_lat.valid &&
+	    r_req->write_lat.branch == RFUSE_WRITE_LAT_ASYNC) {
+		u64 now_ns = ktime_get_ns();
+
+		if (r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_COMPLETION]) {
+			rfuse_write_lat_commit(RFUSE_WRITE_LAT_ASYNC,
+					      RFUSE_WRITE_LAT_COMPLETION,
+					      now_ns - r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_COMPLETION]);
+		}
+		if (r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_TOTAL]) {
+			rfuse_write_lat_commit(RFUSE_WRITE_LAT_ASYNC,
+					      RFUSE_WRITE_LAT_TOTAL,
+					      now_ns - r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_TOTAL]);
+		}
+		rfuse_write_lat_log_sample(RFUSE_WRITE_LAT_ASYNC);
+		r_req->write_lat.valid = 0;
+	}
+
 	atomic64_inc(&rfuse_bwrite_complete_count);
 	rfuse_aio_complete(io, err, pos);
 	rfuse_io_free(ria);
@@ -1237,6 +1251,7 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 	struct fuse_write_in *in;
 	unsigned int i;
 	ssize_t err;
+	u64 now_ns;
 
 	atomic64_inc(&rfuse_bwrite_submit_count);
 	ria->r_req->in_pages = true;
@@ -1250,6 +1265,17 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 	in->flags = rfuse_write_flags(iocb);
 	if (fm->fc->handle_killpriv_v2 && !capable(CAP_FSETID))
 		in->write_flags |= FUSE_WRITE_KILL_SUIDGID;
+
+	now_ns = ktime_get_ns();
+	if (ria->r_req->write_lat.valid &&
+	    ria->r_req->write_lat.branch == RFUSE_WRITE_LAT_ASYNC &&
+	    ria->r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_PREPARE]) {
+		rfuse_write_lat_commit(RFUSE_WRITE_LAT_ASYNC,
+				      RFUSE_WRITE_LAT_PREPARE,
+				      now_ns - ria->r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_PREPARE]);
+	}
+	rfuse_write_lat_stamp(ria->r_req, RFUSE_WRITE_LAT_STAMP_QUEUE, now_ns);
+	rfuse_write_lat_stamp(ria->r_req, RFUSE_WRITE_LAT_STAMP_SUBMIT_TO_BG, now_ns);
 
   spin_lock(&io->lock);
 	kref_get(&io->refcnt);
@@ -1291,6 +1317,7 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 		struct rfuse_io_args ria = {};
 		struct rfuse_pages *rp = &ria.rp;
 		struct rfuse_req *r_req;
+		u64 now_ns;
 		unsigned int nr_pages = rfuse_wr_pages(pos, iov_iter_count(ii), fc->max_pages);
 
 		rp->pages = fuse_pages_alloc(nr_pages, GFP_KERNEL, &rp->descs);
@@ -1300,7 +1327,11 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 		}
 
 		r_req = rfuse_get_req(fm, false, false);
-		ria.r_req = r_req;
+			ria.r_req = r_req;
+			rfuse_write_lat_set_branch(r_req, RFUSE_WRITE_LAT_SYNC);
+			now_ns = ktime_get_ns();
+			rfuse_write_lat_stamp(r_req, RFUSE_WRITE_LAT_TOTAL, now_ns);
+			rfuse_write_lat_stamp(r_req, RFUSE_WRITE_LAT_PREPARE, now_ns);
 
 		count = rfuse_fill_write_pages(&ria, mapping, ii, pos, nr_pages);
 		if (count <= 0) {
@@ -1344,6 +1375,7 @@ async:
 		while (count) {
 			struct rfuse_io_args *ria;
 			struct rfuse_req *r_req;
+			u64 now_ns;
 			unsigned int nr_pages;
 			ssize_t nbytes;
 
@@ -1354,8 +1386,12 @@ async:
 				break;
 			}
 
-			r_req = rfuse_get_req(fm, true, false);
+			r_req = try_rfuse_get_req(fm, true, false, NULL);
 			ria->r_req = r_req;
+			rfuse_write_lat_set_branch(r_req, RFUSE_WRITE_LAT_ASYNC);
+			now_ns = ktime_get_ns();
+			rfuse_write_lat_stamp(r_req, RFUSE_WRITE_LAT_TOTAL, now_ns);
+			rfuse_write_lat_stamp(r_req, RFUSE_WRITE_LAT_PREPARE, now_ns);
 
 			nbytes = rfuse_fill_write_pages(ria, mapping, ii, pos, nr_pages);
 			if (nbytes <= 0) {

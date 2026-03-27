@@ -143,7 +143,10 @@ extern "C" {
 #define RFUSE_ARG               	0x30000000ULL
 #define RFUSE_REQ					0x38000000ULL
 #define RFUSE_READ					0x40000000ULL
-#define RFUSE_WRITE					0x48000000ULL
+#define RFUSE_WRITE				0x48000000ULL
+
+#define RFUSE_WRITE_LAT_STAGE_NR 8
+#define RFUSE_WRITE_LAT_STAMP_SLOTS 10
 
 struct rfuse_req{
 	/** Request input header **/
@@ -187,6 +190,20 @@ struct rfuse_req{
 	}args; // 120
 	
 	uint64_t padding[2];
+
+	/*
+	 * kernel과 shared request 크기를 맞추기 위한 reserved area다.
+	 * kernel write_lat 확장과 항상 같은 슬롯 수를 유지해야 한다.
+	 * userspace는 이 값을 직접 해석하지 않고 index 계산만 맞추면 된다.
+	 */
+	struct {
+		uint64_t stamp_ns[RFUSE_WRITE_LAT_STAMP_SLOTS];
+		uint64_t daemon_dequeued_ns;
+		uint64_t daemon_reply_ns;
+		uint8_t branch;
+		uint8_t valid;
+		uint8_t daemon_stamps_valid;
+	} write_lat;
 };
 
 struct rfuse_interrupt_entry{
@@ -287,6 +304,28 @@ struct rfuse_main_worker {
 	struct rfuse_loop_args args;
 };
 
+struct rfuse_daemon_sleep_stat {
+	uint64_t count;
+	uint64_t total_ns;
+	uint64_t min_ns;
+	uint64_t max_ns;
+};
+
+struct rfuse_daemon_sleep_ctx {
+	uint64_t sleep_calls;
+	uint64_t last_wake_ns;
+	uint64_t sleep_blocked_calls;
+	uint64_t pending_seen_before_sleep;
+	uint64_t forget_miss_before_sleep;
+	uint64_t wake_with_backlog_calls;
+	uint64_t burst_reqs_total;
+	uint64_t current_burst_len;
+	struct rfuse_daemon_sleep_stat sleep_block_ns;
+	struct rfuse_daemon_sleep_stat wake_to_read_ns;
+	struct rfuse_daemon_sleep_stat wake_pending_depth;
+	struct rfuse_daemon_sleep_stat dequeue_burst_len;
+};
+
 struct rfuse_worker {
 	struct rfuse_worker *prev;
 	struct rfuse_worker *next;
@@ -313,6 +352,7 @@ struct rfuse_mt {
 	int clone_fd;
 	int max_idle;
 	int riq_id;
+	struct rfuse_daemon_sleep_ctx sleep_ctx;
 };
 // ******************************* rfuse_lowlevel.c Operations ******************************* //
 /**
