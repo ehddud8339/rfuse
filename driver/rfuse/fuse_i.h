@@ -67,6 +67,66 @@ extern struct mutex fuse_mutex;
 extern unsigned max_user_bgreq;
 extern unsigned max_user_congthresh;
 
+enum rfuse_write_lat_stage {
+	RFUSE_WRITE_LAT_PREPARE = 0,
+	RFUSE_WRITE_LAT_QUEUE,
+	RFUSE_WRITE_LAT_DAEMON,
+	RFUSE_WRITE_LAT_COMPLETION,
+	RFUSE_WRITE_LAT_TOTAL,
+	RFUSE_WRITE_LAT_SUBMIT_TO_BG,
+	RFUSE_WRITE_LAT_BG_TO_PENDING,
+	RFUSE_WRITE_LAT_PENDING_TO_DAEMON,
+};
+
+/*
+ * summary stage와 request-local stamp를 분리해 둔다.
+ * queue 하위 구간은 summary로 노출하지만, 경계 시점은 별도 stamp가 필요하다.
+ */
+enum rfuse_write_lat_stamp {
+	RFUSE_WRITE_LAT_STAMP_PREPARE = RFUSE_WRITE_LAT_PREPARE,
+	RFUSE_WRITE_LAT_STAMP_QUEUE = RFUSE_WRITE_LAT_QUEUE,
+	RFUSE_WRITE_LAT_STAMP_DAEMON = RFUSE_WRITE_LAT_DAEMON,
+	RFUSE_WRITE_LAT_STAMP_COMPLETION = RFUSE_WRITE_LAT_COMPLETION,
+	RFUSE_WRITE_LAT_STAMP_TOTAL = RFUSE_WRITE_LAT_TOTAL,
+	RFUSE_WRITE_LAT_STAMP_SUBMIT_TO_BG = RFUSE_WRITE_LAT_SUBMIT_TO_BG,
+	RFUSE_WRITE_LAT_STAMP_BG_TO_PENDING = RFUSE_WRITE_LAT_BG_TO_PENDING,
+	RFUSE_WRITE_LAT_STAMP_PENDING_TO_DAEMON = RFUSE_WRITE_LAT_PENDING_TO_DAEMON,
+	RFUSE_WRITE_LAT_STAMP_BG_ENQUEUED,
+	RFUSE_WRITE_LAT_STAMP_PENDING_PUBLISHED,
+	RFUSE_WRITE_LAT_STAMP_NR,
+};
+
+enum rfuse_write_lat_branch {
+	RFUSE_WRITE_LAT_SYNC = 0,
+	RFUSE_WRITE_LAT_ASYNC,
+	RFUSE_WRITE_LAT_BRANCH_NR,
+};
+
+struct rfuse_write_lat_stat {
+	atomic64_t count;
+	atomic64_t total_ns;
+	atomic64_t min_ns;
+	atomic64_t max_ns;
+};
+
+struct rfuse_write_lat_ctx {
+	struct rfuse_write_lat_stat stats[RFUSE_WRITE_LAT_BRANCH_NR][RFUSE_WRITE_LAT_STAGE_NR];
+};
+
+void rfuse_write_lat_req_init(struct rfuse_req *r_req);
+void rfuse_write_lat_set_branch(struct rfuse_req *r_req,
+			      enum rfuse_write_lat_branch branch);
+void rfuse_write_lat_stamp(struct rfuse_req *r_req,
+			 enum rfuse_write_lat_stamp stamp, u64 now_ns);
+void rfuse_write_lat_commit(enum rfuse_write_lat_branch branch,
+			  enum rfuse_write_lat_stage stage, u64 delta_ns);
+void rfuse_write_lat_set_daemon_stamps(struct rfuse_req *r_req,
+				u64 daemon_dequeued_ns, u64 daemon_reply_ns);
+void rfuse_write_lat_finish_daemon(struct rfuse_req *r_req, u64 completion_start_ns);
+void rfuse_write_lat_log_sample(enum rfuse_write_lat_branch branch);
+struct rfuse_write_lat_ctx *rfuse_write_lat_get_ctx(void);
+
+
 /* One forget request */
 struct fuse_forget_link {
 	struct fuse_forget_one forget_one;

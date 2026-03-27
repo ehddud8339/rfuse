@@ -18,6 +18,7 @@
 
 #include <linux/time.h>
 #include <linux/timekeeping.h>
+#include <linux/limits.h>
 
 #define RFUSE_INT_REQ_BIT (1ULL << 0)
 #define RFUSE_REQ_ID_STEP (1ULL << 1)
@@ -29,7 +30,6 @@
 
 #define RFUSE_SELECTION_ALGO 2
 atomic_t rr_id = ATOMIC_INIT(0);
-static atomic64_t rfuse_bwrite_bg_full_count = ATOMIC64_INIT(0);
 
 
 /* -1: (App) user syscall start 
@@ -50,6 +50,347 @@ static u64 timestamps[9] = {0, };
 #else 
 	#define GET_TIMESTAMPS(i) ;
 #endif
+
+static struct rfuse_write_lat_ctx rfuse_write_lat_ctx;
+static bool rfuse_write_lat_track_req(struct rfuse_req *r_req);
+static void rfuse_write_lat_finish_stage(struct rfuse_req *r_req,
+				 enum rfuse_write_lat_stage stage,
+				 enum rfuse_write_lat_stamp start_stamp,
+				 u64 end_ns);
+
+static void rfuse_write_lat_stat_init(struct rfuse_write_lat_stat *stat)
+{
+	atomic64_set(&stat->count, 0);
+	atomic64_set(&stat->total_ns, 0);
+	atomic64_set(&stat->min_ns, LLONG_MAX);
+	atomic64_set(&stat->max_ns, 0);
+}
+
+static void rfuse_write_lat_ctx_init(void)
+{
+	int branch;
+	int stage;
+
+	for (branch = 0; branch < RFUSE_WRITE_LAT_BRANCH_NR; branch++) {
+		for (stage = 0; stage < RFUSE_WRITE_LAT_STAGE_NR; stage++)
+			rfuse_write_lat_stat_init(&rfuse_write_lat_ctx.stats[branch][stage]);
+	}
+}
+
+static void rfuse_write_lat_try_update_min(atomic64_t *min_ns, u64 delta_ns)
+{
+	long long old;
+
+	old = atomic64_read(min_ns);
+	while ((u64)old > delta_ns) {
+		long long prev = old;
+
+		old = atomic64_cmpxchg(min_ns, prev, (long long)delta_ns);
+		if (old == prev)
+			break;
+	}
+}
+
+static void rfuse_write_lat_try_update_max(atomic64_t *max_ns, u64 delta_ns)
+{
+	long long old;
+
+	old = atomic64_read(max_ns);
+	while ((u64)old < delta_ns) {
+		long long prev = old;
+
+		old = atomic64_cmpxchg(max_ns, prev, (long long)delta_ns);
+		if (old == prev)
+			break;
+	}
+}
+
+void rfuse_write_lat_req_init(struct rfuse_req *r_req)
+{
+	memset(r_req->write_lat.stamp_ns, 0, sizeof(r_req->write_lat.stamp_ns));
+	r_req->write_lat.daemon_dequeued_ns = 0;
+	r_req->write_lat.daemon_reply_ns = 0;
+	r_req->write_lat.branch = RFUSE_WRITE_LAT_SYNC;
+	r_req->write_lat.valid = 0;
+	r_req->write_lat.daemon_stamps_valid = 0;
+}
+
+void rfuse_write_lat_set_branch(struct rfuse_req *r_req,
+			      enum rfuse_write_lat_branch branch)
+{
+	if (branch >= RFUSE_WRITE_LAT_BRANCH_NR)
+		return;
+
+	r_req->write_lat.branch = branch;
+	r_req->write_lat.valid = 1;
+	r_req->write_lat.daemon_stamps_valid = 0;
+	r_req->write_lat.daemon_dequeued_ns = 0;
+	r_req->write_lat.daemon_reply_ns = 0;
+}
+
+void rfuse_write_lat_stamp(struct rfuse_req *r_req,
+			 enum rfuse_write_lat_stamp stamp, u64 now_ns)
+{
+	if (!r_req->write_lat.valid || stamp >= RFUSE_WRITE_LAT_STAMP_NR)
+		return;
+
+	r_req->write_lat.stamp_ns[stamp] = now_ns;
+}
+
+void rfuse_write_lat_commit(enum rfuse_write_lat_branch branch,
+			  enum rfuse_write_lat_stage stage, u64 delta_ns)
+{
+	struct rfuse_write_lat_stat *stat;
+
+	if (branch >= RFUSE_WRITE_LAT_BRANCH_NR || stage >= RFUSE_WRITE_LAT_STAGE_NR)
+		return;
+
+	stat = &rfuse_write_lat_ctx.stats[branch][stage];
+	atomic64_inc(&stat->count);
+	atomic64_add(delta_ns, &stat->total_ns);
+	rfuse_write_lat_try_update_min(&stat->min_ns, delta_ns);
+	rfuse_write_lat_try_update_max(&stat->max_ns, delta_ns);
+}
+
+void rfuse_write_lat_set_daemon_stamps(struct rfuse_req *r_req,
+				u64 daemon_dequeued_ns, u64 daemon_reply_ns)
+{
+	if (!r_req->write_lat.valid)
+		return;
+
+	if (!daemon_dequeued_ns || daemon_reply_ns < daemon_dequeued_ns)
+		return;
+
+	/*
+	 * userspace는 CLOCK_MONOTONIC 계열 stamp를 넘겨야 한다.
+	 * clock domain이 맞지 않으면 kernel observed 값으로 fallback한다.
+	 */
+	r_req->write_lat.daemon_dequeued_ns = daemon_dequeued_ns;
+	r_req->write_lat.daemon_reply_ns = daemon_reply_ns;
+	r_req->write_lat.daemon_stamps_valid = 1;
+}
+
+void rfuse_write_lat_finish_daemon(struct rfuse_req *r_req, u64 completion_start_ns)
+{
+	enum rfuse_write_lat_branch branch;
+	u64 queue_start_ns;
+	u64 queue_end_ns;
+	u64 daemon_start_ns;
+	u64 daemon_end_ns;
+
+	if (!rfuse_write_lat_track_req(r_req))
+		return;
+
+	queue_start_ns = r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_STAMP_QUEUE];
+	daemon_start_ns = r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_STAMP_DAEMON];
+	if (!queue_start_ns || !daemon_start_ns)
+		return;
+
+	branch = r_req->write_lat.branch;
+	queue_end_ns = daemon_start_ns;
+	daemon_end_ns = completion_start_ns;
+
+	if (r_req->write_lat.daemon_stamps_valid) {
+		if (r_req->write_lat.daemon_dequeued_ns >= queue_start_ns)
+			queue_end_ns = r_req->write_lat.daemon_dequeued_ns;
+		if (r_req->write_lat.daemon_reply_ns >= queue_end_ns) {
+			daemon_start_ns = queue_end_ns;
+			daemon_end_ns = r_req->write_lat.daemon_reply_ns;
+		}
+	}
+
+	if (branch == RFUSE_WRITE_LAT_ASYNC)
+		/*
+		 * queue aggregate와 동일한 끝점을 써야 하위 stage 합과 어긋나지 않는다.
+		 * userspace dequeue stamp가 있으면 그 시각으로 pending_to_daemon을 닫는다.
+		 */
+		rfuse_write_lat_finish_stage(r_req, RFUSE_WRITE_LAT_PENDING_TO_DAEMON,
+					 RFUSE_WRITE_LAT_STAMP_PENDING_TO_DAEMON, queue_end_ns);
+
+	if (queue_end_ns >= queue_start_ns)
+		rfuse_write_lat_commit(branch, RFUSE_WRITE_LAT_QUEUE,
+				      queue_end_ns - queue_start_ns);
+
+	if (daemon_end_ns >= daemon_start_ns)
+		rfuse_write_lat_commit(branch, RFUSE_WRITE_LAT_DAEMON,
+				      daemon_end_ns - daemon_start_ns);
+
+	rfuse_write_lat_stamp(r_req, RFUSE_WRITE_LAT_STAMP_COMPLETION, completion_start_ns);
+}
+
+struct rfuse_write_lat_ctx *rfuse_write_lat_get_ctx(void)
+{
+	return &rfuse_write_lat_ctx;
+}
+
+static bool rfuse_write_lat_track_sync_req(struct rfuse_req *r_req)
+{
+	return r_req->write_lat.valid &&
+	       r_req->write_lat.branch == RFUSE_WRITE_LAT_SYNC &&
+	       !test_bit(FR_BACKGROUND, &r_req->flags) &&
+	       r_req->in.opcode == FUSE_WRITE;
+}
+
+static bool rfuse_write_lat_track_async_req(struct rfuse_req *r_req)
+{
+	return r_req->write_lat.valid &&
+	       r_req->write_lat.branch == RFUSE_WRITE_LAT_ASYNC &&
+	       r_req->in.opcode == FUSE_WRITE;
+}
+
+static bool rfuse_write_lat_track_req(struct rfuse_req *r_req)
+{
+	return rfuse_write_lat_track_sync_req(r_req) ||
+	       rfuse_write_lat_track_async_req(r_req);
+}
+
+static void rfuse_write_lat_finish_stage(struct rfuse_req *r_req,
+				 enum rfuse_write_lat_stage stage,
+				 enum rfuse_write_lat_stamp start_stamp,
+				 u64 end_ns)
+{
+	u64 start_ns;
+
+	if (!rfuse_write_lat_track_async_req(r_req))
+		return;
+
+	start_ns = r_req->write_lat.stamp_ns[start_stamp];
+	if (!start_ns || end_ns < start_ns)
+		return;
+
+	rfuse_write_lat_commit(RFUSE_WRITE_LAT_ASYNC, stage, end_ns - start_ns);
+}
+
+static void rfuse_write_lat_mark_bg_enqueued(struct rfuse_req *r_req, u64 now_ns)
+{
+	if (!rfuse_write_lat_track_async_req(r_req) ||
+	    !r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_STAMP_SUBMIT_TO_BG] ||
+	    r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_STAMP_BG_ENQUEUED])
+		return;
+
+	rfuse_write_lat_stamp(r_req, RFUSE_WRITE_LAT_STAMP_BG_ENQUEUED, now_ns);
+	rfuse_write_lat_finish_stage(r_req, RFUSE_WRITE_LAT_SUBMIT_TO_BG,
+					 RFUSE_WRITE_LAT_STAMP_SUBMIT_TO_BG, now_ns);
+	rfuse_write_lat_stamp(r_req, RFUSE_WRITE_LAT_STAMP_BG_TO_PENDING, now_ns);
+}
+
+static void rfuse_write_lat_mark_pending_published(struct rfuse_req *r_req, u64 now_ns)
+{
+	if (!rfuse_write_lat_track_async_req(r_req) ||
+	    !r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_STAMP_BG_TO_PENDING] ||
+	    r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_STAMP_PENDING_PUBLISHED])
+		return;
+
+	rfuse_write_lat_stamp(r_req, RFUSE_WRITE_LAT_STAMP_PENDING_PUBLISHED, now_ns);
+	rfuse_write_lat_finish_stage(r_req, RFUSE_WRITE_LAT_BG_TO_PENDING,
+					 RFUSE_WRITE_LAT_STAMP_BG_TO_PENDING, now_ns);
+	rfuse_write_lat_stamp(r_req, RFUSE_WRITE_LAT_STAMP_PENDING_TO_DAEMON, now_ns);
+}
+
+static void rfuse_write_lat_mark_daemon_start(struct rfuse_req *r_req, u64 now_ns)
+{
+	if (!rfuse_write_lat_track_req(r_req) ||
+	    !r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_STAMP_QUEUE] ||
+	    r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_STAMP_DAEMON])
+		return;
+
+	rfuse_write_lat_stamp(r_req, RFUSE_WRITE_LAT_STAMP_DAEMON, now_ns);
+}
+
+static const char *rfuse_write_lat_branch_name(enum rfuse_write_lat_branch branch)
+{
+	switch (branch) {
+	case RFUSE_WRITE_LAT_SYNC:
+		return "sync";
+	case RFUSE_WRITE_LAT_ASYNC:
+		return "async";
+	default:
+		return "unknown";
+	}
+}
+
+static const char *rfuse_write_lat_stage_name(enum rfuse_write_lat_stage stage)
+{
+	switch (stage) {
+	case RFUSE_WRITE_LAT_PREPARE:
+		return "prepare";
+	case RFUSE_WRITE_LAT_QUEUE:
+		return "queue";
+	case RFUSE_WRITE_LAT_DAEMON:
+		return "daemon";
+	case RFUSE_WRITE_LAT_COMPLETION:
+		return "completion";
+	case RFUSE_WRITE_LAT_TOTAL:
+		return "total";
+	case RFUSE_WRITE_LAT_SUBMIT_TO_BG:
+		return "submit_to_bg";
+	case RFUSE_WRITE_LAT_BG_TO_PENDING:
+		return "bg_to_pending";
+	case RFUSE_WRITE_LAT_PENDING_TO_DAEMON:
+		return "pending_to_daemon";
+	default:
+		return "unknown";
+	}
+}
+
+static u64 rfuse_write_lat_min_value(const struct rfuse_write_lat_stat *stat)
+{
+	u64 min_ns = atomic64_read(&stat->min_ns);
+
+	if (atomic64_read(&stat->count) == 0 || min_ns == LLONG_MAX)
+		return 0;
+
+	return min_ns;
+}
+
+static u64 rfuse_write_lat_avg_value(const struct rfuse_write_lat_stat *stat)
+{
+	u64 count = atomic64_read(&stat->count);
+
+	if (count == 0)
+		return 0;
+
+	return div64_u64((u64)atomic64_read(&stat->total_ns), count);
+}
+
+void rfuse_write_lat_log_sample(enum rfuse_write_lat_branch branch)
+{
+	const struct rfuse_write_lat_stat *stat;
+	u64 count;
+
+	stat = &rfuse_write_lat_ctx.stats[branch][RFUSE_WRITE_LAT_TOTAL];
+	count = atomic64_read(&stat->count);
+	if (count == 0)
+		return;
+
+	pr_info_ratelimited("rfuse_write_lat %s total count=%llu avg_ns=%llu min_ns=%llu max_ns=%llu\n",
+			    rfuse_write_lat_branch_name(branch),
+			    count,
+			    rfuse_write_lat_avg_value(stat),
+			    rfuse_write_lat_min_value(stat),
+			    (u64)atomic64_read(&stat->max_ns));
+}
+
+static void rfuse_write_lat_dump_summary(void)
+{
+	enum rfuse_write_lat_branch branch;
+	enum rfuse_write_lat_stage stage;
+
+	for (branch = 0; branch < RFUSE_WRITE_LAT_BRANCH_NR; branch++) {
+		for (stage = 0; stage < RFUSE_WRITE_LAT_STAGE_NR; stage++) {
+			const struct rfuse_write_lat_stat *stat = &rfuse_write_lat_ctx.stats[branch][stage];
+			u64 count = atomic64_read(&stat->count);
+
+			pr_info("rfuse_write_lat summary branch=%s stage=%s count=%llu avg_ns=%llu min_ns=%llu max_ns=%llu\n",
+				rfuse_write_lat_branch_name(branch),
+				rfuse_write_lat_stage_name(stage),
+				count,
+				rfuse_write_lat_avg_value(stat),
+				rfuse_write_lat_min_value(stat),
+				(u64)atomic64_read(&stat->max_ns));
+		}
+	}
+}
 
 /*
 * Duplicated function from dev.c
@@ -143,6 +484,9 @@ void rfuse_iqueue_init(struct fuse_conn *fc, void *priv){
 	int i = 0;	
 	struct rfuse_iqueue **riq;
 	int node_id = 0;
+
+	/* 새 mount에서 이전 누적치가 섞이지 않게 초기화한다. */
+	rfuse_write_lat_ctx_init();
 
 	// init rfuse iqueue
 	riq = kzalloc(sizeof(struct rfuse_iqueue *) * RFUSE_NUM_IQUEUE, GFP_KERNEL);
@@ -582,6 +926,7 @@ struct rfuse_req *rfuse_request_alloc(struct fuse_mount *fm){
 		// Initialize request
 		memset(r_req, 0, sizeof(struct rfuse_req));
 		init_waitqueue_head(&r_req->waitq);
+			rfuse_write_lat_req_init(r_req);
 		refcount_set(&r_req->count, 1);
 		__set_bit(FR_PENDING,&r_req->flags);
 		r_req->fm = fm;
@@ -721,6 +1066,7 @@ static struct rfuse_req *try_rfuse_request_alloc(struct fuse_mount *fm, spinlock
 		// Initialize request
 		memset(r_req, 0, sizeof(struct rfuse_req));
 		init_waitqueue_head(&r_req->waitq);
+			rfuse_write_lat_req_init(r_req);
 		refcount_set(&r_req->count, 1);
 		__set_bit(FR_PENDING,&r_req->flags);
 		r_req->fm = fm;
@@ -958,7 +1304,15 @@ static void rfuse_queue_request(struct rfuse_req *r_req){
 	if(!test_bit(FR_BACKGROUND, &r_req->flags)) // only increase the reference count for synchronous requests
 		__rfuse_get_request(r_req);
 	rfuse_submit_pending_tail(riq);				// Commit entry
+	if (rfuse_write_lat_track_async_req(r_req))
+		rfuse_write_lat_mark_pending_published(r_req, ktime_get_ns());
 	spin_unlock(&riq->lock);					// unlock
+	/*
+	 * pending publish가 waiter 관측보다 먼저 보이도록 ordering을 보장한다.
+	 * waitqueue_active()를 lockless하게 쓰는 현재 경로에서는 이 배리어가 없으면
+	 * sleeper를 놓치고 wake_up()를 건너뛸 수 있다.
+	 */
+	smp_mb();
 	if(waitqueue_active(&riq->idle_user_waitq)){
 		wake_up(&riq->idle_user_waitq);		// Wake up idle user thread
 	}
@@ -967,12 +1321,31 @@ static void rfuse_queue_request(struct rfuse_req *r_req){
 
 // PENDING QUEUE INSERT
 ssize_t rfuse_simple_request(struct rfuse_req *r_req){
-	ssize_t ret=0;
+	ssize_t ret = 0;
+	u64 now_ns;
+
+	if (rfuse_write_lat_track_sync_req(r_req))
+		rfuse_write_lat_stamp(r_req, RFUSE_WRITE_LAT_QUEUE, ktime_get_ns());
 
 	rfuse_queue_request(r_req);
-  /* LDY: FUSE_WRITE인 경우에 sync to async */
 	rfuse_request_wait_answer(r_req);
 	smp_rmb();
+
+	if (rfuse_write_lat_track_sync_req(r_req)) {
+		now_ns = ktime_get_ns();
+		if (r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_COMPLETION]) {
+			rfuse_write_lat_commit(RFUSE_WRITE_LAT_SYNC,
+					      RFUSE_WRITE_LAT_COMPLETION,
+					      now_ns - r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_COMPLETION]);
+		}
+		if (r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_TOTAL]) {
+			rfuse_write_lat_commit(RFUSE_WRITE_LAT_SYNC,
+					      RFUSE_WRITE_LAT_TOTAL,
+					      now_ns - r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_TOTAL]);
+		}
+		rfuse_write_lat_log_sample(RFUSE_WRITE_LAT_SYNC);
+		r_req->write_lat.valid = 0;
+	}
 
 	ret = r_req->out.error;
 	if (!ret && r_req->out_argvar) {
@@ -1033,6 +1406,7 @@ static bool rfuse_request_queue_background(struct rfuse_req *r_req)
 			set_bdi_congested(fm->sb->s_bdi, BLK_RW_ASYNC);
 		}
 		list_add_tail(&bg_entry->list, &riq->bg_queue); // Add it to background queue
+		rfuse_write_lat_mark_bg_enqueued(r_req, ktime_get_ns());
 		rfuse_flush_bg_queue(fc, r_req->riq_id);
 		queued = true;
 	}
@@ -1055,7 +1429,14 @@ void rfuse_request_end(struct rfuse_req *r_req){
 	struct fuse_mount *fm = r_req->fm;
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
+	u64 now_ns;
 	GET_TIMESTAMPS(6)
+
+	if (rfuse_write_lat_track_async_req(r_req) &&
+	    r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_DAEMON]) {
+		now_ns = ktime_get_ns();
+		rfuse_write_lat_finish_daemon(r_req, now_ns);
+	}
 	if(test_bit(FR_BACKGROUND, &r_req->flags)){
 		spin_lock(&riq->bg_lock);
 		clear_bit(FR_BACKGROUND, &r_req->flags);
@@ -1460,12 +1841,15 @@ ssize_t rfuse_dev_do_read(struct fuse_dev *fud, struct file *file, struct iov_it
 	unsigned i;
 	unsigned nbytes;
 	ssize_t res = 0;
+	u64 now_ns;
 
 	struct rfuse_copy_state rcs;	
 	int riq_id = (int)((index & RFUSE_RIQ_ID_MASK) >> 16);
 	int req_index = (int)((index & RFUSE_REQ_IDX_MASK) >> 32);
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, riq_id);
 	struct rfuse_req *r_req = (struct rfuse_req*)&riq->kreq[req_index];
+	now_ns = ktime_get_ns();
+	rfuse_write_lat_mark_daemon_start(r_req, now_ns);
 
 
 	rp = r_req->rp;
@@ -1503,6 +1887,7 @@ static int rfuse_dev_prep_splice_read(struct fuse_dev *fud, struct rfuse_req *r_
 ssize_t rfuse_dev_splice_read(struct file *in, loff_t *ppos, struct pipe_inode_info *pipe, size_t len, unsigned int flags)
 {
 	int total, ret;
+	u64 now_ns;
 	int page_nr = 0;
 	struct pipe_buffer *bufs;
 	struct rfuse_copy_state rcs;	
@@ -1516,6 +1901,9 @@ ssize_t rfuse_dev_splice_read(struct file *in, loff_t *ppos, struct pipe_inode_i
 
 	if (!fud)
 		return -EPERM;
+
+	now_ns = ktime_get_ns();
+	rfuse_write_lat_mark_daemon_start(r_req, now_ns);
 
 	bufs = kvmalloc_array(pipe->max_usage, sizeof(struct pipe_buffer),
 			GFP_KERNEL);
@@ -1715,6 +2103,8 @@ out_free:
 void rfuse_abort_conn(struct fuse_conn *fc){
 	struct rfuse_iqueue **riq = fc->riq;
 	unsigned int i;
+
+	rfuse_write_lat_dump_summary();
 
 	for(i = 0; i < RFUSE_NUM_IQUEUE; i++) {
 		spin_lock(&riq[i]->lock);
