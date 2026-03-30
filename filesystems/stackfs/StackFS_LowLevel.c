@@ -176,11 +176,7 @@ struct lo_inode {
 	ino_t lo_ino;
 	/* Lookup count of this node */
 	uint64_t nlookup;
-	unsigned int state_flags;
 };
-
-#define LO_INODE_HASHED	0x01
-#define LO_INODE_UNLINKED	0x02
 
 #define HASH_TABLE_MIN_SIZE 8192
 
@@ -314,11 +310,6 @@ static char *lo_name(fuse_req_t req, fuse_ino_t ino)
 	return lo_inode(req, ino)->name;
 }
 
-static int lo_inode_is_unlinked(fuse_req_t req, fuse_ino_t ino)
-{
-	return (lo_inode(req, ino)->state_flags & LO_INODE_UNLINKED) != 0;
-}
-
 /* This is what given to the kernel FUSE F/S */
 static ino_t get_lower_fuse_inode_no(fuse_req_t req, fuse_ino_t ino) {
 	return lo_inode(req, ino)->lo_ino;
@@ -330,24 +321,12 @@ static double lo_attr_valid_time(fuse_req_t req)
 	return ((struct lo_data *) fuse_req_userdata(req))->attr_valid;
 }
 
-static int construct_full_path(fuse_req_t req, fuse_ino_t ino,
-		char *fpath, size_t fpath_size, const char *path)
+static void construct_full_path(fuse_req_t req, fuse_ino_t ino,
+		char *fpath, const char *path)
 {
-	const char *parent_path;
-	int ret;
-
-	parent_path = lo_name(req, ino);
-	if (fpath == NULL || fpath_size == 0 || parent_path == NULL ||
-	    path == NULL)
-		return -EINVAL;
-
-	ret = snprintf(fpath, fpath_size, "%s/%s", parent_path, path);
-	if (ret < 0)
-		return -errno;
-	if ((size_t)ret >= fpath_size)
-		return -ENAMETOOLONG;
-
-	return 0;
+	strcpy(fpath, lo_name(req, ino));
+	strncat(fpath, "/1", 1);
+	strncat(fpath, path, PATH_MAX);
 }
 
 /* Function which generates the hash depending on the ino number
@@ -423,7 +402,6 @@ static int insert_to_hash_table(struct lo_data *lo_data,
 	if (lo_data->hash_table.array[hash])
 		(lo_data->hash_table.array[hash])->prev = lo_inode;
 	lo_data->hash_table.array[hash] = lo_inode;
-	lo_inode->state_flags |= LO_INODE_HASHED;
 	lo_data->hash_table.use++;
 
 	if (lo_data->hash_table.use >= lo_data->hash_table.size / 2)
@@ -479,14 +457,15 @@ static void remerge_hash_table(struct lo_data *lo_data)
 	}
 }
 
-static void lo_inode_remove_from_hash_locked(struct lo_data *lo_data,
+static int delete_from_hash_table(struct lo_data *lo_data,
 		struct lo_inode *lo_inode)
 {
 	struct lo_inode *prev, *next;
-	size_t hash;
 
-	if ((lo_inode->state_flags & LO_INODE_HASHED) == 0)
-		return;
+	prev = next = NULL;
+	size_t hash = 0;
+
+	pthread_spin_lock(&lo_data->spinlock);
 
 	prev = lo_inode->prev;
 	next = lo_inode->next;
@@ -495,83 +474,28 @@ static void lo_inode_remove_from_hash_locked(struct lo_data *lo_data,
 		prev->next = next;
 		if (next)
 			next->prev = prev;
+		goto del_out;
 	} else {
 		hash = name_hash(lo_data, lo_inode->ino, lo_inode->name);
+
 		if (next)
 			next->prev = NULL;
+
 		lo_data->hash_table.array[hash] = next;
 	}
 
-	lo_inode->prev = NULL;
-	lo_inode->next = NULL;
-	lo_inode->state_flags &= ~LO_INODE_HASHED;
+del_out:
+	/* free the lo_inode  */
+	lo_inode->prev = lo_inode->next = NULL;
+	free(lo_inode->name);
+	free(lo_inode);
+
 	lo_data->hash_table.use--;
 	if (lo_data->hash_table.use < lo_data->hash_table.size / 4)
 		remerge_hash_table(lo_data);
-}
-
-static int lo_inode_try_free_locked(struct lo_data *lo_data,
-		struct lo_inode *lo_inode)
-{
-	if (lo_inode == &lo_data->root)
-		return 0;
-	if (lo_inode->nlookup != 0)
-		return 0;
-	if (lo_inode->state_flags & LO_INODE_HASHED)
-		return 0;
-
-	/* lo_inode의 최종 해제는 hash membership과 lookup ref가 모두 사라진 뒤에만 허용한다. */
-	free(lo_inode->name);
-	free(lo_inode);
-	return 1;
-}
-
-static void lo_inode_drop_lookup(fuse_req_t req, struct lo_inode *lo_inode,
-		uint64_t nlookup)
-{
-	struct lo_data *lo_data;
-
-	lo_data = get_lo_data(req);
-	pthread_spin_lock(&lo_data->spinlock);
-	assert(lo_inode->nlookup >= nlookup);
-	lo_inode->nlookup -= nlookup;
-
-	if (lo_inode->nlookup == 0)
-		lo_inode_remove_from_hash_locked(lo_data, lo_inode);
-
-	(void) lo_inode_try_free_locked(lo_data, lo_inode);
-	pthread_spin_unlock(&lo_data->spinlock);
-}
-
-static void lo_inode_unhash_by_name(fuse_req_t req, const char *fullpath)
-{
-	struct lo_data *lo_data;
-	size_t i;
-
-	if (fullpath == NULL)
-		return;
-
-	lo_data = get_lo_data(req);
-	pthread_spin_lock(&lo_data->spinlock);
-
-	for (i = 0; i < lo_data->hash_table.size; i++) {
-		struct lo_inode *inode;
-		struct lo_inode *next;
-
-		for (inode = lo_data->hash_table.array[i]; inode != NULL;
-		     inode = next) {
-			next = inode->next;
-			if (strcmp(inode->name, fullpath) != 0)
-				continue;
-
-			/* unlink 이후 같은 path가 이전 lo_inode를 다시 보지 않도록 즉시 hash에서 숨긴다. */
-			inode->state_flags |= LO_INODE_UNLINKED;
-			lo_inode_remove_from_hash_locked(lo_data, inode);
-			(void) lo_inode_try_free_locked(lo_data, inode);
-		}
-	}
 
 	pthread_spin_unlock(&lo_data->spinlock);
+	return 0;
 }
 
 /* Function which checks the inode in the hash table
@@ -663,21 +587,13 @@ static void stackfs_ll_lookup(fuse_req_t req, fuse_ino_t parent,
 	double attr_val;
 
 	fullPath = (char *)malloc(PATH_MAX);
-	if (fullPath == NULL)
-		return (void) fuse_reply_err(req, ENOMEM);
-
-	res = construct_full_path(req, parent, fullPath, PATH_MAX, name);
-	if (res != 0) {
-		free(fullPath);
-		return (void) fuse_reply_err(req, -res);
-	}
+	construct_full_path(req, parent, fullPath, name);
 	
 	attr_val = lo_attr_valid_time(req);
 	memset(&e, 0, sizeof(e));
 
 	e.attr_timeout = attr_val;
-	/* 삭제/재생성이 잦아 stale dentry를 오래 들고 있지 않도록 한다. */
-	e.entry_timeout = 0;
+	e.entry_timeout = attr_val; /* dentry timeout */
 	
 	res = lstat(fullPath, &e.attr);
 
@@ -709,9 +625,6 @@ static void stackfs_ll_getattr(fuse_req_t req, fuse_ino_t ino,
 	struct stat buf;
 	(void) fi;
 	double attr_val;
-
-	if (lo_inode_is_unlinked(req, ino))
-		return (void) fuse_reply_err(req, ENOENT);
 
 	attr_val = lo_attr_valid_time(req);
 	res = lstat(lo_name(req, ino), &buf);
@@ -809,14 +722,7 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 	//				name, lo_inode(req, parent)->ino);
 
 	fullPath = (char *)malloc(PATH_MAX);
-	if (fullPath == NULL)
-		return (void) fuse_reply_err(req, ENOMEM);
-
-	res = construct_full_path(req, parent, fullPath, PATH_MAX, name);
-	if (res != 0) {
-		free(fullPath);
-		return (void) fuse_reply_err(req, -res);
-	}
+	construct_full_path(req, parent, fullPath, name);
 	attr_val = lo_attr_valid_time(req);
 	//struct timespec start,end;
 	//clock_gettime(CLOCK_MONOTONIC, &start);
@@ -833,32 +739,57 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 	memset(&e, 0, sizeof(e));
 
 	e.attr_timeout = attr_val;
-	/* create 직후 같은 이름이 삭제/재생성될 수 있어 dentry 캐시는 바로 만료시킨다. */
-	e.entry_timeout = 0;
+	e.entry_timeout = attr_val;
 
-	res = fstat(fd, &e.attr);
+	res = stat(fullPath, &e.attr);
 	// generate_end_time(req);
 	// populate_time(req);
 
 	if (res == 0) {
+		/* insert lo_inode into the hash table */
+		struct lo_data *lo_data;
 		struct lo_inode *lo_inode;
 
-		lo_inode = find_lo_inode(req, &e.attr, fullPath);
+		lo_inode = calloc(1, sizeof(struct lo_inode));
 		if (!lo_inode) {
 			close(fd);
-			free(fullPath);
+			if (fullPath)
+				free(fullPath);
 
-			return (void) fuse_reply_err(req, ENOMEM);
+			return (void) fuse_reply_err(req, errno);
 		}
 
+		lo_inode->ino = e.attr.st_ino;
+		lo_inode->dev = e.attr.st_dev;
+		lo_inode->name = strdup(fullPath);
+		/* store this for mapping (debugging) */
+		lo_inode->lo_ino = (uintptr_t) lo_inode;
+		lo_inode->next = lo_inode->prev = NULL;
 		free(fullPath);
-		e.ino = lo_inode->lo_ino;
-		//StackFS_trace("Create called, e.ino : %llu", e.ino);
-		fi->fh = fd;
-		fuse_reply_create(req, &e, fi);
+
+		lo_data = get_lo_data(req);
+		pthread_spin_lock(&lo_data->spinlock);
+
+		res = insert_to_hash_table(lo_data, lo_inode);
+
+		pthread_spin_unlock(&lo_data->spinlock);
+
+		if (res == -1) {
+			close(fd);
+			free(lo_inode->name);
+			free(lo_inode);
+			fuse_reply_err(req, EBUSY);
+		} else {
+			lo_inode->nlookup++;
+			e.ino = lo_inode->lo_ino;
+			//StackFS_trace("Create called, e.ino : %llu", e.ino);
+			fi->fh = fd;
+			fuse_reply_create(req, &e, fi);
+		}
 	} else {
 		close(fd);
-		free(fullPath);
+		if (fullPath)
+			free(fullPath);
 		fuse_reply_err(req, errno);
 	}
 }
@@ -873,14 +804,7 @@ static void stackfs_ll_mkdir(fuse_req_t req, fuse_ino_t parent,
 	double attr_val;
 
 	fullPath = (char *)malloc(PATH_MAX);
-	if (fullPath == NULL)
-		return (void) fuse_reply_err(req, ENOMEM);
-
-	res = construct_full_path(req, parent, fullPath, PATH_MAX, name);
-	if (res != 0) {
-		free(fullPath);
-		return (void) fuse_reply_err(req, -res);
-	}
+	construct_full_path(req, parent, fullPath, name);
 	attr_val = lo_attr_valid_time(req);
 
 	// generate_start_time(req);
@@ -959,9 +883,6 @@ static void stackfs_ll_open(fuse_req_t req, fuse_ino_t ino,
 {
 	int fd;
 	int backing_flags;
-
-	if (lo_inode_is_unlinked(req, ino))
-		return (void) fuse_reply_err(req, ENOENT);
 
 	backing_flags = stackfs_backing_open_flags(req, fi->flags);
 	fd = open(lo_name(req, ino), backing_flags);
@@ -1193,24 +1114,15 @@ static void stackfs_ll_unlink(fuse_req_t req, fuse_ino_t parent,
 	//StackFS_trace("Unlink called on name : %s, parent inode : %llu",
 	//				name, lo_inode(req, parent)->ino);
 	fullPath = (char *)malloc(PATH_MAX);
-	if (fullPath == NULL)
-		return (void) fuse_reply_err(req, ENOMEM);
-
-	res = construct_full_path(req, parent, fullPath, PATH_MAX, name);
-	if (res != 0) {
-		free(fullPath);
-		return (void) fuse_reply_err(req, -res);
-	}
+	construct_full_path(req, parent, fullPath, name);
 	// generate_start_time(req);
 	res = unlink(fullPath);
 	// generate_end_time(req);
 	// populate_time(req);
-	if (res == -1) {
+	if (res == -1)
 		fuse_reply_err(req, errno);
-	} else {
-		lo_inode_unhash_by_name(req, fullPath);
+	else
 		fuse_reply_err(req, res);
-	}
 
 	if (fullPath)
 		free(fullPath);
@@ -1227,14 +1139,7 @@ static void stackfs_ll_rmdir(fuse_req_t req, fuse_ino_t parent,
 	//StackFS_trace("rmdir called with name : %s, parent inode : %llu",
 	//				name, lo_inode(req, parent)->ino);
 	fullPath = (char *)malloc(PATH_MAX);
-	if (fullPath == NULL)
-		return (void) fuse_reply_err(req, ENOMEM);
-
-	res = construct_full_path(req, parent, fullPath, PATH_MAX, name);
-	if (res != 0) {
-		free(fullPath);
-		return (void) fuse_reply_err(req, -res);
-	}
+	construct_full_path(req, parent, fullPath, name);
 	// generate_start_time(req);
 	res = rmdir(fullPath);
 	// generate_end_time(req);
@@ -1253,7 +1158,15 @@ static void stackfs_ll_rmdir(fuse_req_t req, fuse_ino_t parent,
 static void forget_inode(fuse_req_t req, struct lo_inode *inode,
 		uint64_t nlookup)
 {
-	lo_inode_drop_lookup(req, inode, nlookup);
+	int res;
+
+	assert(inode->nlookup >= nlookup);
+	inode->nlookup -= nlookup;
+
+	if (!inode->nlookup)
+		res = delete_from_hash_table(get_lo_data(req), inode);
+
+	(void) res;
 }
 
 static void stackfs_ll_forget(fuse_req_t req, fuse_ino_t ino, uint64_t nlookup)
@@ -1320,28 +1233,9 @@ static void stackfs_ll_rename(fuse_req_t req, fuse_ino_t parent, const char *nam
 
 	oldPath = (char*)malloc(PATH_MAX);
 	newPath = (char*)malloc(PATH_MAX);
-	if (oldPath == NULL || newPath == NULL) {
-		free(oldPath);
-		free(newPath);
-		fuse_reply_err(req, ENOMEM);
-		return;
-	}
 	
-	res = construct_full_path(req, parent, oldPath, PATH_MAX, name);
-	if (res != 0) {
-		free(oldPath);
-		free(newPath);
-		fuse_reply_err(req, -res);
-		return;
-	}
-
-	res = construct_full_path(req, newparent, newPath, PATH_MAX, newname);
-	if (res != 0) {
-		free(oldPath);
-		free(newPath);
-		fuse_reply_err(req, -res);
-		return;
-	}
+	construct_full_path(req, parent, oldPath, name);
+	construct_full_path(req, newparent, newPath, newname);
 
 	res = rename(oldPath, newPath);
 	
@@ -1389,11 +1283,7 @@ static void stackfs_ll_symlink(fuse_req_t req, const char *link, fuse_ino_t pare
 	if (fullPath == NULL)
 		return (void) fuse_reply_err(req, ENOMEM);
 
-	res = construct_full_path(req, parent, fullPath, PATH_MAX, name);
-	if (res != 0) {
-		free(fullPath);
-		return (void) fuse_reply_err(req, -res);
-	}
+	construct_full_path(req, parent, fullPath, name);
 	attr_val = lo_attr_valid_time(req);
 	
 	res = symlink(link, fullPath);
@@ -1484,14 +1374,7 @@ static void stackfs_ll_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t newparent
 	double attr_val;
 
 	newfullPath = (char*)malloc(PATH_MAX);
-	if (newfullPath == NULL)
-		return (void) fuse_reply_err(req, ENOMEM);
-
-	res = construct_full_path(req, newparent, newfullPath, PATH_MAX, newname);
-	if (res != 0) {
-		free(newfullPath);
-		return (void) fuse_reply_err(req, -res);
-	}
+	construct_full_path(req, newparent, newfullPath, newname);
 	attr_val = lo_attr_valid_time(req);
 	
 	res = link(lo_name(req, ino), newfullPath);
