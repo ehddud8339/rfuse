@@ -37,7 +37,7 @@
 #include "rfuse.h"
 
 #ifndef LDY_LOG
-#define LDY_LOG 1
+#define LDY_LOG 0
 #endif
 
 /** Default max number of pages that can be used in a single read request */
