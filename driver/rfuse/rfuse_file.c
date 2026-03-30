@@ -56,19 +56,22 @@ static bool rfuse_async_allowed(struct kiocb *iocb, struct inode *inode,
 				loff_t pos, struct iov_iter *ii)
 {
 	unsigned int flags = rfuse_write_flags(iocb);
-	bool on = true;
+	size_t count = iov_iter_count(ii);
+  bool on = true;
 
 	if (!on)
 		return false;
 
-	// if (pos + count > i_size_read(inode))
+	// if (pos + count > i_size_read(inode)) {
   if (iocb->ki_flags & IOCB_APPEND) {
-    printk("RFUSE: half_async refused: append file\n");
+    printk("RFUSE: half_async refused: append write\n");
 		return false;
   }
 
-	if (flags & (O_SYNC | O_DSYNC))
+	if (flags & (O_SYNC | O_DSYNC)) {
+    printk("RFUSE: half_async refused: O_SYNC/O_DSYNC\n");
 		return false;
+  }
   // printk("RFUSE: half_async allowed\n");
 	return true;
 }
@@ -1280,7 +1283,7 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 	io->reqs++;
 	spin_unlock(&io->lock);
 
-	ria->r_req->end = rfuse_bwrite_complete_req;
+  ria->r_req->end = rfuse_bwrite_complete_req;
 	err = rfuse_simple_background(fm, ria->r_req);
 	if (err) {
 		atomic64_inc(&rfuse_bwrite_submit_fail_count);
