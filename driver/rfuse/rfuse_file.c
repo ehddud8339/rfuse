@@ -512,6 +512,30 @@ struct rfuse_writepage_args {
 	loff_t pos;
 };
 
+static bool rfuse_writeback_overlaps(struct rfuse_writepage_args *r_wpa,
+				    pgoff_t idx_from, pgoff_t idx_to)
+{
+	pgoff_t curr_from = r_wpa->ria.write.in.offset >> PAGE_SHIFT;
+	pgoff_t curr_to = curr_from + r_wpa->ria.rp.num_pages - 1;
+
+	return idx_from <= curr_to && idx_to >= curr_from;
+}
+
+static bool rfuse_writeback_chain_overlaps(struct rfuse_writepage_args *head,
+					  pgoff_t idx_from, pgoff_t idx_to)
+{
+	struct rfuse_writepage_args *r_wpa;
+
+	for (r_wpa = head; r_wpa; r_wpa = r_wpa->next) {
+		WARN_ON(r_wpa->inode != head->inode);
+		WARN_ON(!r_wpa->ria.rp.num_pages);
+		if (rfuse_writeback_overlaps(r_wpa, idx_from, idx_to))
+			return true;
+	}
+
+	return false;
+}
+
 static struct rfuse_writepage_args *rfuse_find_writeback(struct fuse_inode *fi,
 					    pgoff_t idx_from, pgoff_t idx_to)
 {
@@ -530,8 +554,10 @@ static struct rfuse_writepage_args *rfuse_find_writeback(struct fuse_inode *fi,
 			n = n->rb_right;
 		else if (idx_to < curr_index)
 			n = n->rb_left;
-		else
+		else if (rfuse_writeback_chain_overlaps(r_wpa, idx_from, idx_to))
 			return r_wpa;
+		else
+			n = n->rb_right;
 	}
 	return NULL;
 }
@@ -1514,8 +1540,10 @@ static struct rfuse_writepage_args *rfuse_insert_writeback(struct rb_root *root,
 			p = &(*p)->rb_right;
 		else if (idx_to < curr_index)
 			p = &(*p)->rb_left;
-		else
+		else if (rfuse_writeback_chain_overlaps(curr, idx_from, idx_to))
 			return curr;
+		else
+			p = &(*p)->rb_right;
 	}
 
 	rb_link_node(&wpa->writepages_entry, parent, p);
