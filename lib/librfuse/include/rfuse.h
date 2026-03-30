@@ -50,6 +50,10 @@ enum fuse_req_flag {
 #define LOOKUP_LOG 0
 #endif
 
+#ifndef LDY_LOG
+#define LDY_LOG 1
+#endif
+
 /**
  * The following MACROs are used in "liburing/src/include/liburing/barrier.h"
  * The io_uring 'modifies' the ring buffers 'head' in the user space and 

@@ -17,10 +17,12 @@ struct rfuse_release_in {
 	struct inode *inode;
 };
 
+#if LDY_LOG
 static atomic64_t rfuse_bwrite_submit_count = ATOMIC64_INIT(0);
 static atomic64_t rfuse_bwrite_submit_fail_count = ATOMIC64_INIT(0);
 static atomic64_t rfuse_bwrite_page_locked_count = ATOMIC64_INIT(0);
 static atomic64_t rfuse_bwrite_complete_count = ATOMIC64_INIT(0);
+#endif
 
 
 /************ 0. Copy of original fuse functions ************/
@@ -1068,7 +1070,9 @@ static ssize_t rfuse_fill_write_pages(struct rfuse_io_args *ria, struct address_
 			unlock_page(page);
 		} else {
 			ria->write.page_locked = true;
+#if LDY_LOG
 			atomic64_inc(&rfuse_bwrite_page_locked_count);
+#endif
 			break;
 		}
 		if (!fc->big_writes)
@@ -1122,7 +1126,9 @@ static ssize_t rfuse_send_write_pages(struct rfuse_io_args *ria,
 	unsigned int offset, i;
 	bool short_write;
 	int err;
+#if LDY_LOG
 	u64 now_ns;
+#endif
 
 	ria->r_req->in_pages = true;
 
@@ -1136,6 +1142,7 @@ static ssize_t rfuse_send_write_pages(struct rfuse_io_args *ria,
 	if (fm->fc->handle_killpriv_v2 && !capable(CAP_FSETID))
 		in->write_flags |= FUSE_WRITE_KILL_SUIDGID;
 
+#if LDY_LOG
 	now_ns = ktime_get_ns();
 	if (ria->r_req->write_lat.valid &&
 	    ria->r_req->write_lat.branch == RFUSE_WRITE_LAT_SYNC &&
@@ -1144,6 +1151,7 @@ static ssize_t rfuse_send_write_pages(struct rfuse_io_args *ria,
 				      RFUSE_WRITE_LAT_PREPARE,
 				      now_ns - ria->r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_PREPARE]);
 	}
+#endif
 
 	err = rfuse_simple_request(ria->r_req);
 	out = (struct fuse_write_out *)&ria->r_req->args;
@@ -1216,6 +1224,7 @@ static void rfuse_bwrite_complete_req(struct fuse_mount *fm, struct rfuse_req *r
 		put_page(page);
 	}
 
+#if LDY_LOG
 	if (r_req->write_lat.valid &&
 	    r_req->write_lat.branch == RFUSE_WRITE_LAT_ASYNC) {
 		u64 now_ns = ktime_get_ns();
@@ -1235,6 +1244,7 @@ static void rfuse_bwrite_complete_req(struct fuse_mount *fm, struct rfuse_req *r
 	}
 
 	atomic64_inc(&rfuse_bwrite_complete_count);
+#endif
 	rfuse_aio_complete(io, err, pos);
 	rfuse_io_free(ria);
 }
@@ -1251,9 +1261,11 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 	struct fuse_write_in *in;
 	unsigned int i;
 	ssize_t err;
+#if LDY_LOG
 	u64 now_ns;
 
 	atomic64_inc(&rfuse_bwrite_submit_count);
+#endif
 	ria->r_req->in_pages = true;
 
 	for (i = 0; i < rp->num_pages; i++)
@@ -1266,6 +1278,7 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 	if (fm->fc->handle_killpriv_v2 && !capable(CAP_FSETID))
 		in->write_flags |= FUSE_WRITE_KILL_SUIDGID;
 
+#if LDY_LOG
 	now_ns = ktime_get_ns();
 	if (ria->r_req->write_lat.valid &&
 	    ria->r_req->write_lat.branch == RFUSE_WRITE_LAT_ASYNC &&
@@ -1276,6 +1289,7 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 	}
 	rfuse_write_lat_stamp(ria->r_req, RFUSE_WRITE_LAT_STAMP_QUEUE, now_ns);
 	rfuse_write_lat_stamp(ria->r_req, RFUSE_WRITE_LAT_STAMP_SUBMIT_TO_BG, now_ns);
+#endif
 
   spin_lock(&io->lock);
 	kref_get(&io->refcnt);
@@ -1286,7 +1300,9 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
   ria->r_req->end = rfuse_bwrite_complete_req;
 	err = rfuse_simple_background(fm, ria->r_req);
 	if (err) {
+#if LDY_LOG
 		atomic64_inc(&rfuse_bwrite_submit_fail_count);
+#endif
 		spin_lock(&io->lock);
 		io->size -= count;
 		io->reqs--;
@@ -1317,7 +1333,9 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 		struct rfuse_io_args ria = {};
 		struct rfuse_pages *rp = &ria.rp;
 		struct rfuse_req *r_req;
+#if LDY_LOG
 		u64 now_ns;
+#endif
 		unsigned int nr_pages = rfuse_wr_pages(pos, iov_iter_count(ii), fc->max_pages);
 
 		rp->pages = fuse_pages_alloc(nr_pages, GFP_KERNEL, &rp->descs);
@@ -1328,10 +1346,12 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 
 		r_req = rfuse_get_req(fm, false, false);
 			ria.r_req = r_req;
+#if LDY_LOG
 			rfuse_write_lat_set_branch(r_req, RFUSE_WRITE_LAT_SYNC);
 			now_ns = ktime_get_ns();
 			rfuse_write_lat_stamp(r_req, RFUSE_WRITE_LAT_TOTAL, now_ns);
 			rfuse_write_lat_stamp(r_req, RFUSE_WRITE_LAT_PREPARE, now_ns);
+#endif
 
 		count = rfuse_fill_write_pages(&ria, mapping, ii, pos, nr_pages);
 		if (count <= 0) {
@@ -1375,7 +1395,9 @@ async:
 		while (count) {
 			struct rfuse_io_args *ria;
 			struct rfuse_req *r_req;
+#if LDY_LOG
 			u64 now_ns;
+#endif
 			unsigned int nr_pages;
 			ssize_t nbytes;
 
@@ -1388,10 +1410,12 @@ async:
 
 			r_req = try_rfuse_get_req(fm, true, false, NULL);
 			ria->r_req = r_req;
+#if LDY_LOG
 			rfuse_write_lat_set_branch(r_req, RFUSE_WRITE_LAT_ASYNC);
 			now_ns = ktime_get_ns();
 			rfuse_write_lat_stamp(r_req, RFUSE_WRITE_LAT_TOTAL, now_ns);
 			rfuse_write_lat_stamp(r_req, RFUSE_WRITE_LAT_PREPARE, now_ns);
+#endif
 
 			nbytes = rfuse_fill_write_pages(ria, mapping, ii, pos, nr_pages);
 			if (nbytes <= 0) {

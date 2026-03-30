@@ -51,6 +51,7 @@ static u64 timestamps[9] = {0, };
 	#define GET_TIMESTAMPS(i) ;
 #endif
 
+#if LDY_LOG
 static struct rfuse_write_lat_ctx rfuse_write_lat_ctx;
 static bool rfuse_write_lat_track_req(struct rfuse_req *r_req);
 static void rfuse_write_lat_finish_stage(struct rfuse_req *r_req,
@@ -391,6 +392,43 @@ static void rfuse_write_lat_dump_summary(void)
 		}
 	}
 }
+
+#else
+static void rfuse_write_lat_ctx_init(void)
+{
+}
+
+static bool rfuse_write_lat_track_sync_req(struct rfuse_req *r_req)
+{
+	return false;
+}
+
+static bool rfuse_write_lat_track_async_req(struct rfuse_req *r_req)
+{
+	return false;
+}
+
+static bool rfuse_write_lat_track_req(struct rfuse_req *r_req)
+{
+	return false;
+}
+
+static void rfuse_write_lat_mark_bg_enqueued(struct rfuse_req *r_req, u64 now_ns)
+{
+}
+
+static void rfuse_write_lat_mark_pending_published(struct rfuse_req *r_req, u64 now_ns)
+{
+}
+
+static void rfuse_write_lat_mark_daemon_start(struct rfuse_req *r_req, u64 now_ns)
+{
+}
+
+static void rfuse_write_lat_dump_summary(void)
+{
+}
+#endif
 
 /*
 * Duplicated function from dev.c

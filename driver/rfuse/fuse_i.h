@@ -36,6 +36,10 @@
 
 #include "rfuse.h"
 
+#ifndef LDY_LOG
+#define LDY_LOG 1
+#endif
+
 /** Default max number of pages that can be used in a single read request */
 #define FUSE_DEFAULT_MAX_PAGES_PER_REQ 32
 
@@ -113,6 +117,7 @@ struct rfuse_write_lat_ctx {
 	struct rfuse_write_lat_stat stats[RFUSE_WRITE_LAT_BRANCH_NR][RFUSE_WRITE_LAT_STAGE_NR];
 };
 
+#if LDY_LOG
 void rfuse_write_lat_req_init(struct rfuse_req *r_req);
 void rfuse_write_lat_set_branch(struct rfuse_req *r_req,
 			      enum rfuse_write_lat_branch branch);
@@ -125,6 +130,20 @@ void rfuse_write_lat_set_daemon_stamps(struct rfuse_req *r_req,
 void rfuse_write_lat_finish_daemon(struct rfuse_req *r_req, u64 completion_start_ns);
 void rfuse_write_lat_log_sample(enum rfuse_write_lat_branch branch);
 struct rfuse_write_lat_ctx *rfuse_write_lat_get_ctx(void);
+#else
+static inline void rfuse_write_lat_req_init(struct rfuse_req *r_req) {}
+static inline void rfuse_write_lat_set_branch(struct rfuse_req *r_req,
+			      enum rfuse_write_lat_branch branch) {}
+static inline void rfuse_write_lat_stamp(struct rfuse_req *r_req,
+			 enum rfuse_write_lat_stamp stamp, u64 now_ns) {}
+static inline void rfuse_write_lat_commit(enum rfuse_write_lat_branch branch,
+			  enum rfuse_write_lat_stage stage, u64 delta_ns) {}
+static inline void rfuse_write_lat_set_daemon_stamps(struct rfuse_req *r_req,
+				u64 daemon_dequeued_ns, u64 daemon_reply_ns) {}
+static inline void rfuse_write_lat_finish_daemon(struct rfuse_req *r_req, u64 completion_start_ns) {}
+static inline void rfuse_write_lat_log_sample(enum rfuse_write_lat_branch branch) {}
+static inline struct rfuse_write_lat_ctx *rfuse_write_lat_get_ctx(void) { return NULL; }
+#endif
 
 
 /* One forget request */

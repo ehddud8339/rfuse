@@ -23,6 +23,7 @@
 /* Environment var controlling the thread stack size */
 #define ENVNAME_THREAD_STACK "FUSE_THREAD_STACK"
 
+#if LDY_LOG
 static void rfuse_sleep_stat_init(struct rfuse_daemon_sleep_stat *stat)
 {
 	stat->count = 0;
@@ -127,6 +128,21 @@ static void rfuse_commit_dequeue_burst(struct rfuse_daemon_sleep_ctx *ctx)
 	rfuse_sleep_stat_record(&ctx->dequeue_burst_len, ctx->current_burst_len);
 	ctx->current_burst_len = 0;
 }
+
+#else
+static void rfuse_sleep_ctx_init(struct rfuse_daemon_sleep_ctx *ctx)
+{
+	memset(ctx, 0, sizeof(*ctx));
+}
+
+static void rfuse_sleep_ctx_dump(const struct rfuse_mt *mt)
+{
+}
+
+static void rfuse_commit_dequeue_burst(struct rfuse_daemon_sleep_ctx *ctx)
+{
+}
+#endif
 
 static struct fuse_chan *rfuse_chan_new(int fd)
 {
@@ -260,14 +276,19 @@ retry_read_queue:
 				goto retry_read_queue;
 			}
 
+#if LDY_LOG
 			rfuse_commit_dequeue_burst(&mt->sleep_ctx);
 			mt->sleep_ctx.sleep_calls++;
 			mt->sleep_ctx.forget_miss_before_sleep++;
 			mt->sleep_ctx.sleep_blocked_calls++;
+#endif
 
 			pthread_mutex_unlock(&mt->lock);
+#if LDY_LOG
 			sleep_start_ns = rfuse_now_ns();
+#endif
 			res = ioctl(mt->se->fd, RFUSE_DAEMON_SLEEP, &args);
+#if LDY_LOG
 			sleep_end_ns = rfuse_now_ns();
 			mt->sleep_ctx.last_wake_ns = sleep_end_ns;
 			rfuse_sleep_stat_record(&mt->sleep_ctx.sleep_block_ns,
@@ -276,6 +297,7 @@ retry_read_queue:
 			rfuse_sleep_stat_record(&mt->sleep_ctx.wake_pending_depth, pending_depth);
 			if (pending_depth > 1)
 				mt->sleep_ctx.wake_with_backlog_calls++;
+#endif
 			if (res == -ENOTCONN) {
 				printf("rfuse: User-level daemon lost connection, exit\n");
 				return NULL;

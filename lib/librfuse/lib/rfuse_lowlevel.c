@@ -1759,6 +1759,7 @@ bool rfuse_read_queue(struct rfuse_worker *w, struct rfuse_mt *mt, struct fuse_c
 			goto out;
 		}
 		u_req = rfuse_ll_alloc_req(se, riq_id);
+#if LDY_LOG
 		if (mt->sleep_ctx.last_wake_ns) {
 			struct timespec ts;
 			uint64_t now_ns;
@@ -1775,14 +1776,17 @@ bool rfuse_read_queue(struct rfuse_worker *w, struct rfuse_mt *mt, struct fuse_c
 				mt->sleep_ctx.wake_to_read_ns.max_ns = delta_ns;
 			mt->sleep_ctx.last_wake_ns = 0;
 		}
+#endif
 		u_req->index = target_entry->request;
 		rfuse_extract_pending_head(riq);
 		r_req = &riq->ureq[u_req->index];
 		assert(r_req->riq_id == u_req->riq_id);
 		u_req->w = w;
 		rfuse_list_add_req(u_req, &se->rfuse_list[riq_id]);
+#if LDY_LOG
 		mt->sleep_ctx.current_burst_len++;
 		mt->sleep_ctx.burst_reqs_total++;
+#endif
 		pthread_mutex_unlock(&se->riq_lock[riq_id]);
 		processed = true;
 	}
