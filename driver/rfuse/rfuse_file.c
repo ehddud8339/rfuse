@@ -1382,10 +1382,25 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 	struct fuse_conn *fc = get_fuse_conn(inode);
 	struct fuse_mount *fm = get_fuse_mount(inode);
 	struct fuse_inode *fi = get_fuse_inode(inode);
+	size_t write_count = iov_iter_count(ii);
+	loff_t inode_size = inode->i_size;
+	loff_t end_pos = pos + write_count;
 	int err = 0;
 	ssize_t res = 0;
 	bool async = rfuse_async_allowed(iocb, inode, pos, ii);
-	bool extending = inode->i_size < pos + iov_iter_count(ii);
+	bool extending = inode_size < end_pos;
+	bool overwrite = end_pos <= inode_size;
+	bool partial_extend = pos < inode_size && end_pos > inode_size;
+	bool append_like = pos >= inode_size;
+
+	/*
+	 * INSERT/UPDATE 차이를 보려면 메타데이터 여부를 추측하기보다,
+	 * 어느 파일의 어떤 위치를 어떤 형태로 쓰는지 먼저 본다.
+	 */
+	printk("rfuse_write file=%s async=%d pos=%lld count=%zu isize=%lld extend=%d overwrite=%d partial_extend=%d append_like=%d flags=0x%x\n",
+	       file_dentry(iocb->ki_filp)->d_name.name, async, pos, write_count,
+	       inode_size, extending, overwrite, partial_extend, append_like,
+	       rfuse_write_flags(iocb));
 
 	if (async)
 		goto async;
