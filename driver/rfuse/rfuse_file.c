@@ -86,7 +86,7 @@ static bool rfuse_async_allowed(struct kiocb *iocb, struct inode *inode,
 		return false;
 
 	// if (pos + count > i_size_read(inode)) {
-  if (iocb->ki_flags & IOCB_APPEND) {
+  if (flags & IOCB_APPEND) {
     printk("RFUSE: half_async refused: append write\n");
 		return false;
   }

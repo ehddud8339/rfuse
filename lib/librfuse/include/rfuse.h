@@ -51,7 +51,7 @@ enum fuse_req_flag {
 #endif
 
 #ifndef LDY_LOG
-#define LDY_LOG 1
+#define LDY_LOG 0
 #endif
 
 /**

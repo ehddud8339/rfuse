@@ -1381,7 +1381,7 @@ ssize_t rfuse_simple_request(struct rfuse_req *r_req){
 					      RFUSE_WRITE_LAT_TOTAL,
 					      now_ns - r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_TOTAL]);
 		}
-		rfuse_write_lat_log_sample(RFUSE_WRITE_LAT_SYNC);
+		// rfuse_write_lat_log_sample(RFUSE_WRITE_LAT_SYNC);
 		r_req->write_lat.valid = 0;
 	}
 
