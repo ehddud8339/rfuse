@@ -1385,12 +1385,8 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 	int err = 0;
 	ssize_t res = 0;
 	bool async = rfuse_async_allowed(iocb, inode, pos, ii);
-  /*
 	bool extending = inode->i_size < pos + iov_iter_count(ii);
 
-	if (extending)
-		set_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
-  */
 	if (async)
 		goto async;
 
@@ -1476,7 +1472,11 @@ async:
 				break;
 			}
 
-			r_req = try_rfuse_get_req(fm, true, false, NULL);
+      if (extending) {
+        r_req = rfuse_get_req(fm, true, false);
+      } else {
+  			r_req = try_rfuse_get_req(fm, true, false, NULL);
+      }
 			ria->r_req = r_req;
 #if LDY_LOG
 			rfuse_write_lat_set_branch(r_req, RFUSE_WRITE_LAT_ASYNC);
