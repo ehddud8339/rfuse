@@ -91,7 +91,7 @@ static bool rfuse_async_allowed(struct kiocb *iocb, struct inode *inode,
 {
 	unsigned int flags = rfuse_write_flags(iocb);
 	size_t count = iov_iter_count(ii);
-  bool on = true;
+  bool on = false;
 
 	if (!on)
 		return false;
@@ -187,8 +187,10 @@ static void rfuse_read_wait_async_writes(struct inode *inode)
 	 * write가 빠지길 기다린다. cache hit read는 여기까지 오지 않으므로
 	 * stale backing data를 읽을 수 있는 지점만 막는다.
 	 */
-	if (likely(READ_ONCE(fi->writectr) == 0))
+	if (likely(READ_ONCE(fi->writectr) == 0)) {
+    // printk("writectr is 0\n");
 		return;
+  }
 
 	wait_event(fi->page_waitq, READ_ONCE(fi->writectr) == 0);
 }
@@ -1383,11 +1385,12 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 	int err = 0;
 	ssize_t res = 0;
 	bool async = rfuse_async_allowed(iocb, inode, pos, ii);
+  /*
 	bool extending = inode->i_size < pos + iov_iter_count(ii);
 
 	if (extending)
 		set_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
-
+  */
 	if (async)
 		goto async;
 
@@ -2413,7 +2416,7 @@ static void rfuse_readpages_end(struct fuse_mount *fm, struct rfuse_req *r_req, 
  * - This is used in the generic_file_read_iter
  **/
 
-static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, int is_async){
+void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, int is_async){
 	struct fuse_file *ff = file->private_data;
 	struct fuse_mount *fm = ff->fm;
 	struct rfuse_pages *rp = &ria->rp;
