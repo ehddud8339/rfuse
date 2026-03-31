@@ -189,58 +189,37 @@ static struct fuse_file *rfuse_file_get(struct fuse_file *ff)
 	return ff;
 }
 
-static void rfuse_account_fh_async_write_start(struct fuse_file *ff)
+static void rfuse_record_fh_async_write_error(struct fuse_file *ff, int err)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&ff->async_lock, flags);
-	ff->async_writes++;
-	spin_unlock_irqrestore(&ff->async_lock, flags);
-}
-
-static void rfuse_account_fh_async_write_end(struct fuse_file *ff, int err)
-{
-	unsigned long flags;
-	bool wake = false;
-
-	spin_lock_irqsave(&ff->async_lock, flags);
-	/*
-	 * close/flush는 fh별 first error만 회수하면 된다.
-	 * 이후 실패가 덮어쓰면 최초 관측 지점을 잃어버리므로 첫 에러만 남긴다.
-	 */
-	if (err && !ff->async_error_valid) {
-		ff->async_write_error = err;
-		ff->async_error_valid = true;
-	}
-
-	WARN_ON(!ff->async_writes);
-	if (ff->async_writes > 0) {
-		ff->async_writes--;
-		wake = ff->async_writes == 0;
-	}
-	spin_unlock_irqrestore(&ff->async_lock, flags);
-
-	if (wake)
-		wake_up_all(&ff->async_waitq);
-}
-
-static void rfuse_wait_fh_async_writes(struct fuse_file *ff)
-{
-	if (likely(READ_ONCE(ff->async_writes) == 0))
+	if (err >= 0)
 		return;
 
-	wait_event(ff->async_waitq, READ_ONCE(ff->async_writes) == 0);
+	/*
+	 * close()는 이미 완료된 async write failure만 best-effort로 회수한다.
+	 * 최초 error만 보존해 두고, 이후 completion된 failure는 덮어쓰지 않는다.
+	 */
+	spin_lock_irqsave(&ff->async_err_lock, flags);
+	if (!ff->async_write_error_valid) {
+		ff->async_write_error = err;
+		ff->async_write_error_valid = true;
+	}
+	spin_unlock_irqrestore(&ff->async_err_lock, flags);
 }
 
-static int rfuse_get_fh_async_write_error(struct fuse_file *ff)
+static int rfuse_take_fh_async_write_error(struct fuse_file *ff)
 {
 	unsigned long flags;
 	int err = 0;
 
-	spin_lock_irqsave(&ff->async_lock, flags);
-	if (ff->async_error_valid)
+	spin_lock_irqsave(&ff->async_err_lock, flags);
+	if (ff->async_write_error_valid) {
 		err = ff->async_write_error;
-	spin_unlock_irqrestore(&ff->async_lock, flags);
+		ff->async_write_error = 0;
+		ff->async_write_error_valid = false;
+	}
+	spin_unlock_irqrestore(&ff->async_err_lock, flags);
 
 	return err;
 }
@@ -256,19 +235,11 @@ int rfuse_flush(struct file *file, fl_owner_t id)
 	struct fuse_flush_in *inarg;
 	struct rfuse_req *r_req;
 	int err;
-	int fh_err;
 	int flush_err = 0;
+	int fh_err;
 
 	if (fuse_is_bad(inode))
 		return -EIO;
-
-	/*
-	 * close 경로는 fsync처럼 inode 전체를 drain하지 않는다.
-	 * 이 fh에 귀속된 async write만 정리한 뒤 first error를 회수한다.
-	 * 다른 fh의 outstanding write 때문에 close를 직렬화하지 않기 위함이다.
-	 */
-	rfuse_wait_fh_async_writes(ff);
-	fh_err = rfuse_get_fh_async_write_error(ff);
 
 	if (fm->fc->no_flush)
 		goto inval_attr_out;
@@ -299,6 +270,7 @@ inval_attr_out:
 	err = filemap_check_errors(file->f_mapping);
 	if (err)
 		return err;
+	fh_err = rfuse_take_fh_async_write_error(ff);
 	if (fh_err)
 		return fh_err;
 	return flush_err;
@@ -1298,16 +1270,18 @@ static void rfuse_bwrite_complete_req(struct fuse_mount *fm, struct rfuse_req *r
 	struct fuse_write_out *outarg = (struct fuse_write_out *)&r_req->args;
 	unsigned int offset, i;
 	bool short_write;
-	int fh_err;
 	ssize_t pos = -1;
 	size_t count;
+	int fh_err;
 	if (!err && outarg->size > ria->write.in.size)
 		err = -EIO;
+	fh_err = err;
 
 	short_write = !err && outarg->size < ria->write.in.size;
-	fh_err = err ? : (short_write ? -EIO : 0);
 	if (short_write)
 		pos = ria->write.in.offset - io->offset + outarg->size;
+	if (short_write && !fh_err)
+		fh_err = -EIO;
 
 	offset = rp->descs[0].offset;
 	count = err ? 0 : outarg->size;
@@ -1353,11 +1327,11 @@ static void rfuse_bwrite_complete_req(struct fuse_mount *fm, struct rfuse_req *r
 	atomic64_inc(&rfuse_bwrite_complete_count);
 #endif
 	rfuse_account_inode_write_end(io->inode);
-	if (ff)
-		rfuse_account_fh_async_write_end(ff, fh_err);
 	rfuse_aio_complete(io, err, pos);
-	if (ff)
+	if (ff) {
+		rfuse_record_fh_async_write_error(ff, fh_err);
 		rfuse_file_put(ff, r_req, false, false);
+	}
 	rfuse_io_free(ria);
 }
 
@@ -1409,13 +1383,12 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 	io->reqs++;
 	spin_unlock(&io->lock);
 
-	ria->ff = rfuse_file_get(ff);
 	rfuse_account_inode_write_start(inode);
 
+	ria->ff = rfuse_file_get(ff);
 	ria->r_req->end = rfuse_bwrite_complete_req;
 	err = rfuse_simple_background(fm, ria->r_req);
 	if (!err) {
-		rfuse_account_fh_async_write_start(ff);
 		rfuse_publish_async_write_size(inode, pos + count);
 	} else {
 #if LDY_LOG
@@ -1426,9 +1399,9 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 		io->reqs--;
 		spin_unlock(&io->lock);
 		rfuse_account_inode_write_end(inode);
+		kref_put(&io->refcnt, rfuse_io_release);
 		rfuse_file_put(ria->ff, ria->r_req, false, false);
 		ria->ff = NULL;
-		kref_put(&io->refcnt, rfuse_io_release);
 	}
 
 	return err;
