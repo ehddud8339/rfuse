@@ -1412,13 +1412,11 @@ static void rfuse_flush_bg_queue(struct fuse_conn *fc, int riq_id){
 	}
 }
 
-
 static bool rfuse_request_queue_background(struct rfuse_req *r_req)
 {
 	struct fuse_mount *fm = r_req->fm;
 	struct fuse_conn *fc = fm->fc;
-	struct rfuse_bg_entry *bg_entry = kmalloc_node(sizeof(struct rfuse_bg_entry), GFP_KERNEL, cpu_to_node(r_req->riq_id));
-	bool queued = false;
+	struct rfuse_bg_entry *bg_entry = NULL;
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
 
 	WARN_ON(!test_bit(FR_BACKGROUND, &r_req->flags));
@@ -1428,29 +1426,73 @@ static bool rfuse_request_queue_background(struct rfuse_req *r_req)
 	}
 	__set_bit(FR_ISREPLY, &r_req->flags);
 
-	// Initialize background entry
+	spin_lock(&riq->bg_lock);
+	if (unlikely(!riq->connected)) {
+		spin_unlock(&riq->bg_lock);
+		return false;
+	}
+
+	riq->num_background++;
+	if (riq->num_background == riq->max_background) {
+		riq->blocked = 1;
+	}
+	if (riq->num_background == riq->congestion_threshold && fm->sb) {
+		set_bdi_congested(fm->sb->s_bdi, BLK_RW_SYNC);
+		set_bdi_congested(fm->sb->s_bdi, BLK_RW_ASYNC);
+	}
+
+	/*
+	 * bg_queue 적체가 없는 common case에서는 중간 queue/list를 만들지
+	 * 않고 바로 pending ring에 publish한다.
+	 */
+	if (riq->active_background < riq->max_background &&
+	    list_empty(&riq->bg_queue)) {
+		riq->active_background++;
+		spin_unlock(&riq->bg_lock);
+		rfuse_queue_request(r_req);
+		return true;
+	}
+	spin_unlock(&riq->bg_lock);
+
+	bg_entry = kmalloc_node(sizeof(*bg_entry), GFP_KERNEL,
+			       cpu_to_node(r_req->riq_id));
+	if (!bg_entry) {
+		spin_lock(&riq->bg_lock);
+		riq->num_background--;
+		if (riq->num_background == riq->max_background - 1)
+			riq->blocked = 0;
+		if (riq->num_background == riq->congestion_threshold - 1 && fm->sb) {
+			clear_bdi_congested(fm->sb->s_bdi, BLK_RW_SYNC);
+			clear_bdi_congested(fm->sb->s_bdi, BLK_RW_ASYNC);
+		}
+		spin_unlock(&riq->bg_lock);
+		return false;
+	}
+
 	INIT_LIST_HEAD(&bg_entry->list);
 	bg_entry->request = r_req->index;
 	bg_entry->riq_id = r_req->riq_id;
 
 	spin_lock(&riq->bg_lock);
-	if (likely(riq->connected)) {
-		riq->num_background++;
-		if (riq->num_background == riq->max_background) {
-			riq->blocked = 1;
+	if (unlikely(!riq->connected)) {
+		riq->num_background--;
+		if (riq->num_background == riq->max_background - 1)
+			riq->blocked = 0;
+		if (riq->num_background == riq->congestion_threshold - 1 && fm->sb) {
+			clear_bdi_congested(fm->sb->s_bdi, BLK_RW_SYNC);
+			clear_bdi_congested(fm->sb->s_bdi, BLK_RW_ASYNC);
 		}
-		if (riq->num_background == riq->congestion_threshold && fm->sb) {
-			set_bdi_congested(fm->sb->s_bdi, BLK_RW_SYNC);
-			set_bdi_congested(fm->sb->s_bdi, BLK_RW_ASYNC);
-		}
-		list_add_tail(&bg_entry->list, &riq->bg_queue); // Add it to background queue
-		rfuse_write_lat_mark_bg_enqueued(r_req, ktime_get_ns());
-		rfuse_flush_bg_queue(fc, r_req->riq_id);
-		queued = true;
+		spin_unlock(&riq->bg_lock);
+		kfree(bg_entry);
+		return false;
 	}
+
+	list_add_tail(&bg_entry->list, &riq->bg_queue);
+	rfuse_write_lat_mark_bg_enqueued(r_req, ktime_get_ns());
+	rfuse_flush_bg_queue(fc, r_req->riq_id);
 	spin_unlock(&riq->bg_lock);
 
-	return queued;
+	return true;
 }
 
 
