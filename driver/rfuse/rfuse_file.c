@@ -189,41 +189,6 @@ static struct fuse_file *rfuse_file_get(struct fuse_file *ff)
 	return ff;
 }
 
-static void rfuse_record_fh_async_write_error(struct fuse_file *ff, int err)
-{
-	unsigned long flags;
-
-	if (err >= 0)
-		return;
-
-	/*
-	 * close()는 이미 완료된 async write failure만 best-effort로 회수한다.
-	 * 최초 error만 보존해 두고, 이후 completion된 failure는 덮어쓰지 않는다.
-	 */
-	spin_lock_irqsave(&ff->async_err_lock, flags);
-	if (!ff->async_write_error_valid) {
-		ff->async_write_error = err;
-		ff->async_write_error_valid = true;
-	}
-	spin_unlock_irqrestore(&ff->async_err_lock, flags);
-}
-
-static int rfuse_take_fh_async_write_error(struct fuse_file *ff)
-{
-	unsigned long flags;
-	int err = 0;
-
-	spin_lock_irqsave(&ff->async_err_lock, flags);
-	if (ff->async_write_error_valid) {
-		err = ff->async_write_error;
-		ff->async_write_error = 0;
-		ff->async_write_error_valid = false;
-	}
-	spin_unlock_irqrestore(&ff->async_err_lock, flags);
-
-	return err;
-}
-
 
 /************ 1. FLUSH ************/
 
@@ -236,13 +201,20 @@ int rfuse_flush(struct file *file, fl_owner_t id)
 	struct rfuse_req *r_req;
 	int err;
 	int flush_err = 0;
-	int fh_err;
 
 	if (fuse_is_bad(inode))
 		return -EIO;
 
+	inode_lock(inode);
+	/*
+	 * close 경계에서는 현재 inode에 이미 제출된 async write가 모두 끝난 뒤
+	 * FLUSH를 보낸다. 이 patch는 close를 다시 inode 단위 drain point로
+	 * 되돌리는 것이 목적이므로, fsync처럼 추가 metadata sync는 하지 않는다.
+	 */
+	rfuse_sync_writes(inode);
+
 	if (fm->fc->no_flush)
-		goto inval_attr_out;
+		goto out_unlock;
 
 	r_req = rfuse_get_req(fm, false, true);
 	inarg = (struct fuse_flush_in *)&r_req->args;
@@ -259,20 +231,18 @@ int rfuse_flush(struct file *file, fl_owner_t id)
 		flush_err = 0;
 	}
 	rfuse_put_request(r_req);
-inval_attr_out:
+out_unlock:
 	/*
 	 * In memory i_blocks is not maintained by fuse, if writeback cache is
 	 * enabled, i_blocks from cached attr may not be accurate.
 	 */
 	if (!flush_err && fm->fc->writeback_cache)
 		fuse_invalidate_attr(inode);
+	inode_unlock(inode);
 
 	err = filemap_check_errors(file->f_mapping);
 	if (err)
 		return err;
-	fh_err = rfuse_take_fh_async_write_error(ff);
-	if (fh_err)
-		return fh_err;
 	return flush_err;
 }
 
@@ -1266,22 +1236,17 @@ static void rfuse_bwrite_complete_req(struct fuse_mount *fm, struct rfuse_req *r
 	struct rfuse_pages *rp = r_req->rp;
 	struct rfuse_io_args *ria = container_of(rp, typeof(*ria), rp);
 	struct fuse_io_priv *io = ria->io;
-	struct fuse_file *ff = ria->ff;
 	struct fuse_write_out *outarg = (struct fuse_write_out *)&r_req->args;
 	unsigned int offset, i;
 	bool short_write;
 	ssize_t pos = -1;
 	size_t count;
-	int fh_err;
 	if (!err && outarg->size > ria->write.in.size)
 		err = -EIO;
-	fh_err = err;
 
 	short_write = !err && outarg->size < ria->write.in.size;
 	if (short_write)
 		pos = ria->write.in.offset - io->offset + outarg->size;
-	if (short_write && !fh_err)
-		fh_err = -EIO;
 
 	offset = rp->descs[0].offset;
 	count = err ? 0 : outarg->size;
@@ -1328,10 +1293,6 @@ static void rfuse_bwrite_complete_req(struct fuse_mount *fm, struct rfuse_req *r
 #endif
 	rfuse_account_inode_write_end(io->inode);
 	rfuse_aio_complete(io, err, pos);
-	if (ff) {
-		rfuse_record_fh_async_write_error(ff, fh_err);
-		rfuse_file_put(ff, r_req, false, false);
-	}
 	rfuse_io_free(ria);
 }
 
@@ -1385,7 +1346,6 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 
 	rfuse_account_inode_write_start(inode);
 
-	ria->ff = rfuse_file_get(ff);
 	ria->r_req->end = rfuse_bwrite_complete_req;
 	err = rfuse_simple_background(fm, ria->r_req);
 	if (!err) {
@@ -1400,8 +1360,6 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 		spin_unlock(&io->lock);
 		rfuse_account_inode_write_end(inode);
 		kref_put(&io->refcnt, rfuse_io_release);
-		rfuse_file_put(ria->ff, ria->r_req, false, false);
-		ria->ff = NULL;
 	}
 
 	return err;
