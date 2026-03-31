@@ -57,7 +57,8 @@ static void rfuse_account_inode_write_end(struct inode *inode)
 	struct fuse_inode *fi = get_fuse_inode(inode);
 
 	spin_lock(&fi->lock);
-	WARN_ON(fi->writectr <= 0);
+	WARN_ON(fi->writectr == 0 || fi->writectr == FUSE_NOWRITE ||
+		fi->writectr < FUSE_NOWRITE);
 	fi->writectr--;
 	spin_unlock(&fi->lock);
 	wake_up(&fi->page_waitq);
@@ -154,6 +155,32 @@ static void rfuse_read_update_size(struct inode *inode, loff_t size,
 		i_size_write(inode, size);
 	}
 	spin_unlock(&fi->lock);
+}
+
+static void rfuse_publish_async_write_size(struct inode *inode, loff_t end_pos)
+{
+	/*
+	 * half-sync buffered write는 daemon completion보다 먼저 write(2)를
+	 * 성공으로 반환할 수 있다. background submit이 끝난 구간은 page
+	 * cache에 최신 데이터가 있으므로, short read/early EOF를 막기
+	 * 위해 size visibility도 같은 시점에 맞춘다.
+	 */
+	fuse_write_update_size(inode, end_pos);
+}
+
+static void rfuse_read_wait_async_writes(struct inode *inode)
+{
+	struct fuse_inode *fi = get_fuse_inode(inode);
+
+	/*
+	 * page cache miss로 backing READ를 보내기 전에 현재 inode의 in-flight
+	 * write가 빠지길 기다린다. cache hit read는 여기까지 오지 않으므로
+	 * stale backing data를 읽을 수 있는 지점만 막는다.
+	 */
+	if (likely(READ_ONCE(fi->writectr) == 0))
+		return;
+
+	wait_event(fi->page_waitq, READ_ONCE(fi->writectr) == 0);
 }
 
 static struct fuse_file *rfuse_file_get(struct fuse_file *ff)
@@ -643,8 +670,6 @@ static void rfuse_aio_complete(struct fuse_io_priv *io, int err, ssize_t pos)
 		if (io->bwrite_async) {
 			struct fuse_inode *fi = get_fuse_inode(inode);
 
-			if (res > 0)
-				fuse_write_update_size(inode, io->offset + res);
 			clear_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
 			fuse_invalidate_attr(inode);
 		} else {
@@ -1323,7 +1348,9 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 
 	ria->r_req->end = rfuse_bwrite_complete_req;
 	err = rfuse_simple_background(fm, ria->r_req);
-	if (err) {
+	if (!err) {
+		rfuse_publish_async_write_size(inode, pos + count);
+	} else {
 #if LDY_LOG
 		atomic64_inc(&rfuse_bwrite_submit_fail_count);
 #endif
@@ -1463,9 +1490,6 @@ async:
 			res += nbytes;
 			pos += nbytes;
 		}
-
-		if (res > 0)
-			fuse_write_update_size(inode, pos);
 
 		rfuse_aio_complete(io, res > 0 ? 0 : err, -1);
 		return res > 0 ? res : err;
@@ -2291,6 +2315,7 @@ int rfuse_do_readpage(struct file *file, struct page *page){
 	if (pos + (desc.length - 1) == LLONG_MAX)
 		desc.length--;
 
+	rfuse_read_wait_async_writes(inode);
 	rfuse_read_args_fill(&ria, file, pos, desc.length, FUSE_READ);
 	res = rfuse_simple_request(r_req);
 	rfuse_put_request(r_req);
@@ -2407,6 +2432,7 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, i
 	}
 	WARN_ON((loff_t) (pos + count) < 0);
 
+	rfuse_read_wait_async_writes(file_inode(file));
 	rfuse_read_args_fill(ria, file, pos, count, FUSE_READ);
 	ria->read.attr_ver = fuse_get_attr_version(fm->fc);
 	if (is_async) {
@@ -2465,6 +2491,7 @@ void rfuse_readahead(struct readahead_control *rac)
 static ssize_t rfuse_send_read(struct rfuse_io_args *ria, loff_t pos, size_t count, fl_owner_t owner)
 {
 	struct file *file = ria->io->iocb->ki_filp;
+	struct inode *inode = file_inode(file);
 	struct fuse_file *ff = file->private_data;
 	struct fuse_mount *fm = ff->fm;
 	struct fuse_read_in *inarg;
@@ -2480,6 +2507,7 @@ static ssize_t rfuse_send_read(struct rfuse_io_args *ria, loff_t pos, size_t cou
 	ria->r_req = r_req;
 	ria->r_req->out_pages = true;
 
+	rfuse_read_wait_async_writes(inode);
 	inarg = (struct fuse_read_in *)&r_req->args;
 	rfuse_read_args_fill(ria, file, pos, count, FUSE_READ);
 	if (owner != NULL) {
