@@ -189,6 +189,62 @@ static struct fuse_file *rfuse_file_get(struct fuse_file *ff)
 	return ff;
 }
 
+static void rfuse_account_fh_async_write_start(struct fuse_file *ff)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&ff->async_lock, flags);
+	ff->async_writes++;
+	spin_unlock_irqrestore(&ff->async_lock, flags);
+}
+
+static void rfuse_account_fh_async_write_end(struct fuse_file *ff, int err)
+{
+	unsigned long flags;
+	bool wake = false;
+
+	spin_lock_irqsave(&ff->async_lock, flags);
+	/*
+	 * close/flush는 fh별 first error만 회수하면 된다.
+	 * 이후 실패가 덮어쓰면 최초 관측 지점을 잃어버리므로 첫 에러만 남긴다.
+	 */
+	if (err && !ff->async_error_valid) {
+		ff->async_write_error = err;
+		ff->async_error_valid = true;
+	}
+
+	WARN_ON(!ff->async_writes);
+	if (ff->async_writes > 0) {
+		ff->async_writes--;
+		wake = ff->async_writes == 0;
+	}
+	spin_unlock_irqrestore(&ff->async_lock, flags);
+
+	if (wake)
+		wake_up_all(&ff->async_waitq);
+}
+
+static void rfuse_wait_fh_async_writes(struct fuse_file *ff)
+{
+	if (likely(READ_ONCE(ff->async_writes) == 0))
+		return;
+
+	wait_event(ff->async_waitq, READ_ONCE(ff->async_writes) == 0);
+}
+
+static int rfuse_get_fh_async_write_error(struct fuse_file *ff)
+{
+	unsigned long flags;
+	int err = 0;
+
+	spin_lock_irqsave(&ff->async_lock, flags);
+	if (ff->async_error_valid)
+		err = ff->async_write_error;
+	spin_unlock_irqrestore(&ff->async_lock, flags);
+
+	return err;
+}
+
 
 /************ 1. FLUSH ************/
 
@@ -198,52 +254,54 @@ int rfuse_flush(struct file *file, fl_owner_t id)
 	struct fuse_mount *fm = get_fuse_mount(inode);
 	struct fuse_file *ff = file->private_data;
 	struct fuse_flush_in *inarg;
-    struct rfuse_req *r_req;
-
+	struct rfuse_req *r_req;
 	int err;
+	int fh_err;
+	int flush_err = 0;
 
 	if (fuse_is_bad(inode))
 		return -EIO;
 
-	err = write_inode_now(inode, 1);
-	if (err)
-		return err;
+	/*
+	 * close 경로는 fsync처럼 inode 전체를 drain하지 않는다.
+	 * 이 fh에 귀속된 async write만 정리한 뒤 first error를 회수한다.
+	 * 다른 fh의 outstanding write 때문에 close를 직렬화하지 않기 위함이다.
+	 */
+	rfuse_wait_fh_async_writes(ff);
+	fh_err = rfuse_get_fh_async_write_error(ff);
 
-	inode_lock(inode);
-	rfuse_sync_writes(inode);
-	inode_unlock(inode);
-
-	err = filemap_check_errors(file->f_mapping);
-	if (err)
-		return err;
-
-	err = 0;
 	if (fm->fc->no_flush)
 		goto inval_attr_out;
 
-    r_req = rfuse_get_req(fm, false, true);
-    inarg = (struct fuse_flush_in*)&r_req->args;
+	r_req = rfuse_get_req(fm, false, true);
+	inarg = (struct fuse_flush_in *)&r_req->args;
 
 	inarg->fh = ff->fh;
 	inarg->lock_owner = fuse_lock_owner_id(fm->fc, id);
 	
-    r_req->in.opcode = FUSE_FLUSH;
-    r_req->in.nodeid = get_node_id(inode);
+	r_req->in.opcode = FUSE_FLUSH;
+	r_req->in.nodeid = get_node_id(inode);
 
-	err = rfuse_simple_request(r_req);
-	if (err == -ENOSYS) {
+	flush_err = rfuse_simple_request(r_req);
+	if (flush_err == -ENOSYS) {
 		fm->fc->no_flush = 1;
-		err = 0;
+		flush_err = 0;
 	}
-    rfuse_put_request(r_req); 
+	rfuse_put_request(r_req);
 inval_attr_out:
 	/*
 	 * In memory i_blocks is not maintained by fuse, if writeback cache is
 	 * enabled, i_blocks from cached attr may not be accurate.
 	 */
-	if (!err && fm->fc->writeback_cache)
+	if (!flush_err && fm->fc->writeback_cache)
 		fuse_invalidate_attr(inode);
-	return err;
+
+	err = filemap_check_errors(file->f_mapping);
+	if (err)
+		return err;
+	if (fh_err)
+		return fh_err;
+	return flush_err;
 }
 
 
@@ -1236,15 +1294,18 @@ static void rfuse_bwrite_complete_req(struct fuse_mount *fm, struct rfuse_req *r
 	struct rfuse_pages *rp = r_req->rp;
 	struct rfuse_io_args *ria = container_of(rp, typeof(*ria), rp);
 	struct fuse_io_priv *io = ria->io;
+	struct fuse_file *ff = ria->ff;
 	struct fuse_write_out *outarg = (struct fuse_write_out *)&r_req->args;
 	unsigned int offset, i;
 	bool short_write;
+	int fh_err;
 	ssize_t pos = -1;
 	size_t count;
 	if (!err && outarg->size > ria->write.in.size)
 		err = -EIO;
 
 	short_write = !err && outarg->size < ria->write.in.size;
+	fh_err = err ? : (short_write ? -EIO : 0);
 	if (short_write)
 		pos = ria->write.in.offset - io->offset + outarg->size;
 
@@ -1292,7 +1353,11 @@ static void rfuse_bwrite_complete_req(struct fuse_mount *fm, struct rfuse_req *r
 	atomic64_inc(&rfuse_bwrite_complete_count);
 #endif
 	rfuse_account_inode_write_end(io->inode);
+	if (ff)
+		rfuse_account_fh_async_write_end(ff, fh_err);
 	rfuse_aio_complete(io, err, pos);
+	if (ff)
+		rfuse_file_put(ff, r_req, false, false);
 	rfuse_io_free(ria);
 }
 
@@ -1344,11 +1409,13 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 	io->reqs++;
 	spin_unlock(&io->lock);
 
+	ria->ff = rfuse_file_get(ff);
 	rfuse_account_inode_write_start(inode);
 
 	ria->r_req->end = rfuse_bwrite_complete_req;
 	err = rfuse_simple_background(fm, ria->r_req);
 	if (!err) {
+		rfuse_account_fh_async_write_start(ff);
 		rfuse_publish_async_write_size(inode, pos + count);
 	} else {
 #if LDY_LOG
@@ -1359,6 +1426,8 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 		io->reqs--;
 		spin_unlock(&io->lock);
 		rfuse_account_inode_write_end(inode);
+		rfuse_file_put(ria->ff, ria->r_req, false, false);
+		ria->ff = NULL;
 		kref_put(&io->refcnt, rfuse_io_release);
 	}
 

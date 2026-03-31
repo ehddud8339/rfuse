@@ -67,7 +67,9 @@ struct fuse_file *fuse_file_alloc(struct fuse_mount *fm)
 	INIT_LIST_HEAD(&ff->write_entry);
 	mutex_init(&ff->readdir.lock);
 	refcount_set(&ff->count, 1);
+	spin_lock_init(&ff->async_lock);
 	RB_CLEAR_NODE(&ff->polled_node);
+	init_waitqueue_head(&ff->async_waitq);
 	init_waitqueue_head(&ff->poll_wait);
 
 	ff->kh = atomic64_inc_return(&fm->fc->khctr);

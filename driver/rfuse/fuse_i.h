@@ -285,6 +285,17 @@ struct fuse_file {
 	/** FOPEN_* flags returned by open */
 	u32 open_flags;
 
+	/*
+	 * half-sync async write 상태는 fh lifetime에 귀속된다.
+	 * close/flush에서 inode 전체를 막지 않고, 이 fh에서 관측한
+	 * in-flight와 first error만 회수할 수 있도록 별도 관리한다.
+	 */
+	spinlock_t async_lock;
+	wait_queue_head_t async_waitq;
+	unsigned int async_writes;
+	int async_write_error;
+	bool async_error_valid;
+
 	/** Entry on inode's write_files list */
 	struct list_head write_entry;
 
