@@ -1449,9 +1449,11 @@ static bool rfuse_request_queue_background(struct rfuse_req *r_req)
 	    list_empty(&riq->bg_queue)) {
 		riq->active_background++;
 		spin_unlock(&riq->bg_lock);
+    // printk("fast path\n");
 		rfuse_queue_request(r_req);
 		return true;
 	}
+  // printk("slow path\n");
 	spin_unlock(&riq->bg_lock);
 
 	bg_entry = kmalloc_node(sizeof(*bg_entry), GFP_KERNEL,
