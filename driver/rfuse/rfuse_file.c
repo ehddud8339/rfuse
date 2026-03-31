@@ -81,7 +81,7 @@ static bool rfuse_async_allowed(struct kiocb *iocb, struct inode *inode,
 {
 	unsigned int flags = rfuse_write_flags(iocb);
 	size_t count = iov_iter_count(ii);
-  bool on = true;
+  bool on = false;
 
 	if (!on)
 		return false;
