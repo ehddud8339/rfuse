@@ -1382,7 +1382,9 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 	struct fuse_conn *fc = get_fuse_conn(inode);
 	struct fuse_mount *fm = get_fuse_mount(inode);
 	struct fuse_inode *fi = get_fuse_inode(inode);
+	const char *file_name = file_dentry(iocb->ki_filp)->d_name.name;
 	size_t write_count = iov_iter_count(ii);
+	size_t file_name_len = strlen(file_name);
 	loff_t inode_size = inode->i_size;
 	loff_t end_pos = pos + write_count;
 	int err = 0;
@@ -1394,13 +1396,33 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 	bool append_like = pos >= inode_size;
 
 	/*
-	 * INSERT/UPDATE 차이를 보려면 메타데이터 여부를 추측하기보다,
-	 * 어느 파일의 어떤 위치를 어떤 형태로 쓰는지 먼저 본다.
+	 * WAL은 append가 기본이라 일반 분류값만으로는 INSERT/UPDATE 차이가
+	 * 잘 안 보인다. frame 경계 기준으로 찍어야 payload/header 묶음을
+	 * 비교할 수 있다.
 	 */
-	printk("rfuse_write file=%s async=%d pos=%lld count=%zu isize=%lld extend=%d overwrite=%d partial_extend=%d append_like=%d flags=0x%x\n",
-	       file_dentry(iocb->ki_filp)->d_name.name, async, pos, write_count,
-	       inode_size, extending, overwrite, partial_extend, append_like,
-	       rfuse_write_flags(iocb));
+	if (file_name_len >= 4 && !strcmp(file_name + file_name_len - 4, "-wal")) {
+		if (pos >= 32) {
+			u64 wal_pos = pos - 32;
+			u64 frame_idx = div_u64(wal_pos, 24 + 4096);
+			u32 frame_off = wal_pos % (24 + 4096);
+			bool wal_header = frame_off < 24;
+			bool wal_payload = frame_off >= 24;
+
+			printk("rfuse_write_wal file=%s async=%d pos=%lld count=%zu isize=%lld frame=%llu frame_off=%u header=%d payload=%d flags=0x%x\n",
+			       file_name, async, pos, write_count, inode_size, frame_idx,
+			       frame_off, wal_header, wal_payload,
+			       rfuse_write_flags(iocb));
+		} else {
+			printk("rfuse_write_wal file=%s async=%d pos=%lld count=%zu isize=%lld wal_header=1 wal_file_header=1 flags=0x%x\n",
+			       file_name, async, pos, write_count, inode_size,
+			       rfuse_write_flags(iocb));
+		}
+	} else {
+		printk("rfuse_write file=%s async=%d pos=%lld count=%zu isize=%lld extend=%d overwrite=%d partial_extend=%d append_like=%d flags=0x%x\n",
+		       file_name, async, pos, write_count, inode_size, extending,
+		       overwrite, partial_extend, append_like,
+		       rfuse_write_flags(iocb));
+	}
 
 	if (async)
 		goto async;
