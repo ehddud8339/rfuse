@@ -55,13 +55,23 @@ static void rfuse_account_inode_write_start(struct inode *inode)
 static void rfuse_account_inode_write_end(struct inode *inode)
 {
 	struct fuse_inode *fi = get_fuse_inode(inode);
+	int writectr;
+	bool wake_page_waitq;
 
 	spin_lock(&fi->lock);
-  WARN_ON(fi->writectr == 0 || fi->writectr == FUSE_NOWRITE ||
-          fi->writectr < FUSE_NOWRITE);
-	fi->writectr--;
+	WARN_ON(fi->writectr == 0 || fi->writectr == FUSE_NOWRITE ||
+		fi->writectr < FUSE_NOWRITE);
+	writectr = --fi->writectr;
+	/*
+	 * page_waitq waiter는 현재 두 종류뿐이다.
+	 * - read miss 경로: in-flight async write가 모두 빠져 writectr == 0
+	 * - fsync/flush drain 경로: FUSE_NOWRITE를 건 뒤 writectr == FUSE_NOWRITE
+	 * 중간 completion마다 깨우면 context switch만 늘고 조건은 다시 false가 된다.
+	 */
+	wake_page_waitq = writectr == 0 || writectr == FUSE_NOWRITE;
 	spin_unlock(&fi->lock);
-	wake_up(&fi->page_waitq);
+	if (wake_page_waitq)
+		wake_up(&fi->page_waitq);
 }
 
 static unsigned int rfuse_write_flags(struct kiocb *iocb)
