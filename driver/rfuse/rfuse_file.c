@@ -42,6 +42,27 @@ static void rfuse_sync_writes(struct inode *inode)
 	fuse_release_nowrite(inode);
 }
 
+static void rfuse_account_inode_write_start(struct inode *inode)
+{
+	struct fuse_inode *fi = get_fuse_inode(inode);
+
+	spin_lock(&fi->lock);
+	WARN_ON(fi->writectr < 0);
+	fi->writectr++;
+	spin_unlock(&fi->lock);
+}
+
+static void rfuse_account_inode_write_end(struct inode *inode)
+{
+	struct fuse_inode *fi = get_fuse_inode(inode);
+
+	spin_lock(&fi->lock);
+	WARN_ON(fi->writectr <= 0);
+	fi->writectr--;
+	spin_unlock(&fi->lock);
+	wake_up(&fi->page_waitq);
+}
+
 static unsigned int rfuse_write_flags(struct kiocb *iocb)
 {
 	unsigned int flags = iocb->ki_filp->f_flags;
@@ -512,30 +533,6 @@ struct rfuse_writepage_args {
 	loff_t pos;
 };
 
-static bool rfuse_writeback_overlaps(struct rfuse_writepage_args *r_wpa,
-				    pgoff_t idx_from, pgoff_t idx_to)
-{
-	pgoff_t curr_from = r_wpa->ria.write.in.offset >> PAGE_SHIFT;
-	pgoff_t curr_to = curr_from + r_wpa->ria.rp.num_pages - 1;
-
-	return idx_from <= curr_to && idx_to >= curr_from;
-}
-
-static bool rfuse_writeback_chain_overlaps(struct rfuse_writepage_args *head,
-					  pgoff_t idx_from, pgoff_t idx_to)
-{
-	struct rfuse_writepage_args *r_wpa;
-
-	for (r_wpa = head; r_wpa; r_wpa = r_wpa->next) {
-		WARN_ON(r_wpa->inode != head->inode);
-		WARN_ON(!r_wpa->ria.rp.num_pages);
-		if (rfuse_writeback_overlaps(r_wpa, idx_from, idx_to))
-			return true;
-	}
-
-	return false;
-}
-
 static struct rfuse_writepage_args *rfuse_find_writeback(struct fuse_inode *fi,
 					    pgoff_t idx_from, pgoff_t idx_to)
 {
@@ -554,10 +551,8 @@ static struct rfuse_writepage_args *rfuse_find_writeback(struct fuse_inode *fi,
 			n = n->rb_right;
 		else if (idx_to < curr_index)
 			n = n->rb_left;
-		else if (rfuse_writeback_chain_overlaps(r_wpa, idx_from, idx_to))
-			return r_wpa;
 		else
-			n = n->rb_right;
+			return r_wpa;
 	}
 	return NULL;
 }
@@ -1271,6 +1266,7 @@ static void rfuse_bwrite_complete_req(struct fuse_mount *fm, struct rfuse_req *r
 
 	atomic64_inc(&rfuse_bwrite_complete_count);
 #endif
+	rfuse_account_inode_write_end(io->inode);
 	rfuse_aio_complete(io, err, pos);
 	rfuse_io_free(ria);
 }
@@ -1317,13 +1313,15 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 	rfuse_write_lat_stamp(ria->r_req, RFUSE_WRITE_LAT_STAMP_SUBMIT_TO_BG, now_ns);
 #endif
 
-  spin_lock(&io->lock);
+	spin_lock(&io->lock);
 	kref_get(&io->refcnt);
 	io->size += count;
 	io->reqs++;
 	spin_unlock(&io->lock);
 
-  ria->r_req->end = rfuse_bwrite_complete_req;
+	rfuse_account_inode_write_start(inode);
+
+	ria->r_req->end = rfuse_bwrite_complete_req;
 	err = rfuse_simple_background(fm, ria->r_req);
 	if (err) {
 #if LDY_LOG
@@ -1333,6 +1331,7 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 		io->size -= count;
 		io->reqs--;
 		spin_unlock(&io->lock);
+		rfuse_account_inode_write_end(inode);
 		kref_put(&io->refcnt, rfuse_io_release);
 	}
 
@@ -1347,12 +1346,13 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 	int err = 0;
 	ssize_t res = 0;
 	bool async = rfuse_async_allowed(iocb, inode, pos, ii);
+	bool extending = inode->i_size < pos + iov_iter_count(ii);
+
+	if (extending)
+		set_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
 
 	if (async)
 		goto async;
-
-	if (inode->i_size < pos + iov_iter_count(ii))
-		set_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
 
 	do {
 		ssize_t count;
@@ -1411,14 +1411,16 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 async:
 	{
 		loff_t offset = pos;
-		size_t count = iov_iter_count(ii);
-		struct fuse_io_priv *io;
+			size_t count = iov_iter_count(ii);
+			struct fuse_io_priv *io;
 
-		io = rfuse_io_args_init(iocb, inode, offset);
-		if (!io)
-			return -ENOMEM;
+			io = rfuse_io_args_init(iocb, inode, offset);
+			if (!io) {
+				clear_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
+				return -ENOMEM;
+			}
 
-		while (count) {
+			while (count) {
 			struct rfuse_io_args *ria;
 			struct rfuse_req *r_req;
 #if LDY_LOG
@@ -1461,6 +1463,9 @@ async:
 			res += nbytes;
 			pos += nbytes;
 		}
+
+		if (res > 0)
+			fuse_write_update_size(inode, pos);
 
 		rfuse_aio_complete(io, res > 0 ? 0 : err, -1);
 		return res > 0 ? res : err;
@@ -1540,10 +1545,8 @@ static struct rfuse_writepage_args *rfuse_insert_writeback(struct rb_root *root,
 			p = &(*p)->rb_right;
 		else if (idx_to < curr_index)
 			p = &(*p)->rb_left;
-		else if (rfuse_writeback_chain_overlaps(curr, idx_from, idx_to))
-			return curr;
 		else
-			p = &(*p)->rb_right;
+			return curr;
 	}
 
 	rb_link_node(&wpa->writepages_entry, parent, p);
