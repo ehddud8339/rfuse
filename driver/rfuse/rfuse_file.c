@@ -57,7 +57,8 @@ static void rfuse_account_inode_write_end(struct inode *inode)
 	struct fuse_inode *fi = get_fuse_inode(inode);
 
 	spin_lock(&fi->lock);
-	WARN_ON(fi->writectr <= 0);
+  WARN_ON(fi->writectr == 0 || fi->writectr == FUSE_NOWRITE ||
+          fi->writectr < FUSE_NOWRITE);
 	fi->writectr--;
 	spin_unlock(&fi->lock);
 	wake_up(&fi->page_waitq);
