@@ -1509,11 +1509,14 @@ async:
 				break;
 			}
 
+      /*
       if (extending) {
         r_req = rfuse_get_req(fm, true, false);
       } else {
   			r_req = try_rfuse_get_req(fm, true, false, NULL);
       }
+      */
+      r_req = try_rfuse_get_req(fm, true, false, NULL);
 			ria->r_req = r_req;
 #if LDY_LOG
 			rfuse_write_lat_set_branch(r_req, RFUSE_WRITE_LAT_ASYNC);

@@ -29,6 +29,7 @@
  */
 
 #define RFUSE_SELECTION_ALGO 2
+#define RFUSE_ASYNC_RIQ_THRESHOLD 8
 atomic_t rr_id = ATOMIC_INIT(0);
 
 
@@ -703,12 +704,35 @@ static int select_cpu_id(void){
 	return (ret % RFUSE_NUM_IQUEUE);
 }
 
+static unsigned int rfuse_async_riq_load(struct rfuse_iqueue *riq)
+{
+	unsigned int pending_head;
+	unsigned int pending_depth;
+	unsigned int bg_queued;
+
+	pending_head = smp_load_acquire(&riq->pending.head);
+	pending_depth = riq->pending.tail - pending_head;
+	bg_queued = riq->num_background - riq->active_background;
+
+	/*
+	 * async 스케줄링은 정확한 accounting보다 빠른 혼잡 힌트가 중요하다.
+	 * pending ring에 아직 남아 있는 요청과 background backlog를 합쳐서
+	 * CPU affinity를 유지할지 RR로 분산할지 결정한다.
+	 */
+	return pending_depth + riq->active_background + bg_queued;
+}
+
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc){
-	int id = 0;
+	int id;
+	struct rfuse_iqueue *riq;
 
-	id = select_round_robin(fc);
+	id = select_cpu_id();
+	riq = fc->riq[id];
 
-	return fc->riq[id];
+	if (rfuse_async_riq_load(riq) < RFUSE_ASYNC_RIQ_THRESHOLD)
+		return riq;
+
+	return fc->riq[select_round_robin(fc)];
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue(struct fuse_conn *fc){
