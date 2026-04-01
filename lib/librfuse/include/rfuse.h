@@ -141,9 +141,6 @@ extern "C" {
 #define RFUSE_READ					0x40000000ULL
 #define RFUSE_WRITE				0x48000000ULL
 
-#define RFUSE_WRITE_LAT_STAGE_NR 8
-#define RFUSE_WRITE_LAT_STAMP_SLOTS 10
-
 struct rfuse_req{
 	/** Request input header **/
 	struct{
@@ -172,34 +169,22 @@ struct rfuse_req{
 	/** Request flags, updated with test/set/clear_bit() **/
 	unsigned long flags; // 8
 
-	/** refcount **/
-	int no_touch_1; // 4
-
-	/** fuse_mount this request belongs to **/
-	int *no_touch_2; // 8
-
-	/** Used to wake up the task waiting for completion of request **/
-	char no_touch_3[24];
+	/*
+	 * kernel과 공유하는 mmap ABI를 맞추기 위한 reserved area다.
+	 * userspace는 아래 필드를 직접 해석하지 않고 크기/정렬만 kernel과
+	 * 동일하게 유지한다.
+	 */
+	void *reserved_fm;
+	uint32_t reserved_count;
+	uint8_t reserved_waitq[24];
 
 	struct{
-		uint8_t argument_space[120];
-	}args; // 120
-	
-	uint64_t padding[2];
+		uint8_t argument_space[112];
+	}args; // 112
 
-	/*
-	 * kernel과 shared request 크기를 맞추기 위한 reserved area다.
-	 * kernel write_lat 확장과 항상 같은 슬롯 수를 유지해야 한다.
-	 * userspace는 이 값을 직접 해석하지 않고 index 계산만 맞추면 된다.
-	 */
-	struct {
-		uint64_t stamp_ns[RFUSE_WRITE_LAT_STAMP_SLOTS];
-		uint64_t daemon_dequeued_ns;
-		uint64_t daemon_reply_ns;
-		uint8_t branch;
-		uint8_t valid;
-		uint8_t daemon_stamps_valid;
-	} write_lat;
+	uint32_t reserved_req_flags;
+	void *reserved_rp;
+	void *reserved_end;
 };
 
 struct rfuse_interrupt_entry{
