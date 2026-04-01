@@ -169,23 +169,22 @@ struct rfuse_req{
 	/** Request flags, updated with test/set/clear_bit() **/
 	unsigned long flags; // 8
 
-	/*
-	 * kernel과 공유하는 mmap ABI를 맞추기 위한 reserved area다.
-	 * userspace는 아래 필드를 직접 해석하지 않고 크기/정렬만 kernel과
-	 * 동일하게 유지한다.
-	 */
-	void *reserved_fm;
-	uint32_t reserved_count;
-	uint8_t reserved_waitq[24];
+	/** refcount **/
+	int no_touch_1; // 4
+
+	/** fuse_mount this request belongs to **/
+	int *no_touch_2; // 8
+
+	/** Used to wake up the task waiting for completion of request **/
+	char no_touch_3[24];
 
 	struct{
-		uint8_t argument_space[112];
-	}args; // 112
-
-	uint32_t reserved_req_flags;
-	void *reserved_rp;
-	void *reserved_end;
+		uint8_t argument_space[120];
+	}args; // 120
+	
+	uint64_t padding[2];
 };
+
 
 struct rfuse_interrupt_entry{
 	uint64_t    unique;
