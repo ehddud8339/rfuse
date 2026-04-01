@@ -29,8 +29,8 @@
  */
 
 #define RFUSE_SELECTION_ALGO 2
-#define WAY 10
-#define RFUSE_ASYNC_RIQ_THRESHOLD 12
+#define WAY 4
+#define RFUSE_ASYNC_RIQ_THRESHOLD 4
 atomic_t rr_id = ATOMIC_INIT(0);
 
 
@@ -694,9 +694,20 @@ static int select_round_robin(struct fuse_conn *fc){
 }
 
 static int select_thread_id(struct fuse_conn *fc){
+  /*
   int ret = current->pid;
 	
 	return (ret % RFUSE_NUM_IQUEUE);
+  */
+  int sets, c_tp, c_op;
+	spin_lock(&fc->lock);
+	int ret = current->pid;
+	sets = ret % 4;
+	c_tp = sets * (10);
+	c_op = ret % (10);
+	ret = (c_tp + c_op);
+	spin_unlock(&fc->lock);
+	return ret;
 }
 
 static int select_cpu_id(void){
@@ -753,7 +764,7 @@ struct rfuse_iqueue *rfuse_get_iqueue(struct fuse_conn *fc){
 			id = select_round_robin(fc);
 			break;
 		case 1:
-			id = select_thread_id();
+			id = select_thread_id(fc);
 			break;
 		case 2:
 			id = select_cpu_id();
