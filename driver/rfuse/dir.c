@@ -1412,14 +1412,27 @@ static long fuse_dir_compat_ioctl(struct file *file, unsigned int cmd,
 void fuse_set_nowrite(struct inode *inode)
 {
 	struct fuse_inode *fi = get_fuse_inode(inode);
+	int old_writectr;
+	int new_writectr;
 
 	BUG_ON(!inode_is_locked(inode));
 
 	spin_lock(&fi->lock);
 	BUG_ON(fi->writectr < 0);
+	old_writectr = fi->writectr;
 	fi->writectr += FUSE_NOWRITE;
+	new_writectr = fi->writectr;
 	spin_unlock(&fi->lock);
+
+	pr_info("rfuse_set_nowrite_enter ino=%lu nodeid=%llu pid=%d cpu=%d old=%d new=%d\n",
+		inode->i_ino, get_node_id(inode), current->pid, task_cpu(current),
+		old_writectr, new_writectr);
+
 	wait_event(fi->page_waitq, fi->writectr == FUSE_NOWRITE);
+
+	pr_info("rfuse_set_nowrite_ready ino=%lu nodeid=%llu pid=%d cpu=%d writectr=%d\n",
+		inode->i_ino, get_node_id(inode), current->pid, task_cpu(current),
+		READ_ONCE(fi->writectr));
 }
 
 /*
@@ -1440,10 +1453,18 @@ static void __fuse_release_nowrite(struct inode *inode)
 void fuse_release_nowrite(struct inode *inode)
 {
 	struct fuse_inode *fi = get_fuse_inode(inode);
+	int old_writectr;
+	int new_writectr;
 
 	spin_lock(&fi->lock);
+	old_writectr = fi->writectr;
 	__fuse_release_nowrite(inode);
+	new_writectr = fi->writectr;
 	spin_unlock(&fi->lock);
+
+	pr_info("rfuse_release_nowrite ino=%lu nodeid=%llu pid=%d cpu=%d old=%d new=%d\n",
+		inode->i_ino, get_node_id(inode), current->pid, task_cpu(current),
+		old_writectr, new_writectr);
 }
 
 static void fuse_setattr_fill(struct fuse_conn *fc, struct fuse_args *args,
