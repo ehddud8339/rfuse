@@ -2,7 +2,6 @@
 #include <linux/delay.h>
 #include <linux/timer.h>
 #include <linux/jiffies.h>
-#include <linux/timekeeping.h>
 
 void rfuse_sleep_comp(struct fuse_conn *fc, struct rfuse_iqueue *riq, struct rfuse_req *r_req) {
 	spin_lock(&r_req->waitq.lock);
@@ -24,23 +23,7 @@ int rfuse_completion_poll(struct fuse_conn *fc, struct rfuse_iqueue *riq, struct
 {
 	unsigned long max_idle_due = jiffies + usecs_to_jiffies(RFUSE_COMP_MAX_IDLE);
 	while(fc->connected) {
-    /*
-    // DK
-    if(r_req->in.opcode == FUSE_WRITE) {
-      printk("RFUSE: FUSE_WRITE \n");
-      set_bit(FR_FINISHED, &r_req->flags);
-    }
-    */
 		if(test_bit(FR_FINISHED, &r_req->flags)){
-			if (r_req->write_lat.valid &&
-			    r_req->write_lat.branch == RFUSE_WRITE_LAT_SYNC &&
-			    !test_bit(FR_BACKGROUND, &r_req->flags) &&
-			    r_req->in.opcode == FUSE_WRITE &&
-			    r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_DAEMON]) {
-				u64 now_ns = ktime_get_ns();
-
-				rfuse_write_lat_finish_daemon(r_req, now_ns);
-			}
 			rfuse_request_end(r_req);
 			return 0;
 		}

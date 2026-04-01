@@ -10,19 +10,11 @@
 #include <linux/falloc.h>
 #include <linux/uio.h>
 #include <linux/fs.h>
-#include <linux/timekeeping.h>
 
 struct rfuse_release_in {
 	struct fuse_release_in inarg;
 	struct inode *inode;
 };
-
-#if LDY_LOG
-static atomic64_t rfuse_bwrite_submit_count = ATOMIC64_INIT(0);
-static atomic64_t rfuse_bwrite_submit_fail_count = ATOMIC64_INIT(0);
-static atomic64_t rfuse_bwrite_page_locked_count = ATOMIC64_INIT(0);
-static atomic64_t rfuse_bwrite_complete_count = ATOMIC64_INIT(0);
-#endif
 
 
 /************ 0. Copy of original fuse functions ************/
@@ -45,32 +37,22 @@ static void rfuse_sync_writes(struct inode *inode)
 static void rfuse_account_inode_write_start(struct inode *inode)
 {
 	struct fuse_inode *fi = get_fuse_inode(inode);
-	int old_writectr;
-	int new_writectr;
 
 	spin_lock(&fi->lock);
 	WARN_ON(fi->writectr < 0);
-	old_writectr = fi->writectr;
 	fi->writectr++;
-	new_writectr = fi->writectr;
 	spin_unlock(&fi->lock);
-
-	pr_info("rfuse_writectr_inc ino=%lu nodeid=%llu pid=%d cpu=%d old=%d new=%d\n",
-		inode->i_ino, get_node_id(inode), current->pid, task_cpu(current),
-		old_writectr, new_writectr);
 }
 
 static void rfuse_account_inode_write_end(struct inode *inode)
 {
 	struct fuse_inode *fi = get_fuse_inode(inode);
-	int old_writectr;
 	int writectr;
 	bool wake_page_waitq;
 
 	spin_lock(&fi->lock);
 	WARN_ON(fi->writectr == 0 || fi->writectr == FUSE_NOWRITE ||
 		fi->writectr < FUSE_NOWRITE);
-	old_writectr = fi->writectr;
 	writectr = --fi->writectr;
 	/*
 	 * page_waitq waiter는 현재 두 종류뿐이다.
@@ -80,10 +62,6 @@ static void rfuse_account_inode_write_end(struct inode *inode)
 	 */
 	wake_page_waitq = writectr == 0 || writectr == FUSE_NOWRITE;
 	spin_unlock(&fi->lock);
-
-	pr_info("rfuse_writectr_dec ino=%lu nodeid=%llu pid=%d cpu=%d old=%d new=%d wake=%d\n",
-		inode->i_ino, get_node_id(inode), current->pid, task_cpu(current),
-		old_writectr, writectr, wake_page_waitq);
 
 	if (wake_page_waitq)
 		wake_up(&fi->page_waitq);
@@ -105,23 +83,23 @@ static bool rfuse_async_allowed(struct kiocb *iocb, struct inode *inode,
 				loff_t pos, struct iov_iter *ii)
 {
 	unsigned int flags = rfuse_write_flags(iocb);
-	size_t count = iov_iter_count(ii);
-  bool on = true;
+	bool on = true;
+
+	(void)inode;
+	(void)pos;
+	(void)ii;
 
 	if (!on)
 		return false;
 
-	// if (pos + count > i_size_read(inode)) {
-  if (flags & IOCB_APPEND) {
-    printk("RFUSE: half_async refused: append write\n");
+	if (flags & IOCB_APPEND) {
 		return false;
-  }
+	}
 
 	if (flags & (O_SYNC | O_DSYNC)) {
-    printk("RFUSE: half_async refused: O_SYNC/O_DSYNC\n");
 		return false;
-  }
-  // printk("RFUSE: half_async allowed\n");
+	}
+
 	return true;
 }
 
@@ -202,10 +180,8 @@ static void rfuse_read_wait_async_writes(struct inode *inode)
 	 * write가 빠지길 기다린다. cache hit read는 여기까지 오지 않으므로
 	 * stale backing data를 읽을 수 있는 지점만 막는다.
 	 */
-	if (likely(READ_ONCE(fi->writectr) == 0)) {
-    // printk("writectr is 0\n");
+	if (likely(READ_ONCE(fi->writectr) == 0))
 		return;
-  }
 
 	wait_event(fi->page_waitq, READ_ONCE(fi->writectr) == 0);
 }
@@ -727,7 +703,6 @@ static int rfuse_get_user_pages(struct rfuse_io_args *ria, struct iov_iter *ii,
 
 	/* Special case for kernel I/O: can copy directly into the buffer */
 	if (iov_iter_is_kvec(ii)) {
-		printk("iov_iter_is_kvec = true\n");
 		/*
 		unsigned long user_addr = fuse_get_user_addr(ii);
 		size_t frag_size = fuse_get_frag_size(ii, *nbytesp);
@@ -743,11 +718,9 @@ static int rfuse_get_user_pages(struct rfuse_io_args *ria, struct iov_iter *ii,
 		*/
 	}
 
-	printk("rfuse_get_uesr_pages: nbytesp : %ld, max_pages: %d\n", *nbytesp, max_pages);
 	while (nbytes < *nbytesp && rp->num_pages < max_pages) {
 		unsigned npages;
 		size_t start;
-		printk("rfuse_get_user_pages: while start\n");
 		ret = iov_iter_get_pages(ii, &rp->pages[rp->num_pages],
 					*nbytesp - nbytes,
 					max_pages - rp->num_pages,
@@ -900,9 +873,7 @@ ssize_t rfuse_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 		if (!blocking)
 			return -EIOCBQUEUED;
 
-		printk("direct_IO: wait is started\n");
 		wait_for_completion(&wait);
-		printk("direct_IO: wait is ended\n");
 		ret = rfuse_get_res_by_io(io);
 	}
 
@@ -1143,9 +1114,6 @@ static ssize_t rfuse_fill_write_pages(struct rfuse_io_args *ria, struct address_
 			unlock_page(page);
 		} else {
 			ria->write.page_locked = true;
-#if LDY_LOG
-			atomic64_inc(&rfuse_bwrite_page_locked_count);
-#endif
 			break;
 		}
 		if (!fc->big_writes)
@@ -1199,9 +1167,6 @@ static ssize_t rfuse_send_write_pages(struct rfuse_io_args *ria,
 	unsigned int offset, i;
 	bool short_write;
 	int err;
-#if LDY_LOG
-	u64 now_ns;
-#endif
 
 	ria->r_req->in_pages = true;
 
@@ -1214,17 +1179,6 @@ static ssize_t rfuse_send_write_pages(struct rfuse_io_args *ria,
 	in->flags = rfuse_write_flags(iocb);
 	if (fm->fc->handle_killpriv_v2 && !capable(CAP_FSETID))
 		in->write_flags |= FUSE_WRITE_KILL_SUIDGID;
-
-#if LDY_LOG
-	now_ns = ktime_get_ns();
-	if (ria->r_req->write_lat.valid &&
-	    ria->r_req->write_lat.branch == RFUSE_WRITE_LAT_SYNC &&
-	    ria->r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_PREPARE]) {
-		rfuse_write_lat_commit(RFUSE_WRITE_LAT_SYNC,
-				      RFUSE_WRITE_LAT_PREPARE,
-				      now_ns - ria->r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_PREPARE]);
-	}
-#endif
 
 	err = rfuse_simple_request(ria->r_req);
 	out = (struct fuse_write_out *)&ria->r_req->args;
@@ -1257,30 +1211,17 @@ static ssize_t rfuse_send_write_pages(struct rfuse_io_args *ria,
 	return err;
 }
 
-static void rfuse_bwrite_complete_req(struct fuse_mount *fm, struct rfuse_req *r_req,
-				     int err)
+static void rfuse_release_bwrite_pages(struct rfuse_io_args *ria, size_t count,
+				       bool short_write, bool write_err)
 {
-	struct rfuse_pages *rp = r_req->rp;
-	struct rfuse_io_args *ria = container_of(rp, typeof(*ria), rp);
-	struct fuse_io_priv *io = ria->io;
-	struct fuse_write_out *outarg = (struct fuse_write_out *)&r_req->args;
-	unsigned int offset, i;
-	bool short_write;
-	ssize_t pos = -1;
-	size_t count;
-	if (!err && outarg->size > ria->write.in.size)
-		err = -EIO;
+	struct rfuse_pages *rp = &ria->rp;
+	unsigned int offset = rp->descs[0].offset;
+	unsigned int i;
 
-	short_write = !err && outarg->size < ria->write.in.size;
-	if (short_write)
-		pos = ria->write.in.offset - io->offset + outarg->size;
-
-	offset = rp->descs[0].offset;
-	count = err ? 0 : outarg->size;
 	for (i = 0; i < rp->num_pages; i++) {
 		struct page *page = rp->pages[i];
 
-		if (err) {
+		if (write_err) {
 			ClearPageUptodate(page);
 		} else {
 			if (count >= PAGE_SIZE - offset)
@@ -1292,32 +1233,32 @@ static void rfuse_bwrite_complete_req(struct fuse_mount *fm, struct rfuse_req *r
 			}
 			offset = 0;
 		}
+
 		if (ria->write.page_locked && (i == rp->num_pages - 1))
 			unlock_page(page);
 		put_page(page);
 	}
+}
 
-#if LDY_LOG
-	if (r_req->write_lat.valid &&
-	    r_req->write_lat.branch == RFUSE_WRITE_LAT_ASYNC) {
-		u64 now_ns = ktime_get_ns();
+static void rfuse_bwrite_complete_req(struct fuse_mount *fm, struct rfuse_req *r_req,
+				     int err)
+{
+	struct rfuse_pages *rp = r_req->rp;
+	struct rfuse_io_args *ria = container_of(rp, typeof(*ria), rp);
+	struct fuse_io_priv *io = ria->io;
+	struct fuse_write_out *outarg = (struct fuse_write_out *)&r_req->args;
+	bool short_write;
+	ssize_t pos = -1;
+	size_t count;
+	if (!err && outarg->size > ria->write.in.size)
+		err = -EIO;
 
-		if (r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_COMPLETION]) {
-			rfuse_write_lat_commit(RFUSE_WRITE_LAT_ASYNC,
-					      RFUSE_WRITE_LAT_COMPLETION,
-					      now_ns - r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_COMPLETION]);
-		}
-		if (r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_TOTAL]) {
-			rfuse_write_lat_commit(RFUSE_WRITE_LAT_ASYNC,
-					      RFUSE_WRITE_LAT_TOTAL,
-					      now_ns - r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_TOTAL]);
-		}
-		rfuse_write_lat_log_sample(RFUSE_WRITE_LAT_ASYNC);
-		r_req->write_lat.valid = 0;
-	}
+	short_write = !err && outarg->size < ria->write.in.size;
+	if (short_write)
+		pos = ria->write.in.offset - io->offset + outarg->size;
 
-	atomic64_inc(&rfuse_bwrite_complete_count);
-#endif
+	count = err ? 0 : outarg->size;
+	rfuse_release_bwrite_pages(ria, count, short_write, err);
 	rfuse_account_inode_write_end(io->inode);
 	rfuse_aio_complete(io, err, pos);
 	rfuse_io_free(ria);
@@ -1335,11 +1276,6 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 	struct fuse_write_in *in;
 	unsigned int i;
 	ssize_t err;
-#if LDY_LOG
-	u64 now_ns;
-
-	atomic64_inc(&rfuse_bwrite_submit_count);
-#endif
 	ria->r_req->in_pages = true;
 
 	for (i = 0; i < rp->num_pages; i++)
@@ -1351,19 +1287,6 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 	in->flags = rfuse_write_flags(iocb);
 	if (fm->fc->handle_killpriv_v2 && !capable(CAP_FSETID))
 		in->write_flags |= FUSE_WRITE_KILL_SUIDGID;
-
-#if LDY_LOG
-	now_ns = ktime_get_ns();
-	if (ria->r_req->write_lat.valid &&
-	    ria->r_req->write_lat.branch == RFUSE_WRITE_LAT_ASYNC &&
-	    ria->r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_PREPARE]) {
-		rfuse_write_lat_commit(RFUSE_WRITE_LAT_ASYNC,
-				      RFUSE_WRITE_LAT_PREPARE,
-				      now_ns - ria->r_req->write_lat.stamp_ns[RFUSE_WRITE_LAT_PREPARE]);
-	}
-	rfuse_write_lat_stamp(ria->r_req, RFUSE_WRITE_LAT_STAMP_QUEUE, now_ns);
-	rfuse_write_lat_stamp(ria->r_req, RFUSE_WRITE_LAT_STAMP_SUBMIT_TO_BG, now_ns);
-#endif
 
 	spin_lock(&io->lock);
 	kref_get(&io->refcnt);
@@ -1378,9 +1301,11 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 	if (!err) {
 		rfuse_publish_async_write_size(inode, pos + count);
 	} else {
-#if LDY_LOG
-		atomic64_inc(&rfuse_bwrite_submit_fail_count);
-#endif
+		/*
+		 * background queue에 들어가지 못한 request는 completion callback이
+		 * 호출되지 않으므로, 여기서 page ownership을 직접 되돌린다.
+		 */
+		rfuse_release_bwrite_pages(ria, 0, false, true);
 		spin_lock(&io->lock);
 		io->size -= count;
 		io->reqs--;
@@ -1397,52 +1322,17 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 	struct fuse_conn *fc = get_fuse_conn(inode);
 	struct fuse_mount *fm = get_fuse_mount(inode);
 	struct fuse_inode *fi = get_fuse_inode(inode);
-	const char *file_name = file_dentry(iocb->ki_filp)->d_name.name;
 	size_t write_count = iov_iter_count(ii);
-	size_t file_name_len = strlen(file_name);
 	loff_t inode_size = inode->i_size;
 	loff_t end_pos = pos + write_count;
 	int err = 0;
 	ssize_t res = 0;
 	bool async = rfuse_async_allowed(iocb, inode, pos, ii);
 	bool extending = inode_size < end_pos;
-	bool overwrite = end_pos <= inode_size;
-	bool partial_extend = pos < inode_size && end_pos > inode_size;
-	bool append_like = pos >= inode_size;
+	bool async_extending = async && extending;
+	if (async_extending)
+		set_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
 
-   /*
-	 * WAL은 append가 기본이라 일반 분류값만으로는 INSERT/UPDATE 차이가
-	 * 잘 안 보인다. frame 경계 기준으로 찍어야 payload/header 묶음을
-	 * 비교할 수 있다.
-	 *
-	if (file_name_len >= 4 && !strcmp(file_name + file_name_len - 4, "-wal")) {
-		if (pos >= 32) {
-			u64 wal_pos = pos - 32;
-			u64 frame_idx = div_u64(wal_pos, 24 + 4096);
-			u32 frame_off = wal_pos % (24 + 4096);
-			bool wal_header = frame_off < 24;
-			bool wal_payload = frame_off >= 24;
-
-			printk("rfuse_write_wal file=%s async=%d pos=%lld count=%zu isize=%lld frame=%llu frame_off=%u header=%d payload=%d flags=0x%x\n",
-			       file_name, async, pos, write_count, inode_size, frame_idx,
-			       frame_off, wal_header, wal_payload,
-			       rfuse_write_flags(iocb));
-		} else {
-			printk("rfuse_write_wal file=%s async=%d pos=%lld count=%zu isize=%lld wal_header=1 wal_file_header=1 flags=0x%x\n",
-			       file_name, async, pos, write_count, inode_size,
-			       rfuse_write_flags(iocb));
-		}
-	} else {
-		printk("rfuse_write file=%s async=%d pos=%lld count=%zu isize=%lld extend=%d overwrite=%d partial_extend=%d append_like=%d flags=0x%x\n",
-		       file_name, async, pos, write_count, inode_size, extending,
-		       overwrite, partial_extend, append_like,
-		       rfuse_write_flags(iocb));
-	}
-	printk("rfuse_write file=%s async=%d pos=%lld count=%zu isize=%lld extend=%d overwrite=%d partial_extend=%d append_like=%d flags=0x%x\n",
-		      file_name, async, pos, write_count, inode_size, extending,
-		      overwrite, partial_extend, append_like,
-		      rfuse_write_flags(iocb));	
-  */
 	if (async)
 		goto async;
 
@@ -1451,9 +1341,6 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 		struct rfuse_io_args ria = {};
 		struct rfuse_pages *rp = &ria.rp;
 		struct rfuse_req *r_req;
-#if LDY_LOG
-		u64 now_ns;
-#endif
 		unsigned int nr_pages = rfuse_wr_pages(pos, iov_iter_count(ii), fc->max_pages);
 
 		rp->pages = fuse_pages_alloc(nr_pages, GFP_KERNEL, &rp->descs);
@@ -1463,13 +1350,7 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 		}
 
 		r_req = rfuse_get_req(fm, false, false);
-			ria.r_req = r_req;
-#if LDY_LOG
-			rfuse_write_lat_set_branch(r_req, RFUSE_WRITE_LAT_SYNC);
-			now_ns = ktime_get_ns();
-			rfuse_write_lat_stamp(r_req, RFUSE_WRITE_LAT_TOTAL, now_ns);
-			rfuse_write_lat_stamp(r_req, RFUSE_WRITE_LAT_PREPARE, now_ns);
-#endif
+		ria.r_req = r_req;
 
 		count = rfuse_fill_write_pages(&ria, mapping, ii, pos, nr_pages);
 		if (count <= 0) {
@@ -1512,12 +1393,9 @@ async:
 				return -ENOMEM;
 			}
 
-			while (count) {
+		while (count) {
 			struct rfuse_io_args *ria;
 			struct rfuse_req *r_req;
-#if LDY_LOG
-			u64 now_ns;
-#endif
 			unsigned int nr_pages;
 			ssize_t nbytes;
 
@@ -1528,20 +1406,13 @@ async:
 				break;
 			}
 
-      // r_req = rfuse_get_req(fm, true, false);
-      r_req = try_rfuse_get_req(fm, true, false, NULL);
+			r_req = try_rfuse_get_req(fm, true, false, NULL);
 			if (IS_ERR(r_req)) {
 				err = PTR_ERR(r_req);
 				rfuse_io_free(ria);
 				break;
 			}
 			ria->r_req = r_req;
-#if LDY_LOG
-			rfuse_write_lat_set_branch(r_req, RFUSE_WRITE_LAT_ASYNC);
-			now_ns = ktime_get_ns();
-			rfuse_write_lat_stamp(r_req, RFUSE_WRITE_LAT_TOTAL, now_ns);
-			rfuse_write_lat_stamp(r_req, RFUSE_WRITE_LAT_PREPARE, now_ns);
-#endif
 
 			nbytes = rfuse_fill_write_pages(ria, mapping, ii, pos, nr_pages);
 			if (nbytes <= 0) {
@@ -2430,7 +2301,6 @@ static struct rfuse_io_args *rfuse_io_alloc(struct fuse_io_priv *io, unsigned in
 		ria->rp.pages = fuse_pages_alloc(npages, GFP_KERNEL,
 						&ria->rp.descs);
 		if (!ria->rp.pages) {
-			printk("no rp.pages\n");
 			kfree(ria);
 			ria = NULL;
 		}

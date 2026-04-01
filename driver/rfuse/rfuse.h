@@ -14,10 +14,6 @@
 #define RFUSE_NUM_IQUEUE     40           // Number of rfuse iqueue
 #define RFUSE_MAX_QUEUE_SIZE 1024*4      // Maximum number of requests in a queue
 
-#ifndef LOOKUP_LOG
-#define LOOKUP_LOG 0
-#endif
-
 #define RFUSE_RIQ_ID_MASK    0x00ff0000ULL
 #define RFUSE_QUEUE_MAP_MASK 0xff000000ULL
 #define RFUSE_REQ_IDX_MASK   0x0000ffff00000000ULL
@@ -31,9 +27,6 @@
 #define RFUSE_REQ	     0x38000000ULL
 #define RFUSE_READ	     0x40000000ULL
 #define RFUSE_WRITE	     0x48000000ULL
-
-#define RFUSE_WRITE_LAT_STAGE_NR 8
-#define RFUSE_WRITE_LAT_STAMP_SLOTS 10
 
 struct rfuse_req{
 	/** Request input header **/
@@ -85,23 +78,6 @@ struct rfuse_req{
 
 	struct rfuse_pages *rp;
 	void (*end)(struct fuse_mount *fm, struct rfuse_req *r_req, int error);
-
-	/*
-	 * write latency는 request chunk 단위로 측정한다.
-	 * summary stage와 경계 stamp를 분리해 이후 patch에서 queue를 세분화한다.
-	 */
-	struct {
-		u64 stamp_ns[RFUSE_WRITE_LAT_STAMP_SLOTS];
-		/*
-		 * daemon stamp는 future userspace patch가 채운다.
-		 * 없으면 kernel observed 시각으로 degrade한다.
-		 */
-		u64 daemon_dequeued_ns;
-		u64 daemon_reply_ns;
-		u8 branch;
-		u8 valid;
-		u8 daemon_stamps_valid;
-	} write_lat;
 };
 
 
