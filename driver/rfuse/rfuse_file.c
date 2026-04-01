@@ -1402,12 +1402,14 @@ async:
 			nr_pages = rfuse_wr_pages(pos, count, fc->max_pages);
 			ria = rfuse_io_alloc(io, nr_pages);
 			if (!ria) {
+        printk("RFUSE: rfuse_io_alloc failed\n");
 				err = -ENOMEM;
 				break;
 			}
 
 			r_req = try_rfuse_get_req(fm, true, false, NULL);
 			if (IS_ERR(r_req)) {
+        printk("RFUSE: try_rfuse_get_req failed\n");
 				err = PTR_ERR(r_req);
 				rfuse_io_free(ria);
 				break;
@@ -1416,6 +1418,7 @@ async:
 
 			nbytes = rfuse_fill_write_pages(ria, mapping, ii, pos, nr_pages);
 			if (nbytes <= 0) {
+        printk("RFUSE: rfuse_fill_write_pages failed\n");
 				err = nbytes;
 				rfuse_put_request(r_req);
 				rfuse_io_free(ria);
@@ -1424,6 +1427,7 @@ async:
 
 			err = rfuse_bwrite_async_submit(ria, iocb, inode, pos, nbytes);
 			if (err < 0) {
+        printk("RFUSE: async write submit failed\n");
 				rfuse_io_free(ria);
 				break;
 			}

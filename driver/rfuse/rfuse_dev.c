@@ -300,11 +300,11 @@ static int select_round_robin(struct fuse_conn *fc){
 }
 
 static int select_thread_id(struct fuse_conn *fc){
-  /*
   int ret = current->pid;
 	
 	return (ret % RFUSE_NUM_IQUEUE);
-  */
+
+  /*
   int sets, c_tp, c_op;
 	spin_lock(&fc->lock);
 	int ret = current->pid;
@@ -314,20 +314,22 @@ static int select_thread_id(struct fuse_conn *fc){
 	ret = (c_tp + c_op);
 	spin_unlock(&fc->lock);
 	return ret;
+  */ 
 }
 
 static int select_cpu_id(void){
-  /*
 	int ret = task_cpu(current);
 	
 	return (ret % RFUSE_NUM_IQUEUE);
-  */
+
+  /*
   int ret = task_cpu(current);
 	int sets, c_tp, c_op;
 	sets = ret % WAY;
 	c_tp = sets * (RFUSE_NUM_IQUEUE / WAY);
 	c_op = ret % (RFUSE_NUM_IQUEUE / WAY);
 	return (c_tp + c_op);
+  */
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc){
