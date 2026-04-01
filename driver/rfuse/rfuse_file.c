@@ -1425,6 +1425,11 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 		       rfuse_write_flags(iocb));
 	}
 */
+	printk("rfuse_write file=%s async=%d pos=%lld count=%zu isize=%lld extend=%d overwrite=%d partial_extend=%d append_like=%d flags=0x%x\n",
+		      file_name, async, pos, write_count, inode_size, extending,
+		      overwrite, partial_extend, append_like,
+		      rfuse_write_flags(iocb));	
+
 	if (async)
 		goto async;
 
@@ -1512,6 +1517,11 @@ async:
 
       // r_req = rfuse_get_req(fm, true, false);
       r_req = try_rfuse_get_req(fm, true, false, NULL);
+			if (IS_ERR(r_req)) {
+				err = PTR_ERR(r_req);
+				rfuse_io_free(ria);
+				break;
+			}
 			ria->r_req = r_req;
 #if LDY_LOG
 			rfuse_write_lat_set_branch(r_req, RFUSE_WRITE_LAT_ASYNC);
@@ -1787,6 +1797,23 @@ __acquires(fi->lock)
 	int err;
 
 	r_req = try_rfuse_get_req(fm, true, true, &fi->lock);
+	if (IS_ERR(r_req)) {
+		err = PTR_ERR(r_req);
+		spin_lock(&fi->lock);
+		rb_erase(&r_wpa->writepages_entry, &fi->writepages);
+		rfuse_writepage_finish(fm, r_wpa);
+		spin_unlock(&fi->lock);
+
+		for (aux = r_wpa->next; aux; aux = next) {
+			next = aux->next;
+			aux->next = NULL;
+			rfuse_writepage_free(aux);
+		}
+
+		rfuse_writepage_free(r_wpa);
+		spin_lock(&fi->lock);
+		return;
+	}
 
 	ria->r_req = r_req;
 	r_req->in_pages = true;
@@ -2466,6 +2493,20 @@ void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, int is_a
 		r_req = try_rfuse_get_req(fm, true, false, NULL);
 	else 
 		r_req = rfuse_get_req(fm, false, false);
+	if (IS_ERR(r_req)) {
+		int i;
+
+		err = PTR_ERR(r_req);
+		for (i = 0; i < rp->num_pages; i++) {
+			struct page *page = rp->pages[i];
+
+			SetPageError(page);
+			unlock_page(page);
+			put_page(page);
+		}
+		rfuse_io_free(ria);
+		return;
+	}
 		
 	ria->r_req = r_req;
 

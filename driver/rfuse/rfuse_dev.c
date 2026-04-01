@@ -693,8 +693,8 @@ static int select_round_robin(struct fuse_conn *fc){
 	return ret;
 }
 
-static int select_thread_id(void){
-	int ret = current->pid;
+static int select_thread_id(struct fuse_conn *fc){
+  int ret = current->pid;
 	
 	return (ret % RFUSE_NUM_IQUEUE);
 }
