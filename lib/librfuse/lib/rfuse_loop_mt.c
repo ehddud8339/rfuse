@@ -23,127 +23,6 @@
 /* Environment var controlling the thread stack size */
 #define ENVNAME_THREAD_STACK "FUSE_THREAD_STACK"
 
-#if LDY_LOG
-static void rfuse_sleep_stat_init(struct rfuse_daemon_sleep_stat *stat)
-{
-	stat->count = 0;
-	stat->total_ns = 0;
-	stat->min_ns = UINT64_MAX;
-	stat->max_ns = 0;
-}
-
-static void rfuse_sleep_ctx_init(struct rfuse_daemon_sleep_ctx *ctx)
-{
-	memset(ctx, 0, sizeof(*ctx));
-	rfuse_sleep_stat_init(&ctx->sleep_block_ns);
-	rfuse_sleep_stat_init(&ctx->wake_to_read_ns);
-	rfuse_sleep_stat_init(&ctx->wake_pending_depth);
-	rfuse_sleep_stat_init(&ctx->dequeue_burst_len);
-}
-
-static uint64_t rfuse_sleep_stat_min(const struct rfuse_daemon_sleep_stat *stat)
-{
-	if (stat->count == 0 || stat->min_ns == UINT64_MAX)
-		return 0;
-
-	return stat->min_ns;
-}
-
-static uint64_t rfuse_sleep_stat_avg(const struct rfuse_daemon_sleep_stat *stat)
-{
-	if (stat->count == 0)
-		return 0;
-
-	return stat->total_ns / stat->count;
-}
-
-static void rfuse_sleep_ctx_dump(const struct rfuse_mt *mt)
-{
-	const struct rfuse_daemon_sleep_ctx *ctx = &mt->sleep_ctx;
-	uint64_t blocked_pct = 0;
-	uint64_t pending_seen_pct = 0;
-	uint64_t wake_with_backlog_pct = 0;
-
-	if (ctx->sleep_calls == 0)
-		return;
-
-	blocked_pct = (ctx->sleep_blocked_calls * 100) / ctx->sleep_calls;
-	pending_seen_pct = (ctx->pending_seen_before_sleep * 100) / ctx->sleep_calls;
-	if (ctx->wake_pending_depth.count)
-		wake_with_backlog_pct = (ctx->wake_with_backlog_calls * 100) / ctx->wake_pending_depth.count;
-
-	fuse_log(FUSE_LOG_INFO,
-		"rfuse_sleep summary riq=%d sleep_calls=%llu sleep_blocked_calls=%llu blocked_pct=%llu pending_seen_before_sleep=%llu pending_seen_pct=%llu forget_miss_before_sleep=%llu sleep_avg_ns=%llu sleep_min_ns=%llu sleep_max_ns=%llu wake_to_read_avg_ns=%llu wake_to_read_min_ns=%llu wake_to_read_max_ns=%llu wake_pending_avg=%llu wake_pending_min=%llu wake_pending_max=%llu wake_with_backlog_calls=%llu wake_with_backlog_pct=%llu burst_avg=%llu burst_min=%llu burst_max=%llu burst_reqs_total=%llu\n",
-		mt->riq_id,
-		(unsigned long long)ctx->sleep_calls,
-		(unsigned long long)ctx->sleep_blocked_calls,
-		(unsigned long long)blocked_pct,
-		(unsigned long long)ctx->pending_seen_before_sleep,
-		(unsigned long long)pending_seen_pct,
-		(unsigned long long)ctx->forget_miss_before_sleep,
-		(unsigned long long)rfuse_sleep_stat_avg(&ctx->sleep_block_ns),
-		(unsigned long long)rfuse_sleep_stat_min(&ctx->sleep_block_ns),
-		(unsigned long long)ctx->sleep_block_ns.max_ns,
-		(unsigned long long)rfuse_sleep_stat_avg(&ctx->wake_to_read_ns),
-		(unsigned long long)rfuse_sleep_stat_min(&ctx->wake_to_read_ns),
-		(unsigned long long)ctx->wake_to_read_ns.max_ns,
-		(unsigned long long)rfuse_sleep_stat_avg(&ctx->wake_pending_depth),
-		(unsigned long long)rfuse_sleep_stat_min(&ctx->wake_pending_depth),
-		(unsigned long long)ctx->wake_pending_depth.max_ns,
-		(unsigned long long)ctx->wake_with_backlog_calls,
-		(unsigned long long)wake_with_backlog_pct,
-		(unsigned long long)rfuse_sleep_stat_avg(&ctx->dequeue_burst_len),
-		(unsigned long long)rfuse_sleep_stat_min(&ctx->dequeue_burst_len),
-		(unsigned long long)ctx->dequeue_burst_len.max_ns,
-		(unsigned long long)ctx->burst_reqs_total);
-}
-
-static uint64_t rfuse_now_ns(void)
-{
-	struct timespec ts;
-
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
-}
-
-static void rfuse_sleep_stat_record(struct rfuse_daemon_sleep_stat *stat, uint64_t delta_ns)
-{
-	stat->count++;
-	stat->total_ns += delta_ns;
-	if (delta_ns < stat->min_ns)
-		stat->min_ns = delta_ns;
-	if (delta_ns > stat->max_ns)
-		stat->max_ns = delta_ns;
-}
-
-static void rfuse_commit_dequeue_burst(struct rfuse_daemon_sleep_ctx *ctx)
-{
-	if (ctx->current_burst_len == 0)
-		return;
-
-	/*
-	 * sleep 직전까지 연속으로 처리한 pending dequeue 길이를 기록한다.
-	 * wake당 backlog가 있으면 burst 길이가 1보다 크게 누적된다.
-	 */
-	rfuse_sleep_stat_record(&ctx->dequeue_burst_len, ctx->current_burst_len);
-	ctx->current_burst_len = 0;
-}
-
-#else
-static void rfuse_sleep_ctx_init(struct rfuse_daemon_sleep_ctx *ctx)
-{
-	memset(ctx, 0, sizeof(*ctx));
-}
-
-static void rfuse_sleep_ctx_dump(const struct rfuse_mt *mt)
-{
-}
-
-static void rfuse_commit_dequeue_burst(struct rfuse_daemon_sleep_ctx *ctx)
-{
-}
-#endif
-
 static struct fuse_chan *rfuse_chan_new(int fd)
 {
 	struct fuse_chan *ch = (struct fuse_chan *) malloc(sizeof(*ch));
@@ -260,8 +139,6 @@ retry_read_queue:
 			free(w);
 			return NULL;
 		} else if (isforget == 0 && !processed) {
-			uint64_t sleep_start_ns;
-			uint64_t sleep_end_ns;
 			uint64_t pending_depth;
 			struct ioctl_args {
 				int riq_id;
@@ -276,28 +153,8 @@ retry_read_queue:
 				goto retry_read_queue;
 			}
 
-#if LDY_LOG
-			rfuse_commit_dequeue_burst(&mt->sleep_ctx);
-			mt->sleep_ctx.sleep_calls++;
-			mt->sleep_ctx.forget_miss_before_sleep++;
-			mt->sleep_ctx.sleep_blocked_calls++;
-#endif
-
 			pthread_mutex_unlock(&mt->lock);
-#if LDY_LOG
-			sleep_start_ns = rfuse_now_ns();
-#endif
 			res = ioctl(mt->se->fd, RFUSE_DAEMON_SLEEP, &args);
-#if LDY_LOG
-			sleep_end_ns = rfuse_now_ns();
-			mt->sleep_ctx.last_wake_ns = sleep_end_ns;
-			rfuse_sleep_stat_record(&mt->sleep_ctx.sleep_block_ns,
-					       sleep_end_ns - sleep_start_ns);
-			pending_depth = rfuse_smp_load_acquire(&riq->pending.tail) - riq->pending.head;
-			rfuse_sleep_stat_record(&mt->sleep_ctx.wake_pending_depth, pending_depth);
-			if (pending_depth > 1)
-				mt->sleep_ctx.wake_with_backlog_calls++;
-#endif
 			if (res == -ENOTCONN) {
 				printf("rfuse: User-level daemon lost connection, exit\n");
 				return NULL;
@@ -448,7 +305,6 @@ void *rfuse_session_loop_mt_mriq(void *data)
 	mt.numworker = 0;
 	mt.numavail = 0;
 	mt.max_idle = config->max_idle_threads;
-	rfuse_sleep_ctx_init(&mt.sleep_ctx);
 	mt.main.thread_id = pthread_self();
 	mt.main.prev = mt.main.next = &mt.main;
 	mt.riq_id = riq_id;
@@ -483,7 +339,6 @@ void *rfuse_session_loop_mt_mriq(void *data)
 
 	pthread_mutex_destroy(&mt.lock);
 	sem_destroy(&mt.finish);
-	rfuse_sleep_ctx_dump(&mt);
 
 	if(se->error != 0)
 		err = se->error;

@@ -46,14 +46,6 @@ enum fuse_req_flag {
 #define CLEAR_BIT(x, pos) (x &= (~(1U << pos)))
 #define TEST_BIT(x, pos) (x & (1UL << pos) )
 
-#ifndef LOOKUP_LOG
-#define LOOKUP_LOG 0
-#endif
-
-#ifndef LDY_LOG
-#define LDY_LOG 0
-#endif
-
 /**
  * The following MACROs are used in "liburing/src/include/liburing/barrier.h"
  * The io_uring 'modifies' the ring buffers 'head' in the user space and 
@@ -308,28 +300,6 @@ struct rfuse_main_worker {
 	struct rfuse_loop_args args;
 };
 
-struct rfuse_daemon_sleep_stat {
-	uint64_t count;
-	uint64_t total_ns;
-	uint64_t min_ns;
-	uint64_t max_ns;
-};
-
-struct rfuse_daemon_sleep_ctx {
-	uint64_t sleep_calls;
-	uint64_t last_wake_ns;
-	uint64_t sleep_blocked_calls;
-	uint64_t pending_seen_before_sleep;
-	uint64_t forget_miss_before_sleep;
-	uint64_t wake_with_backlog_calls;
-	uint64_t burst_reqs_total;
-	uint64_t current_burst_len;
-	struct rfuse_daemon_sleep_stat sleep_block_ns;
-	struct rfuse_daemon_sleep_stat wake_to_read_ns;
-	struct rfuse_daemon_sleep_stat wake_pending_depth;
-	struct rfuse_daemon_sleep_stat dequeue_burst_len;
-};
-
 struct rfuse_worker {
 	struct rfuse_worker *prev;
 	struct rfuse_worker *next;
@@ -356,7 +326,6 @@ struct rfuse_mt {
 	int clone_fd;
 	int max_idle;
 	int riq_id;
-	struct rfuse_daemon_sleep_ctx sleep_ctx;
 };
 // ******************************* rfuse_lowlevel.c Operations ******************************* //
 /**
