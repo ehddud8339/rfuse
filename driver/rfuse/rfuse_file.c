@@ -1395,34 +1395,10 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 	bool partial_extend = pos < inode_size && end_pos > inode_size;
 	bool append_like = pos >= inode_size;
 
-	/*
-	 * WAL은 append가 기본이라 일반 분류값만으로는 INSERT/UPDATE 차이가
-	 * 잘 안 보인다. frame 경계 기준으로 찍어야 payload/header 묶음을
-	 * 비교할 수 있다.
-	 */
-	if (file_name_len >= 4 && !strcmp(file_name + file_name_len - 4, "-wal")) {
-		if (pos >= 32) {
-			u64 wal_pos = pos - 32;
-			u64 frame_idx = div_u64(wal_pos, 24 + 4096);
-			u32 frame_off = wal_pos % (24 + 4096);
-			bool wal_header = frame_off < 24;
-			bool wal_payload = frame_off >= 24;
-
-			printk("rfuse_write_wal file=%s async=%d pos=%lld count=%zu isize=%lld frame=%llu frame_off=%u header=%d payload=%d flags=0x%x\n",
-			       file_name, async, pos, write_count, inode_size, frame_idx,
-			       frame_off, wal_header, wal_payload,
-			       rfuse_write_flags(iocb));
-		} else {
-			printk("rfuse_write_wal file=%s async=%d pos=%lld count=%zu isize=%lld wal_header=1 wal_file_header=1 flags=0x%x\n",
-			       file_name, async, pos, write_count, inode_size,
-			       rfuse_write_flags(iocb));
-		}
-	} else {
-		printk("rfuse_write file=%s async=%d pos=%lld count=%zu isize=%lld extend=%d overwrite=%d partial_extend=%d append_like=%d flags=0x%x\n",
-		       file_name, async, pos, write_count, inode_size, extending,
-		       overwrite, partial_extend, append_like,
-		       rfuse_write_flags(iocb));
-	}
+	printk("rfuse_write file=%s async=%d pos=%lld count=%zu isize=%lld extend=%d overwrite=%d partial_extend=%d append_like=%d flags=0x%x\n",
+		      file_name, async, pos, write_count, inode_size, extending,
+		      overwrite, partial_extend, append_like,
+		      rfuse_write_flags(iocb));	
 
 	if (async)
 		goto async;
@@ -1517,6 +1493,11 @@ async:
       }
       */
       r_req = try_rfuse_get_req(fm, true, false, NULL);
+			if (IS_ERR(r_req)) {
+				err = PTR_ERR(r_req);
+				rfuse_io_free(ria);
+				break;
+			}
 			ria->r_req = r_req;
 #if LDY_LOG
 			rfuse_write_lat_set_branch(r_req, RFUSE_WRITE_LAT_ASYNC);
@@ -1792,6 +1773,23 @@ __acquires(fi->lock)
 	int err;
 
 	r_req = try_rfuse_get_req(fm, true, true, &fi->lock);
+	if (IS_ERR(r_req)) {
+		err = PTR_ERR(r_req);
+		spin_lock(&fi->lock);
+		rb_erase(&r_wpa->writepages_entry, &fi->writepages);
+		rfuse_writepage_finish(fm, r_wpa);
+		spin_unlock(&fi->lock);
+
+		for (aux = r_wpa->next; aux; aux = next) {
+			next = aux->next;
+			aux->next = NULL;
+			rfuse_writepage_free(aux);
+		}
+
+		rfuse_writepage_free(r_wpa);
+		spin_lock(&fi->lock);
+		return;
+	}
 
 	ria->r_req = r_req;
 	r_req->in_pages = true;
@@ -2471,6 +2469,20 @@ void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, int is_a
 		r_req = try_rfuse_get_req(fm, true, false, NULL);
 	else 
 		r_req = rfuse_get_req(fm, false, false);
+	if (IS_ERR(r_req)) {
+		int i;
+
+		err = PTR_ERR(r_req);
+		for (i = 0; i < rp->num_pages; i++) {
+			struct page *page = rp->pages[i];
+
+			SetPageError(page);
+			unlock_page(page);
+			put_page(page);
+		}
+		rfuse_io_free(ria);
+		return;
+	}
 		
 	ria->r_req = r_req;
 
