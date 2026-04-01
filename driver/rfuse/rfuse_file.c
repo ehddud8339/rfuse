@@ -45,22 +45,32 @@ static void rfuse_sync_writes(struct inode *inode)
 static void rfuse_account_inode_write_start(struct inode *inode)
 {
 	struct fuse_inode *fi = get_fuse_inode(inode);
+	int old_writectr;
+	int new_writectr;
 
 	spin_lock(&fi->lock);
 	WARN_ON(fi->writectr < 0);
+	old_writectr = fi->writectr;
 	fi->writectr++;
+	new_writectr = fi->writectr;
 	spin_unlock(&fi->lock);
+
+	pr_info("rfuse_writectr_inc ino=%lu nodeid=%llu pid=%d cpu=%d old=%d new=%d\n",
+		inode->i_ino, get_node_id(inode), current->pid, task_cpu(current),
+		old_writectr, new_writectr);
 }
 
 static void rfuse_account_inode_write_end(struct inode *inode)
 {
 	struct fuse_inode *fi = get_fuse_inode(inode);
+	int old_writectr;
 	int writectr;
 	bool wake_page_waitq;
 
 	spin_lock(&fi->lock);
 	WARN_ON(fi->writectr == 0 || fi->writectr == FUSE_NOWRITE ||
 		fi->writectr < FUSE_NOWRITE);
+	old_writectr = fi->writectr;
 	writectr = --fi->writectr;
 	/*
 	 * page_waitq waiter는 현재 두 종류뿐이다.
@@ -70,6 +80,11 @@ static void rfuse_account_inode_write_end(struct inode *inode)
 	 */
 	wake_page_waitq = writectr == 0 || writectr == FUSE_NOWRITE;
 	spin_unlock(&fi->lock);
+
+	pr_info("rfuse_writectr_dec ino=%lu nodeid=%llu pid=%d cpu=%d old=%d new=%d wake=%d\n",
+		inode->i_ino, get_node_id(inode), current->pid, task_cpu(current),
+		old_writectr, writectr, wake_page_waitq);
+
 	if (wake_page_waitq)
 		wake_up(&fi->page_waitq);
 }
