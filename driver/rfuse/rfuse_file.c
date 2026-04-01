@@ -1390,16 +1390,17 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 	int err = 0;
 	ssize_t res = 0;
 	bool async = rfuse_async_allowed(iocb, inode, pos, ii);
+  /*
 	bool extending = inode_size < end_pos;
 	bool overwrite = end_pos <= inode_size;
 	bool partial_extend = pos < inode_size && end_pos > inode_size;
 	bool append_like = pos >= inode_size;
 
-	/*
+   *
 	 * WAL은 append가 기본이라 일반 분류값만으로는 INSERT/UPDATE 차이가
 	 * 잘 안 보인다. frame 경계 기준으로 찍어야 payload/header 묶음을
 	 * 비교할 수 있다.
-	 */
+	 *
 	if (file_name_len >= 4 && !strcmp(file_name + file_name_len - 4, "-wal")) {
 		if (pos >= 32) {
 			u64 wal_pos = pos - 32;
@@ -1423,7 +1424,7 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 		       overwrite, partial_extend, append_like,
 		       rfuse_write_flags(iocb));
 	}
-
+*/
 	if (async)
 		goto async;
 
@@ -1509,13 +1510,7 @@ async:
 				break;
 			}
 
-      /*
-      if (extending) {
-        r_req = rfuse_get_req(fm, true, false);
-      } else {
-  			r_req = try_rfuse_get_req(fm, true, false, NULL);
-      }
-      */
+      // r_req = rfuse_get_req(fm, true, false);
       r_req = try_rfuse_get_req(fm, true, false, NULL);
 			ria->r_req = r_req;
 #if LDY_LOG

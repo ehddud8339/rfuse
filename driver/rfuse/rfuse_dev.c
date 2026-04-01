@@ -29,7 +29,8 @@
  */
 
 #define RFUSE_SELECTION_ALGO 2
-#define RFUSE_ASYNC_RIQ_THRESHOLD 8
+#define WAY 10
+#define RFUSE_ASYNC_RIQ_THRESHOLD 12
 atomic_t rr_id = ATOMIC_INIT(0);
 
 
@@ -699,9 +700,17 @@ static int select_thread_id(void){
 }
 
 static int select_cpu_id(void){
+  /*
 	int ret = task_cpu(current);
 	
 	return (ret % RFUSE_NUM_IQUEUE);
+  */
+  int ret = task_cpu(current);
+	int sets, c_tp, c_op;
+	sets = ret % WAY;
+	c_tp = sets * (RFUSE_NUM_IQUEUE / WAY);
+	c_op = ret % (RFUSE_NUM_IQUEUE / WAY);
+	return (c_tp + c_op);
 }
 
 static unsigned int rfuse_async_riq_load(struct rfuse_iqueue *riq)
