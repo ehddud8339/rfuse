@@ -954,7 +954,7 @@ static ssize_t rfuse_fill_write_pages(struct rfuse_io_args *ria, struct address_
 		if (!page)
 			break;
 
-		rfuse_wait_on_page_writeback(mapping->host, index);
+		// rfuse_wait_on_page_writeback(mapping->host, index);
 
 		if (mapping_writably_mapped(mapping))
 			flush_dcache_page(page);
