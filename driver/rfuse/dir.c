@@ -1434,6 +1434,7 @@ static void __fuse_release_nowrite(struct inode *inode)
 
 	BUG_ON(fi->writectr != FUSE_NOWRITE);
 	fi->writectr = 0;
+	wake_up(&fi->page_waitq);
 	fuse_flush_writepages(inode);
 }
 

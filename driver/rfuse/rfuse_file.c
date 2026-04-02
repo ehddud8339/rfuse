@@ -85,18 +85,16 @@ static bool rfuse_async_allowed(struct kiocb *iocb, struct inode *inode,
 	unsigned int flags = rfuse_write_flags(iocb);
 	bool on = true;
 
-	(void)inode;
-	(void)pos;
-	(void)ii;
-
 	if (!on)
 		return false;
 
 	if (flags & IOCB_APPEND) {
+    printk("RFUSE: IOCB_APPEND -> sync write fallback\n");
 		return false;
 	}
 
 	if (flags & (O_SYNC | O_DSYNC)) {
+    printk("RFUSE: O_SYNC | O_DSYNC -> sync write fallback\n");
 		return false;
 	}
 
@@ -209,12 +207,8 @@ int rfuse_flush(struct file *file, fl_owner_t id)
 		return -EIO;
 
 	inode_lock(inode);
-	/*
-	 * close 경계에서는 현재 inode에 이미 제출된 async write가 모두 끝난 뒤
-	 * FLUSH를 보낸다. 이 patch는 close를 다시 inode 단위 drain point로
-	 * 되돌리는 것이 목적이므로, fsync처럼 추가 metadata sync는 하지 않는다.
-	 */
-	rfuse_sync_writes(inode);
+	
+  // rfuse_sync_writes(inode);
 
 	if (fm->fc->no_flush)
 		goto out_unlock;
@@ -1073,18 +1067,20 @@ static ssize_t rfuse_fill_write_pages(struct rfuse_io_args *ria, struct address_
 
 		bytes = min_t(size_t, bytes, fc->max_write - count);
 
- again:
-		err = -EFAULT;
-		if (iov_iter_fault_in_readable(ii, bytes))
-			break;
+	 again:
+			err = -EFAULT;
+			if (iov_iter_fault_in_readable(ii, bytes))
+				break;
 
-		err = -ENOMEM;
-		page = grab_cache_page_write_begin(mapping, index, 0);
-		if (!page)
-			break;
+			err = -ENOMEM;
+			page = grab_cache_page_write_begin(mapping, index, 0);
+			if (!page)
+				break;
 
-		if (mapping_writably_mapped(mapping))
-			flush_dcache_page(page);
+			rfuse_wait_on_page_writeback(mapping->host, index);
+
+			if (mapping_writably_mapped(mapping))
+				flush_dcache_page(page);
 
 		tmp = copy_page_from_iter_atomic(page, offset, bytes, ii);
 		flush_dcache_page(page);
@@ -1268,18 +1264,14 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 				 struct kiocb *iocb, struct inode *inode,
 				 loff_t pos, size_t count)
 {
-	struct rfuse_pages *rp = &ria->rp;
+	//struct rfuse_pages *rp = &ria->rp;
 	struct file *file = iocb->ki_filp;
 	struct fuse_file *ff = file->private_data;
 	struct fuse_mount *fm = ff->fm;
 	struct fuse_io_priv *io = ria->io;
 	struct fuse_write_in *in;
-	unsigned int i;
 	ssize_t err;
 	ria->r_req->in_pages = true;
-
-	for (i = 0; i < rp->num_pages; i++)
-		rfuse_wait_on_page_writeback(inode, rp->pages[i]->index);
 
 	rfuse_write_args_fill(ria, ff, pos, count);
 
@@ -1329,8 +1321,8 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 	ssize_t res = 0;
 	bool async = rfuse_async_allowed(iocb, inode, pos, ii);
 	bool extending = inode_size < end_pos;
-	bool async_extending = async && extending;
-	if (async_extending)
+
+	if (async && extending)
 		set_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
 
 	if (async)
@@ -1384,14 +1376,14 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 async:
 	{
 		loff_t offset = pos;
-			size_t count = iov_iter_count(ii);
-			struct fuse_io_priv *io;
+		size_t count = iov_iter_count(ii);
+		struct fuse_io_priv *io;
 
-			io = rfuse_io_args_init(iocb, inode, offset);
-			if (!io) {
-				clear_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
-				return -ENOMEM;
-			}
+		io = rfuse_io_args_init(iocb, inode, offset);
+		if (!io) {
+			clear_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
+			return -ENOMEM;
+		}
 
 		while (count) {
 			struct rfuse_io_args *ria;
@@ -1408,8 +1400,9 @@ async:
 			}
 
 			r_req = try_rfuse_get_req(fm, true, false, NULL);
+      // r_req = rfuse_get_req(fm, true, false);
 			if (IS_ERR(r_req)) {
-        printk("RFUSE: try_rfuse_get_req failed\n");
+        printk("RFUSE: request allocation failed\n");
 				err = PTR_ERR(r_req);
 				rfuse_io_free(ria);
 				break;
@@ -2278,7 +2271,7 @@ int rfuse_do_readpage(struct file *file, struct page *page){
 	if (pos + (desc.length - 1) == LLONG_MAX)
 		desc.length--;
 
-	rfuse_read_wait_async_writes(inode);
+	//rfuse_read_wait_async_writes(inode);
 	rfuse_read_args_fill(&ria, file, pos, desc.length, FUSE_READ);
 	res = rfuse_simple_request(r_req);
 	rfuse_put_request(r_req);
@@ -2408,7 +2401,7 @@ void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, int is_a
 	}
 	WARN_ON((loff_t) (pos + count) < 0);
 
-	rfuse_read_wait_async_writes(file_inode(file));
+	//rfuse_read_wait_async_writes(file_inode(file));
 	rfuse_read_args_fill(ria, file, pos, count, FUSE_READ);
 	ria->read.attr_ver = fuse_get_attr_version(fm->fc);
 	if (is_async) {
@@ -2483,7 +2476,7 @@ static ssize_t rfuse_send_read(struct rfuse_io_args *ria, loff_t pos, size_t cou
 	ria->r_req = r_req;
 	ria->r_req->out_pages = true;
 
-	rfuse_read_wait_async_writes(inode);
+	//rfuse_read_wait_async_writes(inode);
 	inarg = (struct fuse_read_in *)&r_req->args;
 	rfuse_read_args_fill(ria, file, pos, count, FUSE_READ);
 	if (owner != NULL) {

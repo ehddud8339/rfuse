@@ -13,6 +13,7 @@
 
 #define RFUSE_NUM_IQUEUE     40           // Number of rfuse iqueue
 #define RFUSE_MAX_QUEUE_SIZE 1024*4      // Maximum number of requests in a queue
+#define RFUSE_ASYNC_PENDING_RR_THRESHOLD 2
 
 #define RFUSE_RIQ_ID_MASK    0x00ff0000ULL
 #define RFUSE_QUEUE_MAP_MASK 0xff000000ULL
