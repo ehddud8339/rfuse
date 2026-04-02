@@ -2271,7 +2271,7 @@ int rfuse_do_readpage(struct file *file, struct page *page){
 	if (pos + (desc.length - 1) == LLONG_MAX)
 		desc.length--;
 
-	//rfuse_read_wait_async_writes(inode);
+	rfuse_read_wait_async_writes(inode);
 	rfuse_read_args_fill(&ria, file, pos, desc.length, FUSE_READ);
 	res = rfuse_simple_request(r_req);
 	rfuse_put_request(r_req);
@@ -2401,7 +2401,7 @@ void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, int is_a
 	}
 	WARN_ON((loff_t) (pos + count) < 0);
 
-	//rfuse_read_wait_async_writes(file_inode(file));
+	rfuse_read_wait_async_writes(file_inode(file));
 	rfuse_read_args_fill(ria, file, pos, count, FUSE_READ);
 	ria->read.attr_ver = fuse_get_attr_version(fm->fc);
 	if (is_async) {
@@ -2476,7 +2476,7 @@ static ssize_t rfuse_send_read(struct rfuse_io_args *ria, loff_t pos, size_t cou
 	ria->r_req = r_req;
 	ria->r_req->out_pages = true;
 
-	//rfuse_read_wait_async_writes(inode);
+	rfuse_read_wait_async_writes(inode);
 	inarg = (struct fuse_read_in *)&r_req->args;
 	rfuse_read_args_fill(ria, file, pos, count, FUSE_READ);
 	if (owner != NULL) {
