@@ -398,16 +398,16 @@ static unsigned int rfuse_pending_depth(struct rfuse_iqueue *riq)
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc){
-  /*
+  
 	int id = select_cpu_id();
 	struct rfuse_iqueue *riq = fc->riq[id];
-  
+  /*
 	if (rfuse_pending_depth(riq) >= RFUSE_ASYNC_PENDING_RR_THRESHOLD)
 		return fc->riq[select_round_robin(fc)];
-  
-	return riq;
   */
-  return fc->riq[select_round_robin(fc)];
+	return riq;
+  
+  // return fc->riq[select_round_robin(fc)];
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue(struct fuse_conn *fc){

@@ -52,7 +52,7 @@ static void rfuse_account_inode_write_end(struct inode *inode)
 
 	spin_lock(&fi->lock);
 	WARN_ON(fi->writectr == 0 || fi->writectr == FUSE_NOWRITE ||
-		fi->writectr < FUSE_NOWRITE);
+		      fi->writectr < FUSE_NOWRITE);
 	writectr = --fi->writectr;
 	/*
 	 * page_waitq waiter는 현재 두 종류뿐이다.
@@ -640,15 +640,33 @@ static ssize_t rfuse_get_res_by_io(struct fuse_io_priv *io)
 	return io->bytes < 0 ? io->size : io->bytes;
 }
 
+static void rfuse_finish_async_write_size(struct inode *inode,
+					  struct fuse_io_priv *io)
+{
+	struct fuse_conn *fc = get_fuse_conn(inode);
+	struct fuse_inode *fi = get_fuse_inode(inode);
+	loff_t size = io->offset + (io->bytes < 0 ? io->size : io->bytes);
+
+	spin_lock(&fi->lock);
+	if (size < inode->i_size) {
+		fi->attr_version = atomic64_inc_return(&fc->attr_version);
+		i_size_write(inode, size);
+	}
+	clear_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
+	spin_unlock(&fi->lock);
+
+	fuse_invalidate_attr(inode);
+}
+
 static void rfuse_aio_complete(struct fuse_io_priv *io, int err, ssize_t pos)
 {
 	int left;
 
 	spin_lock(&io->lock);
+	if (pos >= 0 && (io->bytes < 0 || pos < io->bytes))
+		io->bytes = pos;
 	if (err)
 		io->err = io->err ? : err;
-	else if (pos >= 0 && (io->bytes < 0 || pos < io->bytes))
-		io->bytes = pos;
 
 	left = --io->reqs;
 	if (!left && io->blocking)
@@ -665,10 +683,7 @@ static void rfuse_aio_complete(struct fuse_io_priv *io, int err, ssize_t pos)
 			inode = file_inode(io->iocb->ki_filp);
 
 		if (io->bwrite_async) {
-			struct fuse_inode *fi = get_fuse_inode(inode);
-
-			clear_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
-			fuse_invalidate_attr(inode);
+			rfuse_finish_async_write_size(inode, io);
 		} else {
 			if (res >= 0) {
 				struct fuse_conn *fc = get_fuse_conn(inode);
@@ -1250,7 +1265,9 @@ static void rfuse_bwrite_complete_req(struct fuse_mount *fm, struct rfuse_req *r
 		err = -EIO;
 
 	short_write = !err && outarg->size < ria->write.in.size;
-	if (short_write)
+	if (err)
+		pos = ria->write.in.offset - io->offset;
+	else if (short_write)
 		pos = ria->write.in.offset - io->offset + outarg->size;
 
 	count = err ? 0 : outarg->size;
