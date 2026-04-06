@@ -1119,7 +1119,7 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 			break;
 		}
 
-   		r_req = rfuse_get_req(fm, false, false); 
+   	r_req = rfuse_get_req(fm, false, false); 
 		ria.r_req = r_req;
 
 		count = rfuse_fill_write_pages(&ria, mapping, ii, pos, nr_pages);
@@ -1405,7 +1405,7 @@ __acquires(fi->lock)
 	struct rfuse_io_args *ria = &r_wpa->ria;
 	__u64 data_size = r_wpa->ria.rp.num_pages * PAGE_SIZE;
 	int err;
-
+  // printk("test\n");
 	r_req = try_rfuse_get_req(fm, true, true, &fi->lock);
 
 	ria->r_req = r_req;
@@ -1428,10 +1428,11 @@ __acquires(fi->lock)
 	r_req->in.arglen[0] = inarg->size;
 	r_req->end = rfuse_writepage_end;
 
+  /*
 	err = rfuse_prepare_payload(r_req, false);
 	if (err)
 		goto out_free;
-
+  */
 	err = rfuse_simple_background(fm, r_req);
 	/* Fails on broken connection only */
 	if (unlikely(err))
