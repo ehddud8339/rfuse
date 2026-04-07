@@ -318,6 +318,8 @@ struct dentry *rfuse_lookup(struct inode *dir, struct dentry *entry, unsigned in
 		return ERR_PTR(-EIO);
 
 	r_req = rfuse_get_req(fm, false, false); // Rfuse test
+	if (IS_ERR(r_req))
+		return ERR_PTR(PTR_ERR(r_req));
 	locked = fuse_lock_inode(dir);
 	err = rfuse_lookup_name(dir->i_sb, get_node_id(dir), &entry->d_name, r_req, &inode);
 	fuse_unlock_inode(dir, locked);
@@ -400,12 +402,17 @@ int rfuse_dentry_revalidate(struct dentry *entry, unsigned int flags){
 
 		fm = get_fuse_mount(inode);
 		
-		attr_version = fuse_get_attr_version(fm->fc);
-		parent = dget_parent(entry);
-		parent_nodeid = get_node_id(d_inode(parent));
+			attr_version = fuse_get_attr_version(fm->fc);
+			parent = dget_parent(entry);
+			parent_nodeid = get_node_id(d_inode(parent));
 
-		r_req = rfuse_get_req(fm, false, false); // Rfuse test
-		riq = rfuse_get_specific_iqueue(fm->fc, r_req->riq_id);
+			r_req = rfuse_get_req(fm, false, false); // Rfuse test
+			if (IS_ERR(r_req)) {
+				ret = PTR_ERR(r_req);
+				dput(parent);
+				goto out;
+			}
+			riq = rfuse_get_specific_iqueue(fm->fc, r_req->riq_id);
 		rfuse_lookup_init(fm,r_req,parent_nodeid,&entry->d_name);
 		ret = rfuse_simple_request(r_req);
 		rfuse_req_allocated = true;
@@ -545,6 +552,10 @@ int rfuse_do_setattr(struct dentry *dentry, struct iattr *attr, struct file *fil
 
 
 	r_req = rfuse_get_req(fm, false, false);
+	if (IS_ERR(r_req)) {
+		err = PTR_ERR(r_req);
+		goto out;
+	}
 	inarg = (struct fuse_setattr_in*)(&r_req->args);
 
 	rfuse_iattr_to_fattr(fc, attr, inarg, trust_local_cmtime);
@@ -654,6 +665,8 @@ int rfuse_rmdir(struct inode *dir, struct dentry *entry){
 		return -EIO;
 	
 	r_req = rfuse_get_req(fm, false, false);
+	if (IS_ERR(r_req))
+		return PTR_ERR(r_req);
 	riq = rfuse_get_specific_iqueue(fm->fc, r_req->riq_id);
 	argument_index = rfuse_get_argument_buffer(fm, r_req->riq_id);
 	arg = (struct rfuse_arg*)&riq->karg[argument_index];
@@ -760,6 +773,8 @@ int rfuse_mkdir(struct user_namespace *mnt_userns, struct inode *dir,
 		mode &= ~current_umask();
 
 	r_req = rfuse_get_req(fm, false, false);
+	if (IS_ERR(r_req))
+		return PTR_ERR(r_req);
 	riq = rfuse_get_specific_iqueue(fm->fc, r_req->riq_id);
 	in_argument_index = rfuse_get_argument_buffer(fm, r_req->riq_id);
 	inarg = (struct fuse_mkdir_in*)(&r_req->args); // Specific header
@@ -820,6 +835,10 @@ int rfuse_create_open(struct inode *dir, struct dentry *entry,
 
 	flags &= ~O_NOCTTY;
 	r_req = rfuse_get_req(fm, false, false);
+	if (IS_ERR(r_req)) {
+		err = PTR_ERR(r_req);
+		goto out_free_ff;
+	}
 	riq = rfuse_get_specific_iqueue(fm->fc, r_req->riq_id);
 	in_argument_index = rfuse_get_argument_buffer(fm, r_req->riq_id);
 	increate = (struct fuse_create_in*)(&r_req->args); // Specific header
@@ -910,6 +929,8 @@ int rfuse_unlink(struct inode *dir, struct dentry *entry)
 		return -EIO;
 
 	r_req = rfuse_get_req(fm, false, false);
+	if (IS_ERR(r_req))
+		return PTR_ERR(r_req);
 	riq = rfuse_get_specific_iqueue(fm->fc, r_req->riq_id);
 	in_argument_index = rfuse_get_argument_buffer(fm, r_req->riq_id);
 	in_arg = (struct rfuse_arg*)&riq->karg[in_argument_index]; // Argument
@@ -964,6 +985,8 @@ int rfuse_access(struct inode *inode, int mask)
 		return 0;
 
 	r_req = rfuse_get_req(fm, false, false);
+	if (IS_ERR(r_req))
+		return PTR_ERR(r_req);
 	inarg = (struct fuse_access_in*)(&r_req->args);
 	
 	inarg->mask = mask & (MAY_READ | MAY_WRITE | MAY_EXEC);
@@ -994,6 +1017,8 @@ int rfuse_flush_times(struct inode *inode, struct fuse_file *ff)
 	int res;
 
 	r_req = rfuse_get_req(fm, false, false);
+	if (IS_ERR(r_req))
+		return PTR_ERR(r_req);
 	inarg = (struct fuse_setattr_in*)(&r_req->args);
 
 	memset(&outarg, 0, sizeof(outarg));
@@ -1035,6 +1060,8 @@ int rfuse_rename_common(struct inode *olddir, struct dentry *oldent,
 	unsigned int in_arg2_index;
 
 	r_req = rfuse_get_req(fm, false, false);
+	if (IS_ERR(r_req))
+		return PTR_ERR(r_req);
 	riq = rfuse_get_specific_iqueue(fm->fc, r_req->riq_id);
 	inarg = (struct fuse_rename2_in*)(&r_req->args); // Specific header
 
@@ -1109,6 +1136,8 @@ int rfuse_symlink(struct user_namespace *mnt_userns, struct inode *dir,
 	unsigned int in_arg2_index;
 
 	r_req = rfuse_get_req(fm, false, false);
+	if (IS_ERR(r_req))
+		return PTR_ERR(r_req);
 	riq = rfuse_get_specific_iqueue(fm->fc, r_req->riq_id);
 
 	in_arg1_index = rfuse_get_argument_buffer(fm, r_req->riq_id);
@@ -1143,6 +1172,8 @@ int rfuse_link(struct dentry *entry, struct inode *newdir,
 	unsigned int in_arg1_index;
 
 	r_req = rfuse_get_req(fm, false, false);
+	if (IS_ERR(r_req))
+		return PTR_ERR(r_req);
 	riq = rfuse_get_specific_iqueue(fm->fc, r_req->riq_id);
 	inarg = (struct fuse_link_in *)(&r_req->args);
 	in_arg1_index = rfuse_get_argument_buffer(fm, r_req->riq_id);
@@ -1195,6 +1226,8 @@ int rfuse_readlink_page(struct inode *inode, struct page *page)
 
 	struct rfuse_req *r_req;
 	r_req = rfuse_get_req(fm, false, false);	
+	if (IS_ERR(r_req))
+		return PTR_ERR(r_req);
 
 	r_req->in.opcode = FUSE_READLINK;
 	r_req->in.nodeid = get_node_id(inode);

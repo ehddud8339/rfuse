@@ -881,12 +881,16 @@ static struct dentry *fuse_get_dentry(struct super_block *sb,
 		const struct qstr name = QSTR_INIT(".", 1);
 		struct fuse_mount *fm = get_fuse_mount_super(sb);
 
-		if (!fc->export_support)
-			goto out_err;
+			if (!fc->export_support)
+				goto out_err;
 
-		r_req = rfuse_get_req(fm,false, false);
-		err = rfuse_lookup_name(sb, handle->nodeid, &name, r_req, &inode);
-		rfuse_put_request(r_req);
+			r_req = rfuse_get_req(fm,false, false);
+			if (IS_ERR(r_req)) {
+				err = PTR_ERR(r_req);
+				goto out_err;
+			}
+			err = rfuse_lookup_name(sb, handle->nodeid, &name, r_req, &inode);
+			rfuse_put_request(r_req);
 		
 		if (err && err != -ENOENT)
 			goto out_err;
@@ -988,6 +992,8 @@ static struct dentry *fuse_get_parent(struct dentry *child)
 		return ERR_PTR(-ESTALE);
 
 	r_req = rfuse_get_req(fm, false, false);
+	if (IS_ERR(r_req))
+		return ERR_PTR(PTR_ERR(r_req));
 	err = rfuse_lookup_name(child_inode->i_sb, get_node_id(child_inode), &dotdot_name, r_req, &inode);
 	rfuse_put_request(r_req); 
 
