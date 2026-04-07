@@ -931,6 +931,12 @@ struct rfuse_req *rfuse_get_req(struct fuse_mount *fm, bool for_background, bool
 		atomic_inc(&fc->num_waiting);
 
 		r_req = rfuse_request_alloc(fm);
+		err = -ENOMEM;
+		if (!r_req) {
+			if (for_background)
+				wake_up(&fc->blocked_waitq);
+			goto out;
+		}
 
 		__set_bit(FR_WAITING, &r_req->flags);
 		if(for_background){

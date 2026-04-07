@@ -338,6 +338,10 @@ int rfuse_readdir_uncached(struct file *file, struct dir_context *ctx)
 
 	plus = rfuse_use_readdirplus(inode, ctx);
 	r_req = rfuse_get_req(fm, false, false); 
+	if (IS_ERR(r_req)) {
+		__free_page(page);
+		return PTR_ERR(r_req);
+	}
 	ria.r_req = r_req;
 
 	r_req->out_pages = true;
