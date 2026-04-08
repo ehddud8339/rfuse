@@ -954,6 +954,8 @@ static ssize_t rfuse_fill_write_pages(struct rfuse_io_args *ria, struct address_
 		if (!page)
 			break;
 
+		// rfuse_wait_on_page_writeback(mapping->host, index);
+
 		if (mapping_writably_mapped(mapping))
 			flush_dcache_page(page);
 
@@ -1382,6 +1384,23 @@ __acquires(fi->lock)
 	int err;
 
 	r_req = try_rfuse_get_req(fm, true, true, &fi->lock);
+	if (IS_ERR(r_req)) {
+		err = PTR_ERR(r_req);
+		spin_lock(&fi->lock);
+		rb_erase(&r_wpa->writepages_entry, &fi->writepages);
+		rfuse_writepage_finish(fm, r_wpa);
+		spin_unlock(&fi->lock);
+
+		for (aux = r_wpa->next; aux; aux = next) {
+			next = aux->next;
+			aux->next = NULL;
+			rfuse_writepage_free(aux);
+		}
+
+		rfuse_writepage_free(r_wpa);
+		spin_lock(&fi->lock);
+		return;
+	}
 
 	ria->r_req = r_req;
 	r_req->in_pages = true;

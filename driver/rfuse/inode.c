@@ -792,6 +792,13 @@ void fuse_conn_init(struct fuse_conn *fc, struct fuse_mount *fm,
 	fc->blocked = 0;
 	fc->initialized = 0;
 	fc->connected = 1;
+	spin_lock_init(&fc->rfuse_stats.lock);
+	{
+		int i;
+
+		for (i = 0; i < RFUSE_STAT_OP_MAX; i++)
+			fc->rfuse_stats.ops[i].min_ns = U64_MAX;
+	}
 	atomic64_set(&fc->attr_version, 1);
 	get_random_bytes(&fc->scramble_key, sizeof(fc->scramble_key));
 	fc->pid_ns = get_pid_ns(task_active_pid_ns(current));
@@ -1592,6 +1599,8 @@ EXPORT_SYMBOL_GPL(fuse_mount_remove);
 void fuse_conn_destroy(struct fuse_mount *fm)
 {
 	struct fuse_conn *fc = fm->fc;
+
+	rfuse_stats_dump(fc);
 	if (fc->destroy)
 		fuse_send_destroy(fm);
 	
