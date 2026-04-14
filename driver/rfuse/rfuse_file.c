@@ -1445,8 +1445,8 @@ async:
 				break;
 			}
 
-			// r_req = try_rfuse_get_req(fm, true, false, NULL);
-      r_req = rfuse_get_req(fm, true, false);
+			r_req = try_rfuse_get_req(fm, true, false, NULL);
+      // r_req = rfuse_get_req(fm, true, false);
 			if (IS_ERR(r_req)) {
         printk("RFUSE: request allocation failed\n");
 				err = PTR_ERR(r_req);

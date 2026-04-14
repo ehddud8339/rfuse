@@ -342,7 +342,7 @@ struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc){
   /*
 	int id = select_cpu_id();
 	struct rfuse_iqueue *riq = fc->riq[id];
-	
+  
 	if (rfuse_pending_depth(riq) >= RFUSE_ASYNC_PENDING_RR_THRESHOLD)
 		return fc->riq[select_round_robin(fc)];
 	
@@ -850,18 +850,10 @@ struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background,
 				    bool force, spinlock_t *file_lock)
 {
 	struct fuse_conn *fc = fm->fc;
-	struct rfuse_iqueue *riq = fc->riq[select_round_robin(fc)];
+	struct rfuse_iqueue *riq = rfuse_get_iqueue_for_async(fm->fc);
 
 	return try_rfuse_get_req_common(fm, for_background, force, file_lock,
 					riq);
-}
-
-struct rfuse_req *try_rfuse_get_wr_req(struct fuse_mount *fm,
-				       bool for_background, bool force,
-				       spinlock_t *file_lock)
-{
-	return try_rfuse_get_req_common(fm, for_background, force, file_lock,
-					rfuse_get_iqueue_for_async(fm->fc));
 }
 
 /************ 4. Insert to Queue ************/
