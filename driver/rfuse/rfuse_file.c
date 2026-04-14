@@ -34,6 +34,56 @@ static void rfuse_sync_writes(struct inode *inode)
 	fuse_release_nowrite(inode);
 }
 
+static void rfuse_async_write_begin(struct inode *inode)
+{
+	struct fuse_inode *fi = get_fuse_inode(inode);
+
+	spin_lock(&fi->lock);
+	fi->async_writectr++;
+	spin_unlock(&fi->lock);
+}
+
+static void rfuse_async_write_end(struct inode *inode)
+{
+	struct fuse_inode *fi = get_fuse_inode(inode);
+	bool wake = false;
+
+	spin_lock(&fi->lock);
+	if (WARN_ON(fi->async_writectr <= 0)) {
+		fi->async_writectr = 0;
+	} else {
+		fi->async_writectr--;
+		if (fi->async_writectr == 0)
+			wake = true;
+	}
+	spin_unlock(&fi->lock);
+
+	if (wake)
+		wake_up(&fi->page_waitq);
+}
+
+static bool rfuse_async_writes_inflight(struct inode *inode)
+{
+	struct fuse_inode *fi = get_fuse_inode(inode);
+
+	return READ_ONCE(fi->async_writectr) > 0;
+}
+
+static void rfuse_wait_async_writes(struct inode *inode)
+{
+	struct fuse_inode *fi = get_fuse_inode(inode);
+
+	/*
+	 * half-sync write는 page cache에는 먼저 보일 수 있지만 backing file은
+	 * daemon completion 전까지 stale할 수 있다. backing READ 직전에만
+	 * inode 단위로 drain을 기다려 read-after-write 역전을 막는다.
+	 */
+	if (!rfuse_async_writes_inflight(inode))
+		return;
+
+	wait_event(fi->page_waitq, !rfuse_async_writes_inflight(inode));
+}
+
 static unsigned int rfuse_write_flags(struct kiocb *iocb)
 {
 	unsigned int flags = iocb->ki_filp->f_flags;
@@ -1235,6 +1285,7 @@ static void rfuse_bwrite_complete_req(struct fuse_mount *fm, struct rfuse_req *r
 
 	count = err ? 0 : outarg->size;
 	rfuse_release_bwrite_pages(ria, count, short_write, err);
+	rfuse_async_write_end(io->inode);
 	rfuse_aio_complete(io, err, pos);
 	rfuse_io_free(ria);
 }
@@ -1264,6 +1315,7 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 	io->reqs++;
 	spin_unlock(&io->lock);
 
+	rfuse_async_write_begin(io->inode);
 	ria->r_req->end = rfuse_bwrite_complete_req;
 	err = rfuse_simple_background(fm, ria->r_req);
 	if (err) {
@@ -1271,6 +1323,7 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 		 * background queue에 들어가지 못한 request는 completion callback이
 		 * 호출되지 않으므로, 여기서 page ownership을 직접 되돌린다.
 		 */
+		rfuse_async_write_end(io->inode);
 		rfuse_release_bwrite_pages(ria, 0, false, true);
 		spin_lock(&io->lock);
 		io->size -= count;
@@ -2232,6 +2285,7 @@ int rfuse_do_readpage(struct file *file, struct page *page){
 	ssize_t res;
 	u64 attr_ver;
 
+	rfuse_wait_async_writes(inode);
 	r_req = rfuse_get_req(fm, false, false);
 	if (IS_ERR(r_req))
 		return PTR_ERR(r_req);
@@ -2353,6 +2407,7 @@ void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, int is_a
 	ssize_t res;
 	int err;
 
+	rfuse_wait_async_writes(file_inode(file));
 	// if(is_async)
   if (fm->fc->async_read)
 		r_req = try_rfuse_get_req(fm, true, false, NULL);
@@ -2452,6 +2507,7 @@ static ssize_t rfuse_send_read(struct rfuse_io_args *ria, loff_t pos, size_t cou
 	struct rfuse_req *r_req;
 	int res;
 
+	rfuse_wait_async_writes(file_inode(file));
 	/* Allocate rfuse request for write) */
 	if (ria->io->async) {
 		r_req = rfuse_get_req(fm, true, false);

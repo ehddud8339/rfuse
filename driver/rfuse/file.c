@@ -2378,6 +2378,7 @@ void fuse_init_file_inode(struct inode *inode)
 	INIT_LIST_HEAD(&fi->write_files);
 	INIT_LIST_HEAD(&fi->queued_writes);
 	fi->writectr = 0;
+	fi->async_writectr = 0;
 	init_waitqueue_head(&fi->page_waitq);
 	fi->writepages = RB_ROOT;
 

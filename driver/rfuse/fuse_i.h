@@ -121,6 +121,12 @@ struct fuse_inode {
 			/* Waitq for writepage completion */
 			wait_queue_head_t page_waitq;
 
+			/*
+			 * half-sync buffered write가 daemon completion 전까지
+			 * backing READ를 막기 위해 유지하는 inode 단위 inflight 수
+			 */
+			int async_writectr;
+
 			/* List of writepage requestst (pending or sent) */
 			struct rb_root writepages;
 		};
