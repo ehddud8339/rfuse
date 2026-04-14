@@ -79,6 +79,11 @@ static const char * const rfuse_stat_op_names[RFUSE_STAT_OP_MAX] = {
 	[RFUSE_STAT_OP_REQUEST_END_BG_RELEASE] = "rfuse_request_end_bg_release",
 };
 
+enum rfuse_iqueue_stat_event {
+	RFUSE_IQUEUE_STAT_REQBM_FULL = 0,
+	RFUSE_IQUEUE_STAT_BG_CONGESTION,
+};
+
 static void rfuse_stats_record(struct fuse_conn *fc, enum rfuse_stat_op op,
 			       u64 delta_ns)
 {
@@ -97,6 +102,26 @@ static void rfuse_stats_record(struct fuse_conn *fc, enum rfuse_stat_op op,
 	if (delta_ns > stat->max_ns)
 		stat->max_ns = delta_ns;
 	spin_unlock_irqrestore(&fc->rfuse_stats.lock, flags);
+}
+
+static void rfuse_iqueue_stats_record(struct rfuse_iqueue *riq,
+				      enum rfuse_iqueue_stat_event event)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&riq->stats.lock, flags);
+	switch (event) {
+	case RFUSE_IQUEUE_STAT_REQBM_FULL:
+		riq->stats.reqbm_full_count++;
+		break;
+	case RFUSE_IQUEUE_STAT_BG_CONGESTION:
+		riq->stats.bg_congestion_count++;
+		break;
+	default:
+		WARN_ON(1);
+		break;
+	}
+	spin_unlock_irqrestore(&riq->stats.lock, flags);
 }
 
 void rfuse_stats_dump(struct fuse_conn *fc)
@@ -121,6 +146,23 @@ void rfuse_stats_dump(struct fuse_conn *fc)
 			rfuse_stat_op_names[i], snapshot[i].count,
 			snapshot[i].min_ns == U64_MAX ? 0 : snapshot[i].min_ns,
 			snapshot[i].max_ns, avg_ns, snapshot[i].total_ns);
+	}
+
+	for (i = 0; i < RFUSE_NUM_IQUEUE; i++) {
+		struct rfuse_iqueue *riq = fc->riq[i];
+		u64 reqbm_full_count;
+		u64 bg_congestion_count;
+
+		spin_lock_irqsave(&riq->stats.lock, flags);
+		reqbm_full_count = riq->stats.reqbm_full_count;
+		bg_congestion_count = riq->stats.bg_congestion_count;
+		spin_unlock_irqrestore(&riq->stats.lock, flags);
+
+		if (!reqbm_full_count && !bg_congestion_count)
+			continue;
+
+		pr_info("RFUSE: riq=%d stats reqbm_full=%llu bg_congestion=%llu\n",
+			riq->riq_id, reqbm_full_count, bg_congestion_count);
 	}
 }
 
@@ -243,6 +285,9 @@ void rfuse_iqueue_init(struct fuse_conn *fc, void *priv){
 		riq[i]->active_background = 0;
 
 		riq[i]->num_sync_sleeping = 0;
+		spin_lock_init(&riq[i]->stats.lock);
+		riq[i]->stats.reqbm_full_count = 0;
+		riq[i]->stats.bg_congestion_count = 0;
 	}
 
 	fc->riq = riq;
@@ -398,16 +443,13 @@ static unsigned int rfuse_pending_depth(struct rfuse_iqueue *riq)
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc){
-  
 	int id = select_cpu_id();
 	struct rfuse_iqueue *riq = fc->riq[id];
-  /*
+	/*
 	if (rfuse_pending_depth(riq) >= RFUSE_ASYNC_PENDING_RR_THRESHOLD)
 		return fc->riq[select_round_robin(fc)];
-  */
+	*/
 	return riq;
-  
-  // return fc->riq[select_round_robin(fc)];
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue(struct fuse_conn *fc){
@@ -804,6 +846,7 @@ static uint32_t try_rfuse_get_request_buffer(struct fuse_mount *fm, int riq_id){
 		if(request_index == riq->reqbm.bitmap_size){
 			// There are no empty request buffer
 			riq->reqbm.full = 1; // set to full
+			rfuse_iqueue_stats_record(riq, RFUSE_IQUEUE_STAT_REQBM_FULL);
 			spin_unlock(&riq->lock);
 			return -1;
 		}
@@ -822,9 +865,10 @@ static uint32_t try_rfuse_get_request_buffer(struct fuse_mount *fm, int riq_id){
 	return request_index;
 }
 
-static struct rfuse_req *try_rfuse_request_alloc(struct fuse_mount *fm, spinlock_t *file_lock){
-	struct fuse_conn *fc = fm->fc;
-	struct rfuse_iqueue *riq = rfuse_get_iqueue_for_async(fc);
+static struct rfuse_req *try_rfuse_request_alloc(struct fuse_mount *fm,
+						 spinlock_t *file_lock,
+						 struct rfuse_iqueue *riq)
+{
 	int riq_id = riq->riq_id;
 	struct rfuse_req *r_req = NULL;
 	uint32_t req_index;
@@ -857,16 +901,19 @@ static struct rfuse_req *try_rfuse_request_alloc(struct fuse_mount *fm, spinlock
 	return r_req;
 }
 
-struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background, bool force, spinlock_t *file_lock){
+static struct rfuse_req *try_rfuse_get_req_common(struct fuse_mount *fm,
+						  bool for_background, bool force,
+						  spinlock_t *file_lock,
+						  struct rfuse_iqueue *riq)
+{
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_req *r_req;
-	struct rfuse_iqueue *riq;
 	int err;
 
 	if(force) {
 		atomic_inc(&fc->num_waiting);
 
-		r_req = try_rfuse_request_alloc(fm, file_lock);
+		r_req = try_rfuse_request_alloc(fm, file_lock, riq);
 		err = -ENOMEM;
 		if (!r_req) {
 			if (for_background)
@@ -897,7 +944,7 @@ struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background, 
 			goto out; 
 		}
 
-		r_req = try_rfuse_request_alloc(fm, file_lock);
+		r_req = try_rfuse_request_alloc(fm, file_lock, riq);
 		err = -ENOMEM;
 		if (!r_req) {
 			if (for_background)
@@ -908,7 +955,6 @@ struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background, 
 		// Pass riq_id to find riq if it needs to wait
 		if(rfuse_block_alloc(fc, for_background, r_req->riq_id)){
 			err = -EINTR;
-			riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
 			if (wait_event_killable_exclusive(riq->blocked_waitq, !rfuse_block_alloc(fc, for_background, r_req->riq_id))) {
 				goto out;
 			}	
@@ -937,6 +983,24 @@ out:
 	printk("try r_req allocation failed\n");
 	rfuse_drop_waiting(fc);
 	return ERR_PTR(err);
+}
+
+struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background,
+				    bool force, spinlock_t *file_lock)
+{
+	struct fuse_conn *fc = fm->fc;
+	struct rfuse_iqueue *riq = fc->riq[select_round_robin(fc)];
+
+	return try_rfuse_get_req_common(fm, for_background, force, file_lock,
+					riq);
+}
+
+struct rfuse_req *try_rfuse_get_wr_req(struct fuse_mount *fm,
+				       bool for_background, bool force,
+				       spinlock_t *file_lock)
+{
+	return try_rfuse_get_req_common(fm, for_background, force, file_lock,
+					rfuse_get_iqueue_for_async(fm->fc));
 }
 
 /************ 4. Insert to Queue ************/
@@ -1282,6 +1346,7 @@ static bool rfuse_request_queue_background(struct rfuse_req *r_req)
 		riq->blocked = 1;
 	}
 	if (riq->num_background == riq->congestion_threshold && fm->sb) {
+		rfuse_iqueue_stats_record(riq, RFUSE_IQUEUE_STAT_BG_CONGESTION);
 		set_bdi_congested(fm->sb->s_bdi, BLK_RW_SYNC);
 		set_bdi_congested(fm->sb->s_bdi, BLK_RW_ASYNC);
 	}

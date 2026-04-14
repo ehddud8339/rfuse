@@ -613,8 +613,9 @@ int rfuse_do_setattr(struct dentry *dentry, struct iattr *attr, struct file *fil
 	fuse_change_attributes_common(inode, &outarg->attr, rfuse_attr_timeout(outarg)); 
 	oldsize = inode->i_size;
 	/* see the comment in fuse_change_attributes() */
-	if (!is_wb || is_truncate || !S_ISREG(inode->i_mode))
+	if (!is_wb || is_truncate || !S_ISREG(inode->i_mode)) {
 		i_size_write(inode, outarg->attr.size);
+	}
 
 	if (is_truncate) {
 		/* NOTE: this may release/reacquire fi->lock */

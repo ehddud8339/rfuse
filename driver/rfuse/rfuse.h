@@ -11,7 +11,7 @@
  
 #include "rfuse_comp.h"
 
-#define RFUSE_NUM_IQUEUE     40           // Number of rfuse iqueue
+#define RFUSE_NUM_IQUEUE     32           // Number of rfuse iqueue
 #define RFUSE_MAX_QUEUE_SIZE 1024*4      // Maximum number of requests in a queue
 #define RFUSE_ASYNC_PENDING_RR_THRESHOLD 2
 
@@ -193,6 +193,12 @@ struct rfuse_iqueue{
 
 	/** synchronous request congestion control */
 	int num_sync_sleeping;
+
+	struct {
+		spinlock_t lock;
+		u64 reqbm_full_count;
+		u64 bg_congestion_count;
+	} stats;
 
 	/** background request congestion control */
 	struct list_head bg_queue; 
