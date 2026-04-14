@@ -1673,6 +1673,49 @@ static void rfuse_writepage_free(struct rfuse_writepage_args *r_wpa)
 	kfree(r_wpa);
 }
 
+static void rfuse_writepage_append_pending(struct rfuse_writepage_args *head,
+					   struct rfuse_writepage_args *pending)
+{
+	struct rfuse_writepage_args *tail = head;
+
+	while (tail->next)
+		tail = tail->next;
+	tail->next = pending;
+}
+
+static void rfuse_writepage_requeue_pending(struct fuse_mount *fm,
+					    struct fuse_file *ff,
+					    struct inode *inode,
+					    struct rfuse_writepage_args *pending)
+{
+	struct fuse_inode *fi = get_fuse_inode(inode);
+
+	while (pending) {
+		struct rfuse_writepage_args *next_pending = pending->next;
+		struct rfuse_writepage_args *conflict;
+
+		pending->next = NULL;
+
+		spin_lock(&fi->lock);
+		conflict = rfuse_insert_writeback(&fi->writepages, pending);
+		if (conflict) {
+			/*
+			 * completion 이후 락을 놓는 사이에 같은 범위 writeback이
+			 * 다시 tree에 들어올 수 있다. 남은 항목은 shared tree에
+			 * 바로 넣지 말고 기존 owner의 next 체인으로 다시 흡수한다.
+			 */
+			rfuse_writepage_append_pending(conflict, pending);
+			spin_unlock(&fi->lock);
+		} else {
+			pending->ria.ff = rfuse_file_get(ff);
+			rfuse_send_writepage(fm, pending, i_size_read(inode));
+			spin_unlock(&fi->lock);
+		}
+
+		pending = next_pending;
+	}
+}
+
 static void rfuse_writepage_end(struct fuse_mount *fm, struct rfuse_req *r_req,
 			       int error)
 {
@@ -1684,6 +1727,7 @@ static void rfuse_writepage_end(struct fuse_mount *fm, struct rfuse_req *r_req,
 	struct inode *inode = r_wpa->inode;
 	struct fuse_inode *fi = get_fuse_inode(inode);
 	struct fuse_conn *fc = get_fuse_conn(inode);
+	struct rfuse_writepage_args *pending;
 
 	mapping_set_error(inode->i_mapping, error);
 	/*
@@ -1696,21 +1740,13 @@ static void rfuse_writepage_end(struct fuse_mount *fm, struct rfuse_req *r_req,
 		fuse_invalidate_attr(inode);
 	spin_lock(&fi->lock);
 	rb_erase(&r_wpa->writepages_entry, &fi->writepages);
-	while (r_wpa->next) {
-		struct fuse_mount *fm = get_fuse_mount(inode);
-		struct fuse_write_in *inarg = (struct fuse_write_in *)&r_req->args;
-		struct rfuse_writepage_args *next = r_wpa->next;
-
-		r_wpa->next = next->next;
-		next->next = NULL;
-		next->ria.ff = rfuse_file_get(r_wpa->ria.ff);
-		tree_insert(&fi->writepages, next);
-
-		rfuse_send_writepage(fm, next, inarg->offset + inarg->size);
-	}
+	pending = r_wpa->next;
+	r_wpa->next = NULL;
 	fi->writectr--;
 	rfuse_writepage_finish(fm, r_wpa);
 	spin_unlock(&fi->lock);
+
+	rfuse_writepage_requeue_pending(fm, r_wpa->ria.ff, inode, pending);
 	rfuse_writepage_free(r_wpa);
 }
 
