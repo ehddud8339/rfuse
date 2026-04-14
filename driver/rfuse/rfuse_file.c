@@ -198,8 +198,14 @@ int rfuse_flush(struct file *file, fl_owner_t id)
 		return -EIO;
 
 	inode_lock(inode);
-	
-  // rfuse_sync_writes(inode);
+
+	/*
+	 * half-sync buffered write는 page cache 반영과 daemon completion이
+	 * 분리되어 있다. flush는 backing store 경계이므로 기존 writeback뿐 아니라
+	 * async buffered write도 모두 끝난 뒤에만 내려가야 한다.
+	 */
+	rfuse_sync_writes(inode);
+	rfuse_wait_async_writes(inode);
 
 	if (fm->fc->no_flush)
 		goto out_unlock;
@@ -289,6 +295,7 @@ int rfuse_fsync(struct file *file, loff_t start, loff_t end,
 		goto out;
 
 	rfuse_sync_writes(inode);
+	rfuse_wait_async_writes(inode);
 
 	/*
 	 * Due to implementation of fuse writeback
@@ -1282,6 +1289,14 @@ static void rfuse_bwrite_complete_req(struct fuse_mount *fm, struct rfuse_req *r
 		pos = ria->write.in.offset - io->offset;
 	else if (short_write)
 		pos = ria->write.in.offset - io->offset + outarg->size;
+
+	/*
+	 * half-sync buffered write의 late completion error는 submit 시점 caller로
+	 * 직접 되돌아가지 않는다. barrier 계열(flush/fsync)이 이후 이를 관측할 수
+	 * 있도록 inode mapping error에 반영한다.
+	 */
+	if (err || short_write)
+		mapping_set_error(io->inode->i_mapping, err ? err : -EIO);
 
 	count = err ? 0 : outarg->size;
 	rfuse_release_bwrite_pages(ria, count, short_write, err);
