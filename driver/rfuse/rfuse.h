@@ -194,12 +194,6 @@ struct rfuse_iqueue{
 	/** synchronous request congestion control */
 	int num_sync_sleeping;
 
-	struct {
-		spinlock_t lock;
-		u64 reqbm_full_count;
-		u64 bg_congestion_count;
-	} stats;
-
 	/** background request congestion control */
 	struct list_head bg_queue; 
 	spinlock_t bg_lock;

@@ -2353,10 +2353,12 @@ void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, int is_a
 	ssize_t res;
 	int err;
 
-	if(is_async)
+	// if(is_async)
+  if (fm->fc->async_read)
 		r_req = try_rfuse_get_req(fm, true, false, NULL);
-	else 
+	else
 		r_req = rfuse_get_req(fm, false, false);
+
 	if (IS_ERR(r_req)) {
 		int i;
 
@@ -2387,7 +2389,8 @@ void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, int is_a
 
 	rfuse_read_args_fill(ria, file, pos, count, FUSE_READ);
 	ria->read.attr_ver = fuse_get_attr_version(fm->fc);
-	if (is_async) {
+	// if (is_async) {
+  if (fm->fc->async_read) {
 		ria->ff = rfuse_file_get(ff);
 		r_req->end = rfuse_readpages_end;
 		err = rfuse_simple_background(fm, r_req);
