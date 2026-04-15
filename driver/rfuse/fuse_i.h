@@ -52,7 +52,7 @@
 #define FUSE_CTL_NUM_DENTRIES 5
 
 /** Maximum number of outstanding background requests */
-#define FUSE_DEFAULT_MAX_BACKGROUND 128
+#define FUSE_DEFAULT_MAX_BACKGROUND 32
 
 /** Congestion starts at 75% of maximum */
 #define FUSE_DEFAULT_CONGESTION_THRESHOLD (FUSE_DEFAULT_MAX_BACKGROUND * 3 / 4)
