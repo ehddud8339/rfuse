@@ -283,18 +283,11 @@ void *rfuse_validate_mmap_request(struct fuse_dev *fud, loff_t pgoff, size_t siz
 /************ 2. Ring buffer ************/
 
 static int select_round_robin(struct fuse_conn *fc){
-	int ret;
+	unsigned int ret;
 
-	spin_lock(&fc->lock);
+	ret = (unsigned int)(atomic_inc_return(&rr_id) - 1);
 
-	if(atomic_read(&rr_id) == RFUSE_NUM_IQUEUE) 
-		atomic_set(&rr_id, 0);
-
-	ret = atomic_read(&rr_id);
-	atomic_add(1, &rr_id);
-	spin_unlock(&fc->lock);
-
-	return ret;
+	return ret % RFUSE_NUM_IQUEUE;
 }
 
 static int select_thread_id(struct fuse_conn *fc){
@@ -850,20 +843,11 @@ struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background,
 				    bool force, spinlock_t *file_lock)
 {
 	struct fuse_conn *fc = fm->fc;
-	struct rfuse_iqueue *riq = fc->riq[select_round_robin(fc)];
+	struct rfuse_iqueue *riq = rfuse_get_iqueue_for_async(fm->fc);
 
 	return try_rfuse_get_req_common(fm, for_background, force, file_lock,
 					riq);
 }
-
-struct rfuse_req *try_rfuse_get_wr_req(struct fuse_mount *fm,
-				       bool for_background, bool force,
-				       spinlock_t *file_lock)
-{
-	return try_rfuse_get_req_common(fm, for_background, force, file_lock,
-					rfuse_get_iqueue_for_async(fm->fc));
-}
-
 /************ 4. Insert to Queue ************/
 
 void __rfuse_get_request(struct rfuse_req *r_req){
@@ -1104,6 +1088,10 @@ static void rfuse_queue_request(struct rfuse_req *r_req){
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
 	struct rfuse_address_entry *entry;
+	unsigned int pending_depth;
+	unsigned int bg_total;
+	unsigned int bg_active;
+	unsigned int bg_queued;
 
 	if(test_bit(FR_BACKGROUND, &r_req->flags)){
 		__set_bit(FR_ASYNC,&r_req->flags);
@@ -1123,7 +1111,19 @@ static void rfuse_queue_request(struct rfuse_req *r_req){
 	if(!test_bit(FR_BACKGROUND, &r_req->flags)) // only increase the reference count for synchronous requests
 		__rfuse_get_request(r_req);
 	rfuse_submit_pending_tail(riq);				// Commit entry
+	pending_depth = rfuse_pending_depth(riq);
 	spin_unlock(&riq->lock);					// unlock
+
+	bg_total = READ_ONCE(riq->num_background);
+	bg_active = READ_ONCE(riq->active_background);
+	bg_queued = bg_total >= bg_active ? bg_total - bg_active : 0;
+
+	pr_info("rfuse_queue_request: riq=%d op=%s pending=%u bg_queued=%u bg_active=%u bg_total=%u inode=%llu pos=%lld bytes=%u\n",
+		riq->riq_id, rfuse_opcode_name(r_req->in.opcode),
+		pending_depth, bg_queued, bg_active, bg_total,
+		(unsigned long long)r_req->in.nodeid,
+		(long long)rfuse_request_pos(r_req),
+		rfuse_request_size(r_req));
 	/*
 	 * pending publish가 waiter 관측보다 먼저 보이도록 ordering을 보장한다.
 	 * waitqueue_active()를 lockless하게 쓰는 현재 경로에서는 이 배리어가 없으면

@@ -1764,7 +1764,7 @@ __acquires(fi->lock)
 	__u64 data_size = r_wpa->ria.rp.num_pages * PAGE_SIZE;
 	int err;
 
-	r_req = try_rfuse_get_wr_req(fm, true, true, &fi->lock);
+	r_req = try_rfuse_get_req(fm, true, true, &fi->lock);
 	if (IS_ERR(r_req)) {
 		err = PTR_ERR(r_req);
 		spin_lock(&fi->lock);
