@@ -1124,9 +1124,6 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 	int err = 0;
 	ssize_t res = 0;
 
-	if (inode->i_size < pos + iov_iter_count(ii))
-		set_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
-
 	do {
 		ssize_t count;
 		struct rfuse_io_args ria = {};
@@ -1171,9 +1168,6 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 
 	if (res > 0)
 		fuse_write_update_size(inode, pos);
-
-	clear_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
-	fuse_invalidate_attr(inode);
 
 	return res > 0 ? res : err;
 }
@@ -2174,7 +2168,7 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, i
 	ssize_t res;
 	int err;
 
-	// if(is_async)
+	//if(is_async)
 	if (fm->fc->async_read)
 		r_req = try_rfuse_get_req(fm, true, false, NULL);
 	else
