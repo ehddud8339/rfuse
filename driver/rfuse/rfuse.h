@@ -11,9 +11,9 @@
  
 #include "rfuse_comp.h"
 
-#define RFUSE_NUM_IQUEUE     32           // Number of rfuse iqueue
+#define RFUSE_NUM_IQUEUE     40           // Number of rfuse iqueue
 #define RFUSE_MAX_QUEUE_SIZE 1024*4      // Maximum number of requests in a queue
-#define RFUSE_ASYNC_PENDING_RR_THRESHOLD 2
+#define RFUSE_ASYNC_PENDING_RR_THRESHOLD 1
 
 #define RFUSE_RIQ_ID_MASK    0x00ff0000ULL
 #define RFUSE_QUEUE_MAP_MASK 0xff000000ULL
@@ -76,6 +76,11 @@ struct rfuse_req{
 	bool page_zeroing:1;
 	bool page_replace:1;
 	bool may_block:1;
+
+	u64 async_submit_ns;
+	u64 async_dispatch_ns;
+	pid_t async_submit_pid;
+	u32 async_submit_cpu;
 
 	struct rfuse_pages *rp;
 	void (*end)(struct fuse_mount *fm, struct rfuse_req *r_req, int error);

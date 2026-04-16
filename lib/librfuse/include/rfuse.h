@@ -123,7 +123,7 @@ extern "C" {
 #define COMP_NEED_WAKEUP_FROM_USER  (1U << 3)
 #define COMP_ALL_COMP_WORKING 	    (1U << 4)
 
-#define RFUSE_NUM_IQUEUE 		    32
+#define RFUSE_NUM_IQUEUE 		    40
 #define RFUSE_MAX_QUEUE_SIZE 		1024*4	
 #define RFUSE_WORKER_PER_RING		2
 
@@ -181,6 +181,11 @@ struct rfuse_req{
 	struct{
 		uint8_t argument_space[120];
 	}args; // 120
+
+	uint64_t no_touch_4;
+	uint64_t no_touch_5;
+	int32_t no_touch_6;
+	uint32_t no_touch_7;
 	
 	uint64_t padding[2];
 };

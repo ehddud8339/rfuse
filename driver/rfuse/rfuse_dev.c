@@ -14,6 +14,7 @@
 #include <linux/splice.h>
 #include <linux/sched.h>
 #include <linux/random.h>
+#include <linux/ktime.h>
 #include <asm/atomic.h>
 
 #define RFUSE_INT_REQ_BIT (1ULL << 0)
@@ -25,6 +26,7 @@
  */
 
 #define RFUSE_SELECTION_ALGO 2
+#define RFUSE_RR_BUDGET 2
 #define WAY 4
 atomic_t rr_id = ATOMIC_INIT(0);
 
@@ -291,57 +293,66 @@ static int select_round_robin(struct fuse_conn *fc){
 }
 
 static int select_thread_id(struct fuse_conn *fc){
+  /*
   int ret = current->pid;
 	
 	return (ret % RFUSE_NUM_IQUEUE);
-
-  /*
+  */
   int sets, c_tp, c_op;
-	spin_lock(&fc->lock);
 	int ret = current->pid;
 	sets = ret % 4;
 	c_tp = sets * (10);
 	c_op = ret % (10);
 	ret = (c_tp + c_op);
-	spin_unlock(&fc->lock);
 	return ret;
-  */ 
 }
 
 static int select_cpu_id(void){
-	int ret = task_cpu(current);
-	
-	return (ret % RFUSE_NUM_IQUEUE);
-
   /*
   int ret = task_cpu(current);
+	
+	return (ret % RFUSE_NUM_IQUEUE);
+  */
+  
+  int ret = task_cpu(current);
 	int sets, c_tp, c_op;
+	int id;
+
 	sets = ret % WAY;
 	c_tp = sets * (RFUSE_NUM_IQUEUE / WAY);
-	c_op = ret % (RFUSE_NUM_IQUEUE / WAY);
-	return (c_tp + c_op);
-  */
+	c_op = (ret / WAY) % (RFUSE_NUM_IQUEUE / WAY);
+	id = c_tp + c_op;
+  return id;
+  
 }
 
 static unsigned int rfuse_pending_depth(struct rfuse_iqueue *riq)
 {
 	unsigned int tail = READ_ONCE(riq->pending.tail);
 	unsigned int head = READ_ONCE(riq->pending.head);
+	unsigned int bg_active = READ_ONCE(riq->active_background);
 
-	return tail - head;
+	return (tail - head) + bg_active;
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc){
-  /*
+  
 	int id = select_cpu_id();
 	struct rfuse_iqueue *riq = fc->riq[id];
-  
-	if (rfuse_pending_depth(riq) >= RFUSE_ASYNC_PENDING_RR_THRESHOLD)
-		return fc->riq[select_round_robin(fc)];
 	
 	return riq;
+  /*
+  int ret = task_cpu(current);
+	int sets, c_tp, c_op;
+	int id;
+
+	sets = ret % WAY;
+	c_tp = sets * (RFUSE_NUM_IQUEUE / WAY);
+	c_op = (ret / WAY) % (RFUSE_NUM_IQUEUE / WAY);
+	id = c_tp + c_op;
+  return fc->riq[id];
   */
-  return fc->riq[select_round_robin(fc)];
+  // return fc->riq[select_round_robin(fc)];
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue(struct fuse_conn *fc){
@@ -842,9 +853,24 @@ out:
 struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background,
 				    bool force, spinlock_t *file_lock)
 {
-	struct fuse_conn *fc = fm->fc;
 	struct rfuse_iqueue *riq = rfuse_get_iqueue_for_async(fm->fc);
 
+	return try_rfuse_get_req_common(fm, for_background, force, file_lock,
+					riq);
+}
+
+struct rfuse_req *try_rfuse_get_wr_req(struct fuse_mount *fm, struct fuse_inode *fi,
+				       bool for_background, bool force,
+				       spinlock_t *file_lock)
+{
+	struct rfuse_iqueue *riq = rfuse_get_iqueue_for_async(fm->fc);
+
+  /*
+	if (fi && test_bit(FUSE_I_SIZE_UNSTABLE, &fi->state))
+		riq = rfuse_get_specific_iqueue(fm->fc, select_cpu_id());
+	else
+		riq = rfuse_get_iqueue_for_async(fm->fc);
+  */
 	return try_rfuse_get_req_common(fm, for_background, force, file_lock,
 					riq);
 }
@@ -1083,6 +1109,87 @@ static loff_t rfuse_request_pos(struct rfuse_req *r_req)
 	}
 }
 
+static const char *rfuse_opcode_name(u32 opcode);
+static u32 rfuse_request_size(struct rfuse_req *r_req);
+
+struct rfuse_async_trace_stats {
+	unsigned int local_pending;
+	unsigned int local_bg_active;
+	unsigned int local_bg_total;
+	unsigned int local_bg_queued;
+	unsigned int global_bg_active;
+	unsigned int global_bg_total;
+	unsigned int active_riqs;
+	unsigned int total_riqs;
+};
+
+static void rfuse_collect_async_trace_stats(struct fuse_conn *fc,
+					    struct rfuse_iqueue *target,
+					    struct rfuse_async_trace_stats *stats)
+{
+	int i;
+
+	memset(stats, 0, sizeof(*stats));
+
+	stats->local_pending = READ_ONCE(target->pending.tail) -
+			       READ_ONCE(target->pending.head);
+	stats->local_bg_active = READ_ONCE(target->active_background);
+	stats->local_bg_total = READ_ONCE(target->num_background);
+	stats->local_bg_queued = stats->local_bg_total >= stats->local_bg_active ?
+				 stats->local_bg_total - stats->local_bg_active : 0;
+
+	for (i = 0; i < RFUSE_NUM_IQUEUE; i++) {
+		struct rfuse_iqueue *riq = fc->riq[i];
+		unsigned int bg_active = READ_ONCE(riq->active_background);
+		unsigned int bg_total = READ_ONCE(riq->num_background);
+
+		stats->global_bg_active += bg_active;
+		stats->global_bg_total += bg_total;
+		if (bg_active)
+			stats->active_riqs++;
+		if (bg_total)
+			stats->total_riqs++;
+	}
+}
+
+static void rfuse_log_async_trace(const char *event, struct rfuse_req *r_req,
+				  int err)
+{
+	struct fuse_conn *fc = r_req->fm->fc;
+	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
+	struct rfuse_async_trace_stats stats;
+	u64 now_ns = ktime_get_mono_fast_ns();
+	u64 queue_us = 0;
+	u64 service_us = 0;
+	u64 total_us = 0;
+
+	rfuse_collect_async_trace_stats(fc, riq, &stats);
+
+	if (r_req->async_submit_ns) {
+		total_us = div_u64(now_ns - r_req->async_submit_ns, 1000);
+		if (r_req->async_dispatch_ns) {
+			queue_us = div_u64(r_req->async_dispatch_ns -
+					 r_req->async_submit_ns, 1000);
+			service_us = div_u64(now_ns - r_req->async_dispatch_ns, 1000);
+		}
+	}
+
+	pr_info("rfuse_async_trace: event=%s op=%s riq=%d inode=%llu pos=%lld bytes=%u submit_pid=%d submit_cpu=%u now_pid=%d now_cpu=%u queue_us=%llu service_us=%llu total_us=%llu local_pending=%u local_bg_queued=%u local_bg_active=%u local_bg_total=%u global_bg_active=%u global_bg_total=%u active_riqs=%u total_riqs=%u err=%d\n",
+		event, rfuse_opcode_name(r_req->in.opcode), riq->riq_id,
+		(unsigned long long)r_req->in.nodeid,
+		(long long)rfuse_request_pos(r_req),
+		rfuse_request_size(r_req),
+		r_req->async_submit_pid, r_req->async_submit_cpu,
+		task_pid_nr(current), raw_smp_processor_id(),
+		(unsigned long long)queue_us,
+		(unsigned long long)service_us,
+		(unsigned long long)total_us,
+		stats.local_pending, stats.local_bg_queued,
+		stats.local_bg_active, stats.local_bg_total,
+		stats.global_bg_active, stats.global_bg_total,
+		stats.active_riqs, stats.total_riqs, err);
+}
+
 static void rfuse_queue_request(struct rfuse_req *r_req){
 	struct fuse_mount *fm = r_req->fm;
 	struct fuse_conn *fc = fm->fc;
@@ -1117,13 +1224,18 @@ static void rfuse_queue_request(struct rfuse_req *r_req){
 	bg_total = READ_ONCE(riq->num_background);
 	bg_active = READ_ONCE(riq->active_background);
 	bg_queued = bg_total >= bg_active ? bg_total - bg_active : 0;
-
+  /*
 	pr_info("rfuse_queue_request: riq=%d op=%s pending=%u bg_queued=%u bg_active=%u bg_total=%u inode=%llu pos=%lld bytes=%u\n",
 		riq->riq_id, rfuse_opcode_name(r_req->in.opcode),
 		pending_depth, bg_queued, bg_active, bg_total,
 		(unsigned long long)r_req->in.nodeid,
 		(long long)rfuse_request_pos(r_req),
 		rfuse_request_size(r_req));
+    */
+	if (test_bit(FR_BACKGROUND, &r_req->flags)) {
+		r_req->async_dispatch_ns = ktime_get_mono_fast_ns();
+		/* rfuse_log_async_trace("dispatch", r_req, 0); */
+	}
 	/*
 	 * pending publish가 waiter 관측보다 먼저 보이도록 ordering을 보장한다.
 	 * waitqueue_active()를 lockless하게 쓰는 현재 경로에서는 이 배리어가 없으면
@@ -1183,6 +1295,10 @@ static bool rfuse_request_queue_background(struct rfuse_req *r_req)
 		atomic_inc(&fc->num_waiting);
 	}
 	__set_bit(FR_ISREPLY, &r_req->flags);
+	r_req->async_submit_ns = ktime_get_mono_fast_ns();
+	r_req->async_dispatch_ns = 0;
+	r_req->async_submit_pid = task_pid_nr(current);
+	r_req->async_submit_cpu = raw_smp_processor_id();
 
 	spin_lock(&riq->bg_lock);
 	if (unlikely(!riq->connected)) {
@@ -1236,6 +1352,7 @@ static bool rfuse_request_queue_background(struct rfuse_req *r_req)
 	list_add_tail(&bg_entry->list, &riq->bg_queue);
 	rfuse_flush_bg_queue(fc, r_req->riq_id);
 	spin_unlock(&riq->bg_lock);
+	/* rfuse_log_async_trace("submit", r_req, 0); */
 
 	return true;
 }
@@ -1253,7 +1370,9 @@ void rfuse_request_end(struct rfuse_req *r_req){
 	struct fuse_mount *fm = r_req->fm;
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
-	if(test_bit(FR_BACKGROUND, &r_req->flags)){
+	bool is_background = test_bit(FR_BACKGROUND, &r_req->flags);
+
+	if (is_background) {
 		spin_lock(&riq->bg_lock);
 		clear_bit(FR_BACKGROUND, &r_req->flags);
 		if (riq->num_background == riq->max_background) {
@@ -1278,6 +1397,7 @@ void rfuse_request_end(struct rfuse_req *r_req){
 		riq->active_background--;
 		rfuse_flush_bg_queue(fc, r_req->riq_id);
 		spin_unlock(&riq->bg_lock);
+		/* rfuse_log_async_trace("complete", r_req, r_req->out.error); */
 	}
 
 	if (test_bit(FR_ASYNC, &r_req->flags))
