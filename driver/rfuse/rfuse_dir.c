@@ -6,6 +6,7 @@
 #include <linux/sched.h>
 #include <linux/namei.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/xattr.h>
 #include <linux/iversion.h>
 #include <linux/posix_acl.h>
@@ -312,6 +313,9 @@ struct dentry *rfuse_lookup(struct inode *dir, struct dentry *entry, unsigned in
 	struct rfuse_iqueue *riq;
 	bool outarg_valid = true;
 	bool locked;
+
+	if (!strcmp(current->comm, "tee"))
+		rfuse_write_latency_stats_maybe_dump_and_reset();
 
 	if (fuse_is_bad(dir))
 		return ERR_PTR(-EIO);

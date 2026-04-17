@@ -1327,6 +1327,10 @@ int fuse_fileattr_set(struct user_namespace *mnt_userns,
 
 /* file.c */
 
+int rfuse_write_latency_stats_init(void);
+void rfuse_write_latency_stats_destroy(void);
+void rfuse_write_latency_stats_maybe_dump_and_reset(void);
+
 struct fuse_file *fuse_file_open(struct fuse_mount *fm, u64 nodeid,
 				 unsigned int open_flags, bool isdir);
 void fuse_file_release(struct inode *inode, struct fuse_file *ff,

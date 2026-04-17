@@ -1788,15 +1788,21 @@ static int __init fuse_init(void)
 	if (res)
 		goto err_dev_cleanup;
 
-	res = fuse_ctl_init();
+	res = rfuse_write_latency_stats_init();
 	if (res)
 		goto err_sysfs_cleanup;
+
+	res = fuse_ctl_init();
+	if (res)
+		goto err_stats_cleanup;
 
 	sanitize_global_limit(&max_user_bgreq);
 	sanitize_global_limit(&max_user_congthresh);
 
 	return 0;
 
+ err_stats_cleanup:
+	rfuse_write_latency_stats_destroy();
  err_sysfs_cleanup:
 	fuse_sysfs_cleanup();
  err_dev_cleanup:
@@ -1811,6 +1817,7 @@ static void __exit fuse_exit(void)
 {
 	pr_debug("exit\n");
 
+	rfuse_write_latency_stats_destroy();
 	fuse_ctl_cleanup();
 	fuse_sysfs_cleanup();
 	fuse_fs_cleanup();

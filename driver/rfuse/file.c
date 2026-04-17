@@ -18,6 +18,204 @@
 #include <linux/falloc.h>
 #include <linux/uio.h>
 #include <linux/fs.h>
+#include <linux/ktime.h>
+#include <linux/math64.h>
+#include <linux/sort.h>
+#include <linux/vmalloc.h>
+
+#define RFUSE_WRITE_LATENCY_MAX_SAMPLES 10000000U
+
+struct rfuse_write_latency_ring {
+	raw_spinlock_t lock;
+	u64 *samples;
+	u32 head;
+	u32 count;
+};
+
+static struct rfuse_write_latency_ring rfuse_write_latency_ring;
+
+static int rfuse_latency_u64_cmp(const void *lhs, const void *rhs)
+{
+	const u64 left = *(const u64 *)lhs;
+	const u64 right = *(const u64 *)rhs;
+
+	if (left < right)
+		return -1;
+	if (left > right)
+		return 1;
+	return 0;
+}
+
+static void rfuse_write_latency_record(u64 latency_ns)
+{
+	struct rfuse_write_latency_ring *ring = &rfuse_write_latency_ring;
+	unsigned long flags;
+	u32 head;
+
+	if (unlikely(!ring->samples))
+		return;
+
+	raw_spin_lock_irqsave(&ring->lock, flags);
+	head = ring->head;
+	ring->samples[head] = latency_ns;
+	head++;
+	if (head == RFUSE_WRITE_LATENCY_MAX_SAMPLES)
+		head = 0;
+	ring->head = head;
+	if (ring->count < RFUSE_WRITE_LATENCY_MAX_SAMPLES)
+		ring->count++;
+	raw_spin_unlock_irqrestore(&ring->lock, flags);
+}
+
+static u64 *rfuse_write_latency_snapshot_and_reset(u32 *nr_samples)
+{
+	struct rfuse_write_latency_ring *ring = &rfuse_write_latency_ring;
+	unsigned long flags;
+	u64 *snapshot;
+	u32 count;
+	u32 first_chunk;
+	u32 second_chunk;
+
+	*nr_samples = 0;
+
+	if (!ring->samples)
+		return NULL;
+
+	raw_spin_lock_irqsave(&ring->lock, flags);
+	count = ring->count;
+	if (!count) {
+		raw_spin_unlock_irqrestore(&ring->lock, flags);
+		return NULL;
+	}
+	raw_spin_unlock_irqrestore(&ring->lock, flags);
+
+	snapshot = vmalloc(array_size(RFUSE_WRITE_LATENCY_MAX_SAMPLES,
+				      sizeof(*snapshot)));
+	if (!snapshot)
+		return ERR_PTR(-ENOMEM);
+
+	raw_spin_lock_irqsave(&ring->lock, flags);
+	count = ring->count;
+	if (!count) {
+		raw_spin_unlock_irqrestore(&ring->lock, flags);
+		vfree(snapshot);
+		return NULL;
+	}
+
+	if (count == RFUSE_WRITE_LATENCY_MAX_SAMPLES) {
+		first_chunk = RFUSE_WRITE_LATENCY_MAX_SAMPLES - ring->head;
+		memcpy(snapshot, &ring->samples[ring->head],
+		       first_chunk * sizeof(*snapshot));
+		second_chunk = ring->head;
+		if (second_chunk)
+			memcpy(snapshot + first_chunk, ring->samples,
+			       second_chunk * sizeof(*snapshot));
+	} else {
+		memcpy(snapshot, ring->samples, count * sizeof(*snapshot));
+	}
+
+	ring->head = 0;
+	ring->count = 0;
+	raw_spin_unlock_irqrestore(&ring->lock, flags);
+
+	*nr_samples = count;
+	return snapshot;
+}
+
+static u64 rfuse_write_latency_percentile(u64 *samples, u32 count,
+					  u32 numerator, u32 denominator)
+{
+	u64 index;
+
+	if (count <= 1)
+		return samples[0];
+
+	index = div64_u64((u64)(count - 1) * numerator, denominator);
+	return samples[index];
+}
+
+static void rfuse_write_latency_dump_snapshot(u64 *samples, u32 count)
+{
+	u64 min_ns;
+	u64 max_ns;
+	u64 avg_ns;
+	u64 total_ns = 0;
+	u64 p50;
+	u64 p90;
+	u64 p95;
+	u64 p99;
+	u64 p999;
+	u32 i;
+
+	sort(samples, count, sizeof(*samples), rfuse_latency_u64_cmp, NULL);
+
+	min_ns = samples[0];
+	max_ns = samples[count - 1];
+
+	for (i = 0; i < count; i++)
+		total_ns += samples[i];
+
+	avg_ns = div64_u64(total_ns, count);
+	p50 = rfuse_write_latency_percentile(samples, count, 50, 100);
+	p90 = rfuse_write_latency_percentile(samples, count, 90, 100);
+	p95 = rfuse_write_latency_percentile(samples, count, 95, 100);
+	p99 = rfuse_write_latency_percentile(samples, count, 99, 100);
+	p999 = rfuse_write_latency_percentile(samples, count, 999, 1000);
+
+	pr_info("rfuse write latency stats: samples=%u min=%llu ns max=%llu ns avg=%llu ns\n",
+		count, (unsigned long long)min_ns, (unsigned long long)max_ns,
+		(unsigned long long)avg_ns);
+	pr_info("rfuse write latency percentiles: p50=%llu ns p90=%llu ns p95=%llu ns p99=%llu ns p99.9=%llu ns\n",
+		(unsigned long long)p50, (unsigned long long)p90,
+		(unsigned long long)p95, (unsigned long long)p99,
+		(unsigned long long)p999);
+}
+
+int rfuse_write_latency_stats_init(void)
+{
+	struct rfuse_write_latency_ring *ring = &rfuse_write_latency_ring;
+
+	raw_spin_lock_init(&ring->lock);
+	ring->samples = vmalloc(array_size(RFUSE_WRITE_LATENCY_MAX_SAMPLES,
+					    sizeof(*ring->samples)));
+	if (!ring->samples)
+		return -ENOMEM;
+
+	ring->head = 0;
+	ring->count = 0;
+	return 0;
+}
+
+void rfuse_write_latency_stats_destroy(void)
+{
+	struct rfuse_write_latency_ring *ring = &rfuse_write_latency_ring;
+
+	vfree(ring->samples);
+	ring->samples = NULL;
+	ring->head = 0;
+	ring->count = 0;
+}
+
+void rfuse_write_latency_stats_maybe_dump_and_reset(void)
+{
+	u64 *snapshot;
+	u32 nr_samples;
+
+	snapshot = rfuse_write_latency_snapshot_and_reset(&nr_samples);
+	if (IS_ERR(snapshot)) {
+		pr_info("rfuse write latency stats: snapshot allocation failed: %ld\n",
+			PTR_ERR(snapshot));
+		return;
+	}
+
+	if (!snapshot) {
+		pr_info("rfuse write latency stats: no samples collected\n");
+		return;
+	}
+
+	rfuse_write_latency_dump_snapshot(snapshot, nr_samples);
+	vfree(snapshot);
+}
 
 // static int fuse_send_open(struct fuse_mount *fm, u64 nodeid,
 // 			  unsigned int open_flags, int opcode,
@@ -1044,26 +1242,31 @@ static ssize_t fuse_cache_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	ssize_t written = 0;
 	ssize_t written_buffered = 0;
 	struct inode *inode = mapping->host;
-	ssize_t err;
+	ssize_t err = 0;
 	struct fuse_conn *fc = get_fuse_conn(inode);
 	loff_t endbyte = 0;
+	ssize_t ret;
+	u64 start_ns = ktime_get_ns();
+	bool inode_locked = false;
 
 	if (fc->writeback_cache) {
 		/* Update size (EOF optimization) and mode (SUID clearing) */
 		err = fuse_update_attributes(mapping->host, file);
 		if (err)
-			return err;
+			goto out;
 
 		if (fc->handle_killpriv_v2 &&
 		    should_remove_suid(file_dentry(file))) {
 			goto writethrough;
 		}
 
-		return generic_file_write_iter(iocb, from);
+		written = generic_file_write_iter(iocb, from);
+		goto out;
 	}
 
 writethrough:
 	inode_lock(inode);
+	inode_locked = true;
 
 	/* We can write back this queue in page reclaim */
 	current->backing_dev_info = inode_to_bdi(inode);
@@ -1112,12 +1315,16 @@ writethrough:
 			iocb->ki_pos += written;
 	}
 out:
-	current->backing_dev_info = NULL;
-	inode_unlock(inode);
+	if (inode_locked) {
+		current->backing_dev_info = NULL;
+		inode_unlock(inode);
+	}
 	if (written > 0)
 		written = generic_write_sync(iocb, written);
 
-	return written ? written : err;
+	ret = written ? written : err;
+	rfuse_write_latency_record(ktime_get_ns() - start_ns);
+	return ret;
 }
 
 static inline unsigned long fuse_get_user_addr(const struct iov_iter *ii)
