@@ -288,6 +288,63 @@ int rfuse_import_payload(struct rfuse_req *r_req)
 	return remaining ? -EIO : 0;
 }
 
+int rfuse_reserve_payload(struct rfuse_req *r_req, size_t len,
+			  unsigned int payload_flags, bool may_wait)
+{
+	int ret;
+
+	if (!r_req)
+		return -EINVAL;
+	if (!len)
+		return 0;
+	if ((payload_flags & (RFUSE_PAYLOAD_IN | RFUSE_PAYLOAD_OUT)) == 0)
+		return -EINVAL;
+	if ((payload_flags & RFUSE_PAYLOAD_IN) &&
+	    (payload_flags & RFUSE_PAYLOAD_OUT))
+		return -EINVAL;
+	if (r_req->payload_capacity)
+		return len <= r_req->payload_capacity ? 0 : -EINVAL;
+	if (r_req->payload_flags & RFUSE_PAYLOAD_FALLBACK)
+		return -EINVAL;
+
+	r_req->payload_flags = payload_flags;
+	ret = rfuse_payload_alloc(r_req, len, may_wait);
+	if (ret) {
+		r_req->payload_flags = 0;
+		return ret;
+	}
+
+	return 0;
+}
+
+ssize_t rfuse_payload_copy_from_iter(struct rfuse_req *r_req,
+				     struct iov_iter *ii, size_t len)
+{
+	struct rfuse_iqueue *riq;
+	char *dst;
+	size_t copied;
+
+	if (!r_req || !ii)
+		return -EINVAL;
+	if (!len)
+		return 0;
+	if (!r_req->payload_capacity ||
+	    !(r_req->payload_flags & RFUSE_PAYLOAD_IN) ||
+	    (r_req->payload_flags & RFUSE_PAYLOAD_FALLBACK))
+		return -EINVAL;
+	if (len > r_req->payload_capacity)
+		return -EINVAL;
+
+	riq = rfuse_get_specific_iqueue(r_req->fm->fc, r_req->riq_id);
+	dst = (char *)riq->payload.kaddr + r_req->payload_offset;
+	copied = copy_from_iter(dst, len, ii);
+	if (!copied)
+		return -EFAULT;
+
+	r_req->payload_len = copied;
+	return copied;
+}
+
 int rfuse_prepare_payload(struct rfuse_req *r_req, bool may_wait)
 {
 	size_t need = 0;

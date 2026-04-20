@@ -1427,6 +1427,10 @@ ssize_t rfuse_simple_request(struct rfuse_req *r_req);
 bool rfuse_simple_background(struct fuse_mount *fm, struct rfuse_req *r_req);
 void rfuse_request_end(struct rfuse_req *r_req);
 int rfuse_prepare_payload(struct rfuse_req *r_req, bool may_wait);
+int rfuse_reserve_payload(struct rfuse_req *r_req, size_t len,
+			  unsigned int payload_flags, bool may_wait);
+ssize_t rfuse_payload_copy_from_iter(struct rfuse_req *r_req,
+				     struct iov_iter *ii, size_t len);
 int rfuse_import_payload(struct rfuse_req *r_req);
 void rfuse_release_payload(struct rfuse_req *r_req);
 
