@@ -48,6 +48,18 @@ FILE *logfile;
 pthread_spinlock_t spinlock; /* Protecting the above spin lock */
 char banner[4096];
 
+/*
+static unsigned long long stackfs_pwrite_count;
+
+static void stackfs_count_pwrite(void)
+{
+	unsigned long long count;
+
+	count = __atomic_add_fetch(&stackfs_pwrite_count, 1, __ATOMIC_RELAXED);
+	fprintf(stderr, "stackfs: pwrite_count=%llu\n", count);
+}
+*/
+
 void print_usage(void)
 {
 	printf("USAGE	: ./StackFS_ll -r <rootDir>|-rootdir=<rootDir> ");
@@ -1050,6 +1062,7 @@ static void stackfs_ll_write(fuse_req_t req, fuse_ino_t ino, const char *buf,
 	(void) ino;
 	
 	res = pwrite(fi->fh, buf, size, off);
+	//stackfs_count_pwrite();
 
 	if (res == -1)
 		return (void) fuse_reply_err(req, errno);

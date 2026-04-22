@@ -35,6 +35,27 @@
 
 #define RFUSE_SPLICE_READ_NO_DATA 0x1000
 
+/*
+static unsigned long long rfuse_pread_count;
+static unsigned long long rfuse_pwrite_count;
+
+static void rfuse_count_pread(void)
+{
+	unsigned long long count;
+
+	count = __atomic_add_fetch(&rfuse_pread_count, 1, __ATOMIC_RELAXED);
+	fprintf(stderr, "rfuse: pread_count=%llu\n", count);
+}
+
+static void rfuse_count_pwrite(void)
+{
+	unsigned long long count;
+
+	count = __atomic_add_fetch(&rfuse_pwrite_count, 1, __ATOMIC_RELAXED);
+	fprintf(stderr, "rfuse: pwrite_count=%llu\n", count);
+}
+*/
+
 // ******************************* Ring buffer operations ******************************* //
 
 struct rfuse_address_entry *rfuse_read_pending_head(struct rfuse_iqueue *riq){
@@ -441,6 +462,7 @@ int fuse_reply_buf(fuse_req_t u_req, const char *buf, size_t size){
 	}
 
 	ssize_t res = pwrite(ch ? ch->fd : se->fd, buf, size, (long long int)pp_riq_id | pp_req_index);
+	//rfuse_count_pwrite();
 	int err = errno;
 	if(res == -1){
 		if(!fuse_session_exited(se) && err != ENOENT)
@@ -1156,6 +1178,7 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 
 	// 1.Call a system call to receive the data from the kernel page
 	res = pread(ch ? ch->fd : se->fd, u_req->w->fbuf.mem, u_req->w->fbuf.size, (long long int)pp_riq_id | pp_req_index);
+	//rfuse_count_pread();
 	if(res == -1) {
 		printf("Error : pread for write I/O failed\n");
 		fuse_reply_err(u_req, EIO);
@@ -1901,6 +1924,7 @@ int rfuse_reply_read_from_fd(fuse_req_t req, int fd, off_t off, size_t size)
 			size = payload.capacity;
 
 		res = pread(fd, payload.addr, size, off);
+		//rfuse_count_pread();
 		if (res < 0)
 			return fuse_reply_err(req, errno);
 

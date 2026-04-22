@@ -297,6 +297,21 @@ static void rfuse_release_end(struct fuse_mount *fm, struct rfuse_req *r_req, in
 	iput(rfuse_inarg->inode);
 }
 
+static struct rfuse_req *rfuse_get_release_req(struct fuse_mount *fm,
+					       bool for_background,
+					       bool force)
+{
+	struct rfuse_req *r_req;
+
+	for (;;) {
+		r_req = rfuse_get_req(fm, for_background, force);
+		if (!IS_ERR(r_req))
+			return r_req;
+
+		schedule_timeout_uninterruptible(1);
+	}
+}
+
 static void rfuse_file_put(struct fuse_file *ff, struct rfuse_req *r_req,
 				 bool sync, bool isdir){
 	if (refcount_dec_and_test(&ff->count)) {
@@ -304,17 +319,12 @@ static void rfuse_file_put(struct fuse_file *ff, struct rfuse_req *r_req,
 			struct rfuse_req *new_r_req;
 			struct rfuse_release_in *new_rfuse_inarg;
 			
-				if(sync)
-					new_r_req = rfuse_get_req(ff->fm, false, true);
-				else
-					new_r_req = rfuse_get_req(ff->fm, true, true);
-				if (IS_ERR(new_r_req)) {
-					iput(ff->release_args->inode);
-					kfree(ff);
-					return;
-				}
+			if(sync)
+				new_r_req = rfuse_get_release_req(ff->fm, false, true);
+			else
+				new_r_req = rfuse_get_release_req(ff->fm, true, true);
 
-				new_rfuse_inarg = (struct rfuse_release_in*)&new_r_req->args;
+			new_rfuse_inarg = (struct rfuse_release_in*)&new_r_req->args;
 
 			new_rfuse_inarg->inarg = ff->release_args->inarg;
 			new_rfuse_inarg->inode = ff->release_args->inode;
@@ -383,11 +393,7 @@ void rfuse_sync_release(struct fuse_inode *fi, struct fuse_file *ff,
 	struct fuse_mount *fm = ff->fm;
 
 	WARN_ON(refcount_read(&ff->count) > 1);
-	r_req = rfuse_get_req(fm, false, true);
-	if (IS_ERR(r_req)) {
-		kfree(ff);
-		return;
-	}
+	r_req = rfuse_get_release_req(fm, false, true);
 	rfuse_prepare_release(fi, ff, r_req, flags, FUSE_RELEASE);
 	/*
 	 * iput(NULL) is a no-op and since the refcount is 1 and everything's
@@ -406,15 +412,12 @@ void rfuse_file_release(struct inode *inode, struct fuse_file *ff,
 	struct rfuse_release_in *rfuse_inarg;  
 	struct fuse_mount *fm = ff->fm;
 	struct fuse_release_args *ra = ff->release_args;
+	bool destroy = ff->fm->fc->destroy;
 
-	if(ff->fm->fc->destroy)
-		r_req = rfuse_get_req(fm, false, true);
+	if(destroy)
+		r_req = rfuse_get_release_req(fm, false, true);
 	else
-		r_req = rfuse_get_req(fm, true, true);
-	if (IS_ERR(r_req)) {
-		kfree(ff);
-		return;
-	}
+		r_req = rfuse_get_release_req(fm, true, true);
 	
 	rfuse_prepare_release(fi, ff, r_req, open_flags, opcode);
 	rfuse_inarg = (struct rfuse_release_in*)&r_req->args;
@@ -438,8 +441,8 @@ void rfuse_file_release(struct inode *inode, struct fuse_file *ff,
 	ra->inode = inode;
 
 
-	rfuse_file_put(ff, r_req, ff->fm->fc->destroy, isdir);
-	if(ff->fm->fc->destroy) // Only put requests that are synchronous
+	rfuse_file_put(ff, r_req, destroy, isdir);
+	if(destroy) // Only put requests that are synchronous
 		rfuse_put_request(r_req);
 }
 
@@ -944,7 +947,7 @@ static ssize_t rfuse_async_req_send(struct fuse_mount *fm,
 /************ 4. WRITE ************/
 
 #ifndef RFUSE_WRITE_PAYLOAD_FROM_ITER
-#define RFUSE_WRITE_PAYLOAD_FROM_ITER 0
+#define RFUSE_WRITE_PAYLOAD_FROM_ITER 1
 #endif
 
 static ssize_t rfuse_fill_write_pages(struct rfuse_io_args *ria, struct address_space *mapping,
