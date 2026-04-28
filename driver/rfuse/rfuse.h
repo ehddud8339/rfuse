@@ -12,6 +12,11 @@
 #include "rfuse_comp.h"
 
 #define RFUSE_NUM_IQUEUE     40           // Number of rfuse iqueue
+#define RFUSE_ASSO_SET       10
+#define RFUSE_IQUEUE_PER_SET (RFUSE_NUM_IQUEUE / RFUSE_ASSO_SET)
+#if RFUSE_NUM_IQUEUE % RFUSE_ASSO_SET
+#error "RFUSE_NUM_IQUEUE must be divisible by RFUSE_ASSO_SET"
+#endif
 #define RFUSE_MAX_QUEUE_SIZE 1024*4      // Maximum number of requests in a queue
 #define RFUSE_ASYNC_PENDING_RR_THRESHOLD 1
 

@@ -617,6 +617,9 @@ struct fuse_conn {
 	/** rfuse Input queue */
 	struct rfuse_iqueue **riq;
 
+	/** rfuse async queue round-robin cursor per associated set */
+	atomic_t rfuse_async_set[RFUSE_ASSO_SET];
+
 	/** The next unique kernel file handle */
 	atomic64_t khctr;
 

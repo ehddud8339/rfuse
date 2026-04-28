@@ -776,6 +776,8 @@ void fuse_conn_init(struct fuse_conn *fc, struct fuse_mount *fm,
 		    struct user_namespace *user_ns,
 		    const struct fuse_iqueue_ops *fiq_ops, void *fiq_priv)
 {
+	int i;
+
 	memset(fc, 0, sizeof(*fc));
 	spin_lock_init(&fc->lock);
 	spin_lock_init(&fc->bg_lock);
@@ -802,6 +804,9 @@ void fuse_conn_init(struct fuse_conn *fc, struct fuse_mount *fm,
 	fc->user_ns = get_user_ns(user_ns);
 	fc->max_pages = FUSE_DEFAULT_MAX_PAGES_PER_REQ;
 	fc->max_pages_limit = FUSE_MAX_MAX_PAGES;
+
+	for (i = 0; i < RFUSE_ASSO_SET; i++)
+		atomic_set(&fc->rfuse_async_set[i], 0);
 	
 	// (rfuse) Initialize the "RFUSE_NUM_IQUEUE" iqueues in fuse_conn 
 	rfuse_iqueue_init(fc, fiq_priv);	

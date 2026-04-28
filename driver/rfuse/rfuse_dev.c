@@ -27,7 +27,6 @@
 
 #define RFUSE_SELECTION_ALGO 2
 #define RFUSE_RR_BUDGET 2
-#define WAY 4
 atomic_t rr_id = ATOMIC_INIT(0);
 
 
@@ -300,30 +299,42 @@ static int select_thread_id(struct fuse_conn *fc){
   */
   int sets, c_tp, c_op;
 	int ret = current->pid;
-	sets = ret % 4;
-	c_tp = sets * (10);
-	c_op = ret % (10);
+	sets = ret % RFUSE_ASSO_SET;
+	c_tp = sets * RFUSE_IQUEUE_PER_SET;
+	c_op = ret % RFUSE_IQUEUE_PER_SET;
 	ret = (c_tp + c_op);
 	return ret;
 }
 
 static int select_cpu_id(void){
-  /*
+  
   int ret = task_cpu(current);
 	
 	return (ret % RFUSE_NUM_IQUEUE);
-  */
   
+  /*
   int ret = task_cpu(current);
 	int sets, c_tp, c_op;
 	int id;
 
-	sets = ret % WAY;
-	c_tp = sets * (RFUSE_NUM_IQUEUE / WAY);
-	c_op = (ret / WAY) % (RFUSE_NUM_IQUEUE / WAY);
+	sets = ret % RFUSE_ASSO_SET;
+	c_tp = sets * RFUSE_IQUEUE_PER_SET;
+	c_op = (ret / RFUSE_ASSO_SET) % RFUSE_IQUEUE_PER_SET;
 	id = c_tp + c_op;
-  return id;
   
+  return id;
+  */
+}
+
+static int select_set_rr_id(struct fuse_conn *fc)
+{
+	unsigned int cpu = task_cpu(current);
+	unsigned int set = cpu % RFUSE_ASSO_SET;
+	unsigned int off;
+
+	off = (unsigned int)(atomic_inc_return(&fc->rfuse_async_set[set]) - 1);
+
+	return set * RFUSE_IQUEUE_PER_SET + (off % RFUSE_IQUEUE_PER_SET);
 }
 
 static unsigned int rfuse_pending_depth(struct rfuse_iqueue *riq)
@@ -336,23 +347,21 @@ static unsigned int rfuse_pending_depth(struct rfuse_iqueue *riq)
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc){
-  
-	int id = select_cpu_id();
-	struct rfuse_iqueue *riq = fc->riq[id];
-	
-	return riq;
+  // int id = select_set_rr_id(fc);
   /*
   int ret = task_cpu(current);
 	int sets, c_tp, c_op;
 	int id;
 
-	sets = ret % WAY;
-	c_tp = sets * (RFUSE_NUM_IQUEUE / WAY);
-	c_op = (ret / WAY) % (RFUSE_NUM_IQUEUE / WAY);
+	sets = ret % RFUSE_ASSO_SET;
+	c_tp = sets * RFUSE_IQUEUE_PER_SET;
+	c_op = (ret / RFUSE_ASSO_SET) % RFUSE_IQUEUE_PER_SET;
 	id = c_tp + c_op;
-  return fc->riq[id];
   */
-  // return fc->riq[select_round_robin(fc)];
+  int id = select_round_robin(fc);
+	struct rfuse_iqueue *riq = fc->riq[id];
+	
+	return riq;
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue(struct fuse_conn *fc){
