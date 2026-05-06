@@ -186,6 +186,9 @@ static int rfuse_payload_alloc(struct rfuse_req *r_req, size_t need, bool may_wa
 		if (ret != -EAGAIN || !may_wait)
 			break;
 
+		pr_info("RFUSE: payload alloc wait riq=%d req=%u opcode=%u need=%zu used=%u size=%u\n",
+				    r_req->riq_id, r_req->index, r_req->in.opcode,
+				    aligned_need, riq->payload.used, riq->payload.size);
 		ret = wait_event_interruptible(riq->payload_waitq,
 				!r_req->fm->fc->connected ||
 				rfuse_payload_find_extent(riq, aligned_need));
