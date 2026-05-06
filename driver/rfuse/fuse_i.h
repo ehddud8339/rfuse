@@ -52,7 +52,7 @@
 #define FUSE_CTL_NUM_DENTRIES 5
 
 /** Maximum number of outstanding background requests */
-#define FUSE_DEFAULT_MAX_BACKGROUND 32
+#define FUSE_DEFAULT_MAX_BACKGROUND 128
 
 /** Congestion starts at 75% of maximum */
 #define FUSE_DEFAULT_CONGESTION_THRESHOLD (FUSE_DEFAULT_MAX_BACKGROUND * 3 / 4)
@@ -121,11 +121,17 @@ struct fuse_inode {
 			/* Waitq for writepage completion */
 			wait_queue_head_t page_waitq;
 
-			/*
-			 * half-sync buffered write가 daemon completion 전까지
-			 * backing READ를 막기 위해 유지하는 inode 단위 inflight 수
-			 */
-			int async_writectr;
+				/*
+				 * half-sync buffered write가 daemon completion 전까지
+				 * flush/fsync 등 inode 단위 drain을 위해 유지하는 inflight 수
+				 */
+				int async_writectr;
+
+				/* block counter for async write-range overlap waits */
+				atomic64_t async_range_wait_count;
+
+				/* List of inflight async buffered write ranges */
+				struct rb_root async_writepages;
 
 			/* List of writepage requestst (pending or sent) */
 			struct rb_root writepages;
@@ -313,6 +319,7 @@ struct rfuse_io_args {
 			bool page_locked;
 		} write;
 	};
+	struct rb_node *async_wb_node;
 	struct rfuse_req *r_req;
 	struct rfuse_pages rp;
 	struct fuse_io_priv *io;

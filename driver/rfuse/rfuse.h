@@ -12,8 +12,9 @@
 #include "rfuse_comp.h"
 
 #define RFUSE_NUM_IQUEUE     40           // Number of rfuse iqueue
-#define RFUSE_ASSO_SET       10
+#define RFUSE_ASSO_SET       4
 #define RFUSE_IQUEUE_PER_SET (RFUSE_NUM_IQUEUE / RFUSE_ASSO_SET)
+#define LDY_LOG              0
 #if RFUSE_NUM_IQUEUE % RFUSE_ASSO_SET
 #error "RFUSE_NUM_IQUEUE must be divisible by RFUSE_ASSO_SET"
 #endif
@@ -216,6 +217,31 @@ struct rfuse_iqueue{
 
 	/** waitq for congested asynchronous requests*/
 	wait_queue_head_t blocked_waitq;
+
+	/** block counters for async submit paths */
+	atomic64_t reqbuf_wait_count;
+	atomic64_t init_wait_count;
+	atomic64_t bg_throttle_wait_count;
+
+	/** bg_lock contention stats for async submit/completion overlap */
+	atomic64_t bg_submit_lock_wait_ns;
+	atomic64_t bg_submit_lock_hold_ns;
+	atomic64_t bg_submit_lock_contended;
+	atomic64_t bg_complete_lock_wait_ns;
+	atomic64_t bg_complete_lock_hold_ns;
+	atomic64_t bg_complete_lock_contended;
+
+	/** same-riq pending/daemon capacity instrumentation */
+	atomic64_t pending_near_full_count;
+	atomic64_t pending_full_count;
+	atomic64_t daemon_sleep_count;
+	atomic64_t daemon_wake_count;
+	atomic64_t daemon_reply_async_count;
+	atomic64_t daemon_sleep_ns_total;
+	atomic64_t daemon_reply_async_gap_ns_total;
+	atomic64_t daemon_last_sleep_start_ns;
+	atomic64_t daemon_last_reply_async_ns;
+	unsigned int pending_max_depth;
 };
 
 #endif

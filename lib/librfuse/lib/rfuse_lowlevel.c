@@ -142,6 +142,12 @@ static void rfuse_destroy_req(fuse_req_t req)
 	free(req);
 }
 
+__attribute__((noinline)) static void rfuse_trace_dequeue(fuse_req_t u_req,
+		struct rfuse_req *r_req)
+{
+	asm volatile("" : : "r"(u_req), "r"(r_req) : "memory");
+}
+
 
 void rfuse_free_req(fuse_req_t req)
 {
@@ -1779,6 +1785,7 @@ bool rfuse_read_queue(struct rfuse_worker *w, struct rfuse_mt *mt, struct fuse_c
 	u_req->ctx.gid = r_req->in.gid;
 	u_req->ctx.pid = r_req->in.pid;
 	u_req->ch = ch ? fuse_chan_get(ch) : NULL;
+	rfuse_trace_dequeue(u_req, r_req);
 	err = EIO;
 	if(!se->got_init){
 		enum fuse_opcode expected;

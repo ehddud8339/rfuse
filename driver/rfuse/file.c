@@ -2379,7 +2379,9 @@ void fuse_init_file_inode(struct inode *inode)
 	INIT_LIST_HEAD(&fi->queued_writes);
 	fi->writectr = 0;
 	fi->async_writectr = 0;
+	atomic64_set(&fi->async_range_wait_count, 0);
 	init_waitqueue_head(&fi->page_waitq);
+	fi->async_writepages = RB_ROOT;
 	fi->writepages = RB_ROOT;
 
 	if (IS_ENABLED(CONFIG_FUSE_DAX))

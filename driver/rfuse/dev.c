@@ -2370,21 +2370,31 @@ static long fuse_dev_ioctl(struct file *file, unsigned int cmd,
 				wake_up(&r_req->waitq);
 			}
 			break;
-		case RFUSE_REPLY_ASYNC:
-			fud = fuse_get_dev(file);
-			res = -EFAULT;
-			if(copy_from_user(&args, (char __user *)arg, sizeof(struct ioctl_args)))
-				break;
+			case RFUSE_REPLY_ASYNC:
+				fud = fuse_get_dev(file);
+				res = -EFAULT;
+				if(copy_from_user(&args, (char __user *)arg, sizeof(struct ioctl_args)))
+					break;
 
-			// printk("RFUSE: Start Wake up background completion threads from user, riq_id: %d\n", args.riq_id);
-			res = 0;
-			riq = rfuse_get_specific_iqueue(fud->fc, args.riq_id);
-			r_req = (struct rfuse_req*)&riq->kreq[args.req_index];
-			if(r_req) {
-				rfuse_request_end(r_req);
-			} else {
-				printk("RFUSE: Wrong request index, riq_id: %d, req_index: %d\n", args.riq_id, args.req_index);
-			}
+				// printk("RFUSE: Start Wake up background completion threads from user, riq_id: %d\n", args.riq_id);
+				res = 0;
+				riq = rfuse_get_specific_iqueue(fud->fc, args.riq_id);
+				r_req = (struct rfuse_req*)&riq->kreq[args.req_index];
+				{
+					u64 now_ns = ktime_get_mono_fast_ns();
+					u64 last_ns = atomic64_read(&riq->daemon_last_reply_async_ns);
+
+					atomic64_inc(&riq->daemon_reply_async_count);
+					if (last_ns)
+						atomic64_add(now_ns - last_ns,
+							     &riq->daemon_reply_async_gap_ns_total);
+					atomic64_set(&riq->daemon_last_reply_async_ns, now_ns);
+				}
+				if(r_req) {
+					rfuse_request_end(r_req);
+				} else {
+					printk("RFUSE: Wrong request index, riq_id: %d, req_index: %d\n", args.riq_id, args.req_index);
+				}
 			break;	
 		case RFUSE_DAEMON_SLEEP:
 			fud = fuse_get_dev(file);
@@ -2392,18 +2402,42 @@ static long fuse_dev_ioctl(struct file *file, unsigned int cmd,
 			if(copy_from_user(&args, (char __user *)arg, sizeof(struct ioctl_args)))
 				break;
 
-			// printk("RFUSE: User-level daemon is idle, sleep until there is job..., riq_id: %d\n", args.riq_id);
-			res = 0;
-			riq = rfuse_get_specific_iqueue(fud->fc, args.riq_id);
-			wait_event_interruptible(riq->idle_user_waitq, !fud->fc->connected || !riq->connected || \
-				(riq->pending.tail - riq->pending.head != 0));
-			if(!fud->fc->connected || !riq->connected){
-				res = -ENOTCONN;
+				// printk("RFUSE: User-level daemon is idle, sleep until there is job..., riq_id: %d\n", args.riq_id);
+				res = 0;
+				riq = rfuse_get_specific_iqueue(fud->fc, args.riq_id);
+				atomic64_inc(&riq->daemon_sleep_count);
+				atomic64_set(&riq->daemon_last_sleep_start_ns,
+					     ktime_get_mono_fast_ns());
+				wait_event_interruptible(riq->idle_user_waitq, !fud->fc->connected || !riq->connected || \
+					(riq->pending.tail - riq->pending.head != 0));
+				if(!fud->fc->connected || !riq->connected){
+					res = -ENOTCONN;
+					break;
+				}
+				{
+					u64 now_ns = ktime_get_mono_fast_ns();
+					u64 sleep_start_ns =
+						atomic64_read(&riq->daemon_last_sleep_start_ns);
+					unsigned int pending_depth =
+						READ_ONCE(riq->pending.tail) -
+						READ_ONCE(riq->pending.head);
+
+					atomic64_inc(&riq->daemon_wake_count);
+					if (sleep_start_ns)
+						atomic64_add(now_ns - sleep_start_ns,
+							     &riq->daemon_sleep_ns_total);
+					if (pending_depth >= riq->pending.entries - 1) {
+						/*
+						pr_info("RFUSE: daemon wake riq=%d pending_depth=%u entries=%u bg_total=%u bg_active=%u pending_max=%u\n",
+							riq->riq_id, pending_depth, riq->pending.entries,
+							riq->num_background, riq->active_background,
+							READ_ONCE(riq->pending_max_depth));
+						*/
+					}
+				}
+				res = 0;
+				// printk("RFUSE: It is time to work! Wake up user-level daemon, riq_id: %d, entries: %d\n", args.riq_id, riq->pending.tail - riq->pending.head);
 				break;
-			}
-			res = 0;
-			// printk("RFUSE: It is time to work! Wake up user-level daemon, riq_id: %d, entries: %d\n", args.riq_id, riq->pending.tail - riq->pending.head);
-			break;
 		default:
 			res = -ENOTTY;
 			break;
