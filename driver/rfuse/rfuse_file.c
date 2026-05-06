@@ -946,10 +946,6 @@ static ssize_t rfuse_async_req_send(struct fuse_mount *fm,
 
 /************ 4. WRITE ************/
 
-#ifndef RFUSE_WRITE_PAYLOAD_FROM_ITER
-#define RFUSE_WRITE_PAYLOAD_FROM_ITER 1
-#endif
-
 static ssize_t rfuse_fill_write_pages(struct rfuse_io_args *ria, struct address_space *mapping,
 				     struct iov_iter *ii, loff_t pos, unsigned int max_pages)
 {
@@ -1130,14 +1126,14 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 	int err = 0;
 	ssize_t res = 0;
 
+  if (inode->i_size < pos + iov_iter_count(ii))
+		set_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
+
 	do {
 		ssize_t count;
 		struct rfuse_io_args ria = {};
-#if !RFUSE_WRITE_PAYLOAD_FROM_ITER
 		struct rfuse_pages *rp = &ria.rp;
-#endif
 		struct rfuse_req *r_req;
-#if !RFUSE_WRITE_PAYLOAD_FROM_ITER
 		unsigned int nr_pages = rfuse_wr_pages(pos, iov_iter_count(ii), fc->max_pages);
 
 		rp->pages = fuse_pages_alloc(nr_pages, GFP_KERNEL, &rp->descs);
@@ -1145,66 +1141,15 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 			err = -ENOMEM;
 			break;
 		}
-#endif
 
 			r_req = rfuse_get_req(fm, false, false);
 			if (IS_ERR(r_req)) {
 				err = PTR_ERR(r_req);
-#if !RFUSE_WRITE_PAYLOAD_FROM_ITER
 				kfree(rp->pages);
-#endif
 				break;
 			}
 			ria.r_req = r_req;
 
-#if RFUSE_WRITE_PAYLOAD_FROM_ITER
-		count = min_t(size_t, iov_iter_count(ii), fc->max_write);
-		if (count <= 0) {
-			err = count;
-		} else {
-			struct file *file = iocb->ki_filp;
-			struct fuse_file *ff = file->private_data;
-			struct fuse_write_in *in;
-			struct fuse_write_out *out;
-			ssize_t copied;
-			size_t num_written;
-
-			ria.r_req->in_pages = true;
-			rfuse_write_args_fill(&ria, ff, pos, count);
-
-			in = (struct fuse_write_in *)&ria.r_req->args;
-			in->flags = rfuse_write_flags(iocb);
-			if (fm->fc->handle_killpriv_v2 && !capable(CAP_FSETID))
-				in->write_flags |= FUSE_WRITE_KILL_SUIDGID;
-
-			err = rfuse_reserve_payload(ria.r_req, count,
-						    RFUSE_PAYLOAD_IN, true);
-			if (!err) {
-				copied = rfuse_payload_copy_from_iter(ria.r_req,
-								      ii, count);
-				if (copied < 0) {
-					err = copied;
-				} else {
-					count = copied;
-					in->size = count;
-					ria.r_req->in.arglen[0] = count;
-					ria.write.in.size = count;
-
-					err = rfuse_simple_request(ria.r_req);
-					out = (struct fuse_write_out *)&ria.r_req->args;
-					if (!err && out->size > count)
-						err = -EIO;
-					if (!err) {
-						num_written = out->size;
-						res += num_written;
-						pos += num_written;
-						if (num_written != count)
-							err = -EIO;
-					}
-				}
-			}
-		}
-#else
 		count = rfuse_fill_write_pages(&ria, mapping, ii, pos, nr_pages);
 		if (count <= 0) {
 			err = count;
@@ -1222,15 +1167,15 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 					err = -EIO;
 			}
 		}
-#endif
 		rfuse_put_request(r_req); 
-#if !RFUSE_WRITE_PAYLOAD_FROM_ITER
 		kfree(rp->pages);
-#endif
 	} while (!err && iov_iter_count(ii));
 
 	if (res > 0)
 		fuse_write_update_size(inode, pos);
+
+  clear_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
+	fuse_invalidate_attr(inode);
 
 	return res > 0 ? res : err;
 }
