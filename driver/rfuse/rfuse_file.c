@@ -11,6 +11,8 @@
 #include <linux/uio.h>
 #include <linux/fs.h>
 
+#define LDY_NO_PAGE_CACHE 1
+
 struct rfuse_release_in {
 	struct fuse_release_in inarg;
 	struct inode *inode;
@@ -946,6 +948,7 @@ static ssize_t rfuse_async_req_send(struct fuse_mount *fm,
 
 /************ 4. WRITE ************/
 
+#ifndef LDY_NO_PAGE_CACHE
 static ssize_t rfuse_fill_write_pages(struct rfuse_io_args *ria, struct address_space *mapping,
 				     struct iov_iter *ii, loff_t pos, unsigned int max_pages)
 {
@@ -1017,6 +1020,7 @@ static ssize_t rfuse_fill_write_pages(struct rfuse_io_args *ria, struct address_
 
 	return count > 0 ? count : err;
 }
+#endif
 
 static void rfuse_write_args_fill(struct rfuse_io_args *ria, struct fuse_file *ff,
 				 loff_t pos, size_t count)
@@ -1047,6 +1051,7 @@ static void rfuse_write_args_fill(struct rfuse_io_args *ria, struct fuse_file *f
 	r_req->rp = rp;
 }
 
+#ifndef LDY_NO_PAGE_CACHE
 static ssize_t rfuse_send_write_pages(struct rfuse_io_args *ria,
 				     struct kiocb *iocb, struct inode *inode,
 				     loff_t pos, size_t count)
@@ -1117,11 +1122,70 @@ out_put_pages:
 
 	return err;
 }
+#endif
+
+#ifdef LDY_NO_PAGE_CACHE
+static ssize_t rfuse_send_write_payload(struct kiocb *iocb, struct iov_iter *ii, loff_t pos,
+				       size_t count)
+{
+	struct file *file = iocb->ki_filp;
+	struct fuse_file *ff = file->private_data;
+	struct fuse_mount *fm = ff->fm;
+	struct rfuse_req *r_req;
+	struct fuse_write_in *in;
+	struct fuse_write_out *out;
+	ssize_t copied;
+	int err;
+
+	r_req = rfuse_get_req(fm, false, false);
+	if (IS_ERR(r_req))
+		return PTR_ERR(r_req);
+
+	err = rfuse_reserve_payload(r_req, count, RFUSE_PAYLOAD_IN, true);
+	if (err)
+		goto out_put_req;
+
+	copied = rfuse_payload_copy_from_iter(r_req, ii, count);
+	if (copied < 0) {
+		err = copied;
+		goto out_put_req;
+	}
+	if (!copied) {
+		err = -EFAULT;
+		goto out_put_req;
+	}
+
+	in = (struct fuse_write_in *)&r_req->args;
+	in->fh = ff->fh;
+	in->offset = pos;
+	in->size = copied;
+	in->flags = rfuse_write_flags(iocb);
+	if (fm->fc->handle_killpriv_v2 && !capable(CAP_FSETID))
+		in->write_flags |= FUSE_WRITE_KILL_SUIDGID;
+
+	r_req->in.opcode = FUSE_WRITE;
+	r_req->in.nodeid = ff->nodeid;
+	r_req->in.arglen[0] = copied;
+
+	err = rfuse_simple_request(r_req);
+	out = (struct fuse_write_out *)&r_req->args;
+	if (!err && out->size > copied)
+		err = -EIO;
+	if (!err)
+		copied = out->size;
+
+out_put_req:
+	rfuse_put_request(r_req);
+	return err ?: copied;
+}
+#endif
 
 ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, struct iov_iter *ii, loff_t pos){
 	struct inode *inode = mapping->host;
 	struct fuse_conn *fc = get_fuse_conn(inode);
+#ifndef LDY_NO_PAGE_CACHE
 	struct fuse_mount *fm = get_fuse_mount(inode);
+#endif
 	struct fuse_inode *fi = get_fuse_inode(inode);
 	int err = 0;
 	ssize_t res = 0;
@@ -1131,6 +1195,20 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 
 	do {
 		ssize_t count;
+#ifdef LDY_NO_PAGE_CACHE
+		size_t bytes = min_t(size_t, iov_iter_count(ii), fc->max_write);
+
+		count = rfuse_send_write_payload(iocb, ii, pos, bytes);
+		if (count <= 0) {
+			err = count;
+		} else {
+			res += count;
+			pos += count;
+
+			if (count != bytes)
+				err = -EIO;
+		}
+#else
 		struct rfuse_io_args ria = {};
 		struct rfuse_pages *rp = &ria.rp;
 		struct rfuse_req *r_req;
@@ -1169,6 +1247,7 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 		}
 		rfuse_put_request(r_req); 
 		kfree(rp->pages);
+#endif
 	} while (!err && iov_iter_count(ii));
 
 	if (res > 0)
@@ -2140,8 +2219,8 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, i
 	ssize_t res;
 	int err;
 
-	if(is_async)
-	// if (fm->fc->async_read)
+	//if(is_async)
+	if (fm->fc->async_read)
 		r_req = try_rfuse_get_req(fm, true, false, NULL);
 	else
 		r_req = rfuse_get_req(fm, false, false);
@@ -2175,8 +2254,8 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, i
 
 	rfuse_read_args_fill(ria, file, pos, count, FUSE_READ);
 	ria->read.attr_ver = fuse_get_attr_version(fm->fc);
-	if (is_async) {
-	//if (fm->fc->async_read) {
+	//if (is_async) {
+	if (fm->fc->async_read) {
 		ria->ff = rfuse_file_get(ff);
 		r_req->end = rfuse_readpages_end;
 		err = rfuse_prepare_payload(r_req, false);
