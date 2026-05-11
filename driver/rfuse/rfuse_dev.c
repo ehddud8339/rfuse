@@ -15,6 +15,7 @@
 #include <linux/sched.h>
 #include <linux/random.h>
 #include <linux/ktime.h>
+#include <linux/smp.h>
 #include <asm/atomic.h>
 
 #define RFUSE_INT_REQ_BIT (1ULL << 0)
@@ -567,15 +568,18 @@ static unsigned int rfuse_cpu_to_set(int cpu)
 	return (cpu / 10) % RFUSE_ASSO_SET;
 }
 
-static int select_set_rr_id(struct fuse_conn *fc)
+static int select_set_id(void)
 {
-	unsigned int cpu = task_cpu(current);
-	unsigned int set = rfuse_cpu_to_set(cpu);
-	unsigned int off;
+	int ret = task_cpu(current);
+	int sets, c_tp, c_op;
+	int id;
 
-	off = (unsigned int)(atomic_inc_return(&fc->rfuse_async_set[set]) - 1);
-
-	return set * RFUSE_IQUEUE_PER_SET + (off % RFUSE_IQUEUE_PER_SET);
+	sets = ret % RFUSE_ASSO_SET;
+	c_tp = sets * RFUSE_IQUEUE_PER_SET;
+	c_op = (ret / RFUSE_ASSO_SET) % RFUSE_IQUEUE_PER_SET;
+	id = c_tp + c_op;
+  
+  return id;
 }
 
 static int select_active_bg_from_candidates(struct fuse_conn *fc, u64 inode,
@@ -584,8 +588,12 @@ static int select_active_bg_from_candidates(struct fuse_conn *fc, u64 inode,
 {
 	unsigned int cpu = task_cpu(current);
 	unsigned int current_idx = 0;
+	unsigned int fallback_idx;
 	unsigned int idx;
 	unsigned int i;
+
+	if (WARN_ON_ONCE(nr_candidates < 2))
+		return select_cpu_id();
 
 	for (i = 0; i < nr_candidates; i++) {
 		if (candidates[i] == cpu) {
@@ -597,14 +605,15 @@ static int select_active_bg_from_candidates(struct fuse_conn *fc, u64 inode,
 	idx = (current_idx + 1 +
 	       ((unsigned int)(inode ^ (inode >> 32)) %
 		(nr_candidates - 1))) % nr_candidates;
+	fallback_idx = idx;
 
-	while (true) {
+	for (i = 0; i < nr_candidates; i++) {
 		unsigned int candidate = candidates[idx];
 		struct rfuse_iqueue *riq;
 
 		if (candidate != cpu && candidate < RFUSE_NUM_IQUEUE) {
 			riq = fc->riq[candidate];
-			if (READ_ONCE(riq->active_background) <
+			if (READ_ONCE(riq->num_background) <
 			    READ_ONCE(riq->max_background))
 				return candidate;
 		}
@@ -612,9 +621,10 @@ static int select_active_bg_from_candidates(struct fuse_conn *fc, u64 inode,
 		idx++;
 		if (idx == nr_candidates)
 			idx = 0;
-
-		cpu_relax();
 	}
+
+	return candidates[fallback_idx] < RFUSE_NUM_IQUEUE ?
+		candidates[fallback_idx] : select_cpu_id();
 }
 
 static int select_same_numa_active_bg(struct fuse_conn *fc, u64 inode)
@@ -635,18 +645,21 @@ static int select_same_numa_active_bg(struct fuse_conn *fc, u64 inode)
 static int select_all_cpu_active_bg(struct fuse_conn *fc, u64 inode)
 {
 	unsigned int cpu = task_cpu(current);
+	unsigned int fallback_idx;
 	unsigned int idx;
+	unsigned int i;
 
 	idx = (cpu + 1 +
 	       ((unsigned int)(inode ^ (inode >> 32)) %
 		(RFUSE_NUM_IQUEUE - 1))) % RFUSE_NUM_IQUEUE;
+	fallback_idx = idx;
 
-	while (true) {
+	for (i = 0; i < RFUSE_NUM_IQUEUE; i++) {
 		struct rfuse_iqueue *riq;
 
 		if (idx != cpu) {
 			riq = fc->riq[idx];
-			if (READ_ONCE(riq->active_background) <
+			if (READ_ONCE(riq->num_background) <
 			    READ_ONCE(riq->max_background))
 				return idx;
 		}
@@ -654,9 +667,9 @@ static int select_all_cpu_active_bg(struct fuse_conn *fc, u64 inode)
 		idx++;
 		if (idx == RFUSE_NUM_IQUEUE)
 			idx = 0;
-
-		cpu_relax();
 	}
+
+	return fallback_idx;
 }
 
 static unsigned int rfuse_pending_depth(struct rfuse_iqueue *riq)
@@ -682,7 +695,7 @@ struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc, u64 inode)
 		id = select_round_robin_cross_numa(fc);
 		break;
 	case 3:
-		id = select_set_rr_id(fc);
+		id = select_set_id();
 		break;
 	case 4:
 		id = select_cpu_id();
@@ -1569,13 +1582,14 @@ static void rfuse_queue_request(struct rfuse_req *r_req){
 	entry = rfuse_read_pending_tail(riq);		// Get an entry
 	r_req->in.unique = rfuse_get_unique(riq); 
 	entry->request = r_req->index;				// fill entry
-  /*
-	pr_info("rfuse_queue_request: riq=%d op=%s inode=%llu pos=%lld bytes=%u\n",
-		riq->riq_id, rfuse_opcode_name(r_req->in.opcode),
+  
+	pr_info("[DEBUG] rfuse_queue_request: cpu=%u riq=%d op=%s inode=%llu pos=%lld bytes=%u\n",
+		raw_smp_processor_id(), riq->riq_id,
+		rfuse_opcode_name(r_req->in.opcode),
 		(unsigned long long)r_req->in.nodeid,
 		(long long)rfuse_request_pos(r_req),
 		rfuse_request_size(r_req));
-  */
+  
 	if(!test_bit(FR_BACKGROUND, &r_req->flags)) // only increase the reference count for synchronous requests
 		__rfuse_get_request(r_req);
 	rfuse_submit_pending_tail(riq);				// Commit entry
