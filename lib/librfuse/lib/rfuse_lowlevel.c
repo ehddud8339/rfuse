@@ -440,6 +440,14 @@ static int rfuse_req_payload_buffer(fuse_req_t req, struct rfuse_payload_view *v
 	return 0;
 }
 
+static int rfuse_req_has_input_payload(fuse_req_t req)
+{
+	struct rfuse_payload_view payload;
+
+	return rfuse_req_payload_buffer(req, &payload) == 0 &&
+	       (payload.flags & RFUSE_PAYLOAD_IN);
+}
+
 int fuse_reply_buf(fuse_req_t u_req, const char *buf, size_t size){
 	// Write to the kernel buffer
 	struct fuse_chan *ch = u_req->ch;
@@ -1884,7 +1892,9 @@ bool rfuse_read_queue(struct rfuse_worker *w, struct rfuse_mt *mt, struct fuse_c
 		goto reply_err;
 
 	GET_TIMESTAMPS(3)
-	if (r_req->in.opcode == FUSE_WRITE && se->op.write_buf) {
+	if (r_req->in.opcode == FUSE_WRITE && rfuse_req_has_input_payload(u_req)) {
+		rfuse_ll_ops[r_req->in.opcode].func(u_req, r_req->in.nodeid);
+	} else if (r_req->in.opcode == FUSE_WRITE && se->op.write_buf) {
 		err = rfuse_prep_write_buf(u_req, se, &w->fbuf, w->ch);
 		if(err < 0)
 			goto reply_err;

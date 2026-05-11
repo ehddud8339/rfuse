@@ -164,34 +164,71 @@ static int rfuse_payload_alloc(struct rfuse_req *r_req, size_t need, bool may_wa
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(r_req->fm->fc, r_req->riq_id);
 	struct rfuse_payload_extent *active;
 	size_t aligned_need;
+	/* u64 start_ns = ktime_get_ns(); */
+	u64 lock_ns = 0;
+	u64 wait_ns = 0;
+	u32 attempts = 0;
+	u32 waits = 0;
 	int ret;
 
 	if (!need)
 		return 0;
 
 	aligned_need = PAGE_ALIGN(need);
-	if (aligned_need > riq->payload.size)
+	if (aligned_need > riq->payload.size) {
+		/* pr_info("RFUSE_PAYLOAD_ALLOC riq=%d req=%u opcode=%u need=%zu aligned=%zu ret=%d total_ns=%llu lock_ns=0 wait_ns=0 attempts=0 waits=0 used=%u size=%u may_wait=%d\n",
+		 *	r_req->riq_id, r_req->index, r_req->in.opcode, need,
+		 *	aligned_need, -E2BIG,
+		 *	(unsigned long long)(ktime_get_ns() - start_ns),
+		 *	riq->payload.used, riq->payload.size, may_wait);
+		 */
 		return -E2BIG;
+	}
 
 	active = kmalloc(sizeof(*active), GFP_KERNEL);
-	if (!active)
+	if (!active) {
+		/* pr_info("RFUSE_PAYLOAD_ALLOC riq=%d req=%u opcode=%u need=%zu aligned=%zu ret=%d total_ns=%llu lock_ns=0 wait_ns=0 attempts=0 waits=0 used=%u size=%u may_wait=%d\n",
+		 *	r_req->riq_id, r_req->index, r_req->in.opcode, need,
+		 *	aligned_need, -ENOMEM,
+		 *	(unsigned long long)(ktime_get_ns() - start_ns),
+		 *	riq->payload.used, riq->payload.size, may_wait);
+		 */
 		return -ENOMEM;
+	}
 
 	for (;;) {
+		u64 lock_start_ns = ktime_get_ns();
+
 		spin_lock(&riq->payload_lock);
 		ret = rfuse_payload_alloc_locked(r_req, aligned_need, active);
 		spin_unlock(&riq->payload_lock);
-		if (!ret)
+		lock_ns += ktime_get_ns() - lock_start_ns;
+		attempts++;
+		if (!ret) {
+			/* pr_info("RFUSE_PAYLOAD_ALLOC riq=%d req=%u opcode=%u need=%zu aligned=%zu ret=0 total_ns=%llu lock_ns=%llu wait_ns=%llu attempts=%u waits=%u used=%u size=%u offset=%u generation=%u may_wait=%d\n",
+			 *	r_req->riq_id, r_req->index, r_req->in.opcode,
+			 *	need, aligned_need,
+			 *	(unsigned long long)(ktime_get_ns() - start_ns),
+			 *	(unsigned long long)lock_ns,
+			 *	(unsigned long long)wait_ns, attempts, waits,
+			 *	riq->payload.used, riq->payload.size,
+			 *	r_req->payload_offset, r_req->payload_generation,
+			 *	may_wait);
+			 */
 			return 0;
+		}
 		if (ret != -EAGAIN || !may_wait)
 			break;
 
 		pr_info("RFUSE: payload alloc wait riq=%d req=%u opcode=%u need=%zu used=%u size=%u\n",
-				    r_req->riq_id, r_req->index, r_req->in.opcode,
-				    aligned_need, riq->payload.used, riq->payload.size);
+			    r_req->riq_id, r_req->index, r_req->in.opcode,
+			    aligned_need, riq->payload.used, riq->payload.size);
+		waits++;
+		lock_start_ns = ktime_get_ns();
 		ret = wait_event_interruptible(riq->payload_waitq,
 				!r_req->fm->fc->connected ||
 				rfuse_payload_find_extent(riq, aligned_need));
+		wait_ns += ktime_get_ns() - lock_start_ns;
 		if (ret)
 			break;
 		if (!r_req->fm->fc->connected) {
@@ -201,6 +238,14 @@ static int rfuse_payload_alloc(struct rfuse_req *r_req, size_t need, bool may_wa
 	}
 
 	kfree(active);
+	/* pr_info("RFUSE_PAYLOAD_ALLOC riq=%d req=%u opcode=%u need=%zu aligned=%zu ret=%d total_ns=%llu lock_ns=%llu wait_ns=%llu attempts=%u waits=%u used=%u size=%u may_wait=%d\n",
+	 *	r_req->riq_id, r_req->index, r_req->in.opcode, need,
+	 *	aligned_need, ret,
+	 *	(unsigned long long)(ktime_get_ns() - start_ns),
+	 *	(unsigned long long)lock_ns, (unsigned long long)wait_ns,
+	 *	attempts, waits, riq->payload.used, riq->payload.size,
+	 *	may_wait);
+	 */
 	return ret;
 }
 
@@ -208,17 +253,30 @@ void rfuse_release_payload(struct rfuse_req *r_req)
 {
 	struct rfuse_iqueue *riq;
 	struct rfuse_payload_extent *extent;
+	/* u64 start_ns; */
+	u64 lock_start_ns;
+	u64 lock_ns;
+	u32 offset;
+	u32 capacity;
+	u32 generation;
+	bool found = false;
 
 	if (!r_req || !r_req->payload_capacity || !r_req->payload_generation)
 		return;
 
 	riq = rfuse_get_specific_iqueue(r_req->fm->fc, r_req->riq_id);
+	/* start_ns = ktime_get_ns(); */
+	offset = r_req->payload_offset;
+	capacity = r_req->payload_capacity;
+	generation = r_req->payload_generation;
+	lock_start_ns = ktime_get_ns();
 	spin_lock(&riq->payload_lock);
 	list_for_each_entry(extent, &riq->payload_active, list) {
 		if (extent->req_index != r_req->index ||
 		    extent->generation != r_req->payload_generation)
 			continue;
 
+		found = true;
 		extent->req_index = 0;
 		extent->generation = 0;
 		riq->payload.used -= extent->len;
@@ -227,7 +285,15 @@ void rfuse_release_payload(struct rfuse_req *r_req)
 		break;
 	}
 	spin_unlock(&riq->payload_lock);
+	lock_ns = ktime_get_ns() - lock_start_ns;
 	wake_up_all(&riq->payload_waitq);
+	/* pr_info("RFUSE_PAYLOAD_FREE riq=%d req=%u opcode=%u offset=%u capacity=%u generation=%u found=%d total_ns=%llu lock_ns=%llu used=%u size=%u\n",
+	 *	r_req->riq_id, r_req->index, r_req->in.opcode, offset,
+	 *	capacity, generation, found,
+	 *	(unsigned long long)(ktime_get_ns() - start_ns),
+	 *	(unsigned long long)lock_ns, riq->payload.used,
+	 *	riq->payload.size);
+	 */
 
 	r_req->payload_offset = 0;
 	r_req->payload_len = 0;
@@ -1455,11 +1521,10 @@ static bool rfuse_request_queue_background(struct rfuse_req *r_req)
 
 
 // BACKGROUND QUEUE INSERT
-bool rfuse_simple_background(struct fuse_mount *fm, struct rfuse_req *r_req){
-	if(!rfuse_request_queue_background(r_req)){
-		rfuse_put_request(r_req);
+int rfuse_simple_background(struct fuse_mount *fm, struct rfuse_req *r_req){
+	if(!rfuse_request_queue_background(r_req))
 		return -ENOTCONN;
-	}
+
 	return 0;
 }
 

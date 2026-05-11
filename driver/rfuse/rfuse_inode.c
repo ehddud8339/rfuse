@@ -208,7 +208,8 @@ void rfuse_send_init(struct fuse_mount *fm){
 		FUSE_SPLICE_WRITE | FUSE_SPLICE_MOVE | FUSE_SPLICE_READ |
 		FUSE_FLOCK_LOCKS | FUSE_HAS_IOCTL_DIR | FUSE_AUTO_INVAL_DATA |
 		FUSE_DO_READDIRPLUS | FUSE_READDIRPLUS_AUTO | FUSE_ASYNC_DIO |
-		FUSE_WRITEBACK_CACHE | FUSE_NO_OPEN_SUPPORT |
+		/* FUSE_WRITEBACK_CACHE | */
+		FUSE_NO_OPEN_SUPPORT |
 		FUSE_PARALLEL_DIROPS | FUSE_HANDLE_KILLPRIV | FUSE_POSIX_ACL |
 		FUSE_ABORT_ERROR | FUSE_MAX_PAGES | FUSE_CACHE_SYMLINKS |
 		FUSE_NO_OPENDIR_SUPPORT | FUSE_EXPLICIT_INVAL_DATA |
@@ -228,6 +229,7 @@ void rfuse_send_init(struct fuse_mount *fm){
 	if(rfuse_simple_background(fm, r_req) != 0){
 		printk("RFUSE: rfuse_send_init: rfuse_simple_background failed\n");
 		rfuse_process_init_reply(fm, r_req, -ENOTCONN);
+		rfuse_put_request(r_req);
 	}
 
 }

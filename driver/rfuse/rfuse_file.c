@@ -320,7 +320,7 @@ static void rfuse_file_put(struct fuse_file *ff, struct rfuse_req *r_req,
 		if(!r_req || isdir ? r_req->in.opcode != FUSE_RELEASEDIR : r_req->in.opcode != FUSE_RELEASE) {
 			struct rfuse_req *new_r_req;
 			struct rfuse_release_in *new_rfuse_inarg;
-			
+
 			if(sync)
 				new_r_req = rfuse_get_release_req(ff->fm, false, true);
 			else
@@ -343,8 +343,10 @@ static void rfuse_file_put(struct fuse_file *ff, struct rfuse_req *r_req,
 				rfuse_put_request(new_r_req);
 			} else {
 				new_r_req->end = rfuse_release_end;
-				if (rfuse_simple_background(ff->fm, new_r_req))
+				if (rfuse_simple_background(ff->fm, new_r_req)) {
 					rfuse_release_end(ff->fm, new_r_req, -ENOTCONN);
+					rfuse_put_request(new_r_req);
+				}
 			}
 		} else {
 			if (isdir ? ff->fm->fc->no_opendir : ff->fm->fc->no_open) {
@@ -355,8 +357,10 @@ static void rfuse_file_put(struct fuse_file *ff, struct rfuse_req *r_req,
 				rfuse_release_end(ff->fm, r_req, 0);
 			} else {
 				r_req->end = rfuse_release_end;
-				if (rfuse_simple_background(ff->fm, r_req))
+				if (rfuse_simple_background(ff->fm, r_req)) {
 					rfuse_release_end(ff->fm, r_req, -ENOTCONN);
+					rfuse_put_request(r_req);
+				}
 			}
 		}
 
@@ -930,6 +934,7 @@ static ssize_t rfuse_async_req_send(struct fuse_mount *fm,
 {
 	ssize_t err;
 	struct fuse_io_priv *io = ria->io;
+	struct rfuse_req *r_req = ria->r_req;
 
 	spin_lock(&io->lock);
 	kref_get(&io->refcnt);
@@ -937,11 +942,12 @@ static ssize_t rfuse_async_req_send(struct fuse_mount *fm,
 	io->reqs++;
 	spin_unlock(&io->lock);
 
-	ria->r_req->end = rfuse_aio_complete_req;
-	ria->r_req->may_block = io->should_dirty;
-	err = rfuse_simple_background(fm, ria->r_req);
+	r_req->end = rfuse_aio_complete_req;
+	r_req->may_block = io->should_dirty;
+	err = rfuse_simple_background(fm, r_req);
 	if (err) {
-		rfuse_aio_complete_req(fm, ria->r_req, err);
+		rfuse_aio_complete_req(fm, r_req, err);
+		rfuse_put_request(r_req);
 	}
 	return num_bytes;
 }
@@ -1295,7 +1301,7 @@ static ssize_t rfuse_send_write(struct rfuse_io_args *ria, loff_t pos, size_t co
 
 	/* Send request */
 	if (ria->io->async) {
-		err = rfuse_prepare_payload(r_req, false);
+		err = rfuse_prepare_payload(r_req, true);
 		if (err)
 			goto out_put_req;
 		return rfuse_async_req_send(fm, ria, count);
@@ -1555,10 +1561,6 @@ __acquires(fi->lock)
 	r_req->in.arglen[0] = inarg->size;
 	r_req->end = rfuse_writepage_end;
 
-	err = rfuse_prepare_payload(r_req, false);
-	if (err)
-		goto out_free;
-
 	err = rfuse_simple_background(fm, r_req);
 	/* Fails on broken connection only */
 	if (unlikely(err))
@@ -1580,6 +1582,7 @@ __acquires(fi->lock)
 	}
 
 	rfuse_writepage_free(r_wpa);
+	rfuse_put_request(r_req);
 	spin_lock(&fi->lock);
 }
 
@@ -1629,6 +1632,7 @@ int rfuse_writepage_locked(struct page *page)
 
 	rfuse_writepage_add_to_bucket(fc, r_wpa);
 	r_wpa->pos = page_offset(page);
+	r_wpa->ria.write.in.offset = r_wpa->pos;
 
 	copy_highpage(tmp_page, page);
 	r_wpa->ria.write.in.write_flags |= FUSE_WRITE_CACHE;
@@ -1865,6 +1869,7 @@ static int rfuse_writepages_fill(struct page *page,
 
 		rp = &r_wpa->ria.rp;
 		r_wpa->pos = page_offset(page);
+		r_wpa->ria.write.in.offset = r_wpa->pos;
 		r_wpa->ria.write.in.write_flags |= FUSE_WRITE_CACHE;
 		r_wpa->next = NULL;
 		rp->num_pages = 0;
@@ -2258,7 +2263,7 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, i
 	if (fm->fc->async_read) {
 		ria->ff = rfuse_file_get(ff);
 		r_req->end = rfuse_readpages_end;
-		err = rfuse_prepare_payload(r_req, false);
+		err = rfuse_prepare_payload(r_req, true);
 		if (err)
 			goto out_end;
 		err = rfuse_simple_background(fm, r_req);
@@ -2279,6 +2284,7 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, i
 	}
 out_end:
 	rfuse_readpages_end(fm, r_req, err);
+	rfuse_put_request(r_req);
 }
 
 void rfuse_readahead(struct readahead_control *rac)
@@ -2346,7 +2352,7 @@ static ssize_t rfuse_send_read(struct rfuse_io_args *ria, loff_t pos, size_t cou
 	}
 
 	if (ria->io->async) {
-		res = rfuse_prepare_payload(r_req, false);
+		res = rfuse_prepare_payload(r_req, true);
 		if (res)
 			goto out_put_req;
 		return rfuse_async_req_send(fm, ria, count);
