@@ -110,7 +110,7 @@ int rfuse_flush(struct file *file, fl_owner_t id)
 	if (fm->fc->no_flush)
 		goto inval_attr_out;
 
-    r_req = rfuse_get_req(fm, false, true);
+    r_req = rfuse_get_req(fm, false, true, 0);
 	if (IS_ERR(r_req))
 		return PTR_ERR(r_req);
     inarg = (struct fuse_flush_in*)&r_req->args;
@@ -150,7 +150,7 @@ int rfuse_fsync_common(struct file *file, loff_t start, loff_t end,
 	struct fuse_fsync_in *inarg;
 	int err;
 
-	r_req = rfuse_get_req(fm, false, false);
+	r_req = rfuse_get_req(fm, false, false, 0);
 	if (IS_ERR(r_req))
 		return PTR_ERR(r_req);
 	inarg = (struct fuse_fsync_in*)&r_req->args;
@@ -258,7 +258,7 @@ struct fuse_file *rfuse_file_open(struct fuse_mount *fm, u64 nodeid,
 		struct fuse_open_out *outarg;
 			int err;
 
-			r_req = rfuse_get_req(fm, false, false);
+			r_req = rfuse_get_req(fm, false, false, 0);
 			if (IS_ERR(r_req)) {
 				fuse_file_free(ff);
 				return ERR_PTR(PTR_ERR(r_req));
@@ -306,7 +306,7 @@ static struct rfuse_req *rfuse_get_release_req(struct fuse_mount *fm,
 	struct rfuse_req *r_req;
 
 	for (;;) {
-		r_req = rfuse_get_req(fm, for_background, force);
+		r_req = rfuse_get_req(fm, for_background, force, 0);
 		if (!IS_ERR(r_req))
 			return r_req;
 
@@ -1143,7 +1143,7 @@ static ssize_t rfuse_send_write_payload(struct kiocb *iocb, struct iov_iter *ii,
 	ssize_t copied;
 	int err;
 
-	r_req = rfuse_get_req(fm, false, false);
+	r_req = rfuse_get_req(fm, false, false, count);
 	if (IS_ERR(r_req))
 		return PTR_ERR(r_req);
 
@@ -1226,7 +1226,9 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 			break;
 		}
 
-			r_req = rfuse_get_req(fm, false, false);
+			r_req = rfuse_get_req(fm, false, false,
+					      min_t(size_t, iov_iter_count(ii),
+						    fc->max_write));
 			if (IS_ERR(r_req)) {
 				err = PTR_ERR(r_req);
 				kfree(rp->pages);
@@ -1279,9 +1281,9 @@ static ssize_t rfuse_send_write(struct rfuse_io_args *ria, loff_t pos, size_t co
 
 	/* Allocate rfuse request for write) */
 	if (ria->io->async) {
-		r_req = rfuse_get_req(fm, true, false);
+		r_req = rfuse_get_req(fm, true, false, count);
 	} else {
-		r_req = rfuse_get_req(fm, false, false);
+		r_req = rfuse_get_req(fm, false, false, count);
 	}
 	if (IS_ERR(r_req))
 		return PTR_ERR(r_req);
@@ -1522,7 +1524,7 @@ __acquires(fi->lock)
 	__u64 data_size = r_wpa->ria.rp.num_pages * PAGE_SIZE;
 	int err;
   // printk("test\n");
-	r_req = try_rfuse_get_req(fm, true, true, &fi->lock);
+	r_req = try_rfuse_get_req(fm, true, true, 0, &fi->lock);
 	if (IS_ERR(r_req)) {
 		err = PTR_ERR(r_req);
 		spin_lock(&fi->lock);
@@ -2097,7 +2099,7 @@ int rfuse_do_readpage(struct file *file, struct page *page){
 	ssize_t res;
 	u64 attr_ver;
 
-	r_req = rfuse_get_req(fm, false, false);
+	r_req = rfuse_get_req(fm, false, false, desc.length);
 	if (IS_ERR(r_req))
 		return PTR_ERR(r_req);
 	ria.r_req = r_req;
@@ -2226,9 +2228,9 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, i
 
 	//if(is_async)
 	if (fm->fc->async_read)
-		r_req = try_rfuse_get_req(fm, true, false, NULL);
+		r_req = try_rfuse_get_req(fm, true, false, count, NULL);
 	else
-		r_req = rfuse_get_req(fm, false, false);
+		r_req = rfuse_get_req(fm, false, false, count);
 	if (IS_ERR(r_req)) {
 		int i;
 
@@ -2335,9 +2337,9 @@ static ssize_t rfuse_send_read(struct rfuse_io_args *ria, loff_t pos, size_t cou
 
 	/* Allocate rfuse request for write) */
 	if (ria->io->async) {
-		r_req = rfuse_get_req(fm, true, false);
+		r_req = rfuse_get_req(fm, true, false, count);
 	} else {
-		r_req = rfuse_get_req(fm, false, false);
+		r_req = rfuse_get_req(fm, false, false, count);
 	}
 	if (IS_ERR(r_req))
 		return PTR_ERR(r_req);
@@ -2398,7 +2400,7 @@ long rfuse_file_fallocate(struct file *file, int mode, loff_t offset, loff_t len
 	bool block_faults = FUSE_IS_DAX(inode) && lock_inode;
 	struct rfuse_req *r_req;
 
-	r_req = rfuse_get_req(fm, false, false);
+	r_req = rfuse_get_req(fm, false, false, 0);
 	if (IS_ERR(r_req))
 		return PTR_ERR(r_req);
 	inarg = (struct fuse_fallocate_in *)&r_req->args;

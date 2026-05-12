@@ -1414,13 +1414,16 @@ void rfuse_extract_complete_head(struct rfuse_iqueue *riq);
 
 // ALLOCATE NEW REQUEST AND ARGUMENTS
 void rfuse_put_request(struct rfuse_req *req);
-struct rfuse_req *rfuse_get_req(struct fuse_mount *fm, bool for_background, bool force);
+struct rfuse_req *rfuse_get_req(struct fuse_mount *fm, bool for_background,
+				bool force, size_t payload_len);
 uint32_t rfuse_get_request_buffer(struct fuse_mount *fm, int riq_id);
 void rfuse_put_request_buffer(struct fuse_mount *fm, uint32_t arg_index, int riq_id);
 uint32_t rfuse_get_argument_buffer(struct fuse_mount *fm, int riq_id);
 void rfuse_put_argument_buffer(struct fuse_mount *fm, uint32_t arg_index, int riq_id);
 
-struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background, bool force, spinlock_t *file_lock);
+struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background,
+				    bool force, size_t payload_len,
+				    spinlock_t *file_lock);
 
 // SUBMIT A REQUEST TO PENDING/BACKGROUND
 ssize_t rfuse_simple_request(struct rfuse_req *r_req);

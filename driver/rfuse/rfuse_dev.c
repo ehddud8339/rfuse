@@ -773,6 +773,34 @@ static int select_cpu_id(void){
 	return (ret % RFUSE_NUM_IQUEUE);
 }
 
+static struct rfuse_iqueue *rfuse_get_iqueue_with_payload_space(struct fuse_conn *fc,
+								size_t len)
+{
+	size_t need = PAGE_ALIGN(len);
+	int start = select_cpu_id();
+	int i;
+
+	if (!need || need > fc->riq[start]->payload.size)
+		return fc->riq[start];
+
+	for (;;) {
+		for (i = 0; i < RFUSE_NUM_IQUEUE; i++) {
+			int id = (start + i) % RFUSE_NUM_IQUEUE;
+			struct rfuse_iqueue *riq = fc->riq[id];
+			u32 free_payload;
+
+			spin_lock(&riq->payload_lock);
+			free_payload = riq->payload.size - riq->payload.used;
+			spin_unlock(&riq->payload_lock);
+
+			if (free_payload >= need)
+				return riq;
+		}
+
+		cond_resched();
+	}
+}
+
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc){
 	int id = 0;
 
@@ -1022,9 +1050,11 @@ void rfuse_put_request(struct rfuse_req *r_req){
     }  
 }
 
-struct rfuse_req *rfuse_request_alloc(struct fuse_mount *fm){
+struct rfuse_req *rfuse_request_alloc(struct fuse_mount *fm, size_t payload_len){
 	struct fuse_conn *fc = fm->fc;
-	struct rfuse_iqueue *riq = rfuse_get_iqueue(fc);
+	struct rfuse_iqueue *riq = payload_len ?
+		rfuse_get_iqueue_with_payload_space(fc, payload_len) :
+		rfuse_get_iqueue(fc);
 	int riq_id = riq->riq_id;
 	struct rfuse_req *r_req = NULL;
 	uint32_t req_index;
@@ -1047,7 +1077,8 @@ struct rfuse_req *rfuse_request_alloc(struct fuse_mount *fm){
 	return r_req;
 }
 
-struct rfuse_req *rfuse_get_req(struct fuse_mount *fm, bool for_background, bool force){
+struct rfuse_req *rfuse_get_req(struct fuse_mount *fm, bool for_background,
+				bool force, size_t payload_len){
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_req *r_req;
 	struct rfuse_iqueue *riq;
@@ -1056,7 +1087,7 @@ struct rfuse_req *rfuse_get_req(struct fuse_mount *fm, bool for_background, bool
 	if(force) {
 		atomic_inc(&fc->num_waiting);
 
-		r_req = rfuse_request_alloc(fm);
+		r_req = rfuse_request_alloc(fm, payload_len);
 		err = -ENOMEM;
 		if (!r_req) {
 			if (for_background)
@@ -1087,7 +1118,7 @@ struct rfuse_req *rfuse_get_req(struct fuse_mount *fm, bool for_background, bool
 			goto out; 
 		}
 
-		r_req = rfuse_request_alloc(fm);
+		r_req = rfuse_request_alloc(fm, payload_len);
 		err = -ENOMEM;
 		if (!r_req) {
 			if (for_background)
@@ -1157,9 +1188,13 @@ static uint32_t try_rfuse_get_request_buffer(struct fuse_mount *fm, int riq_id){
 	return request_index;
 }
 
-static struct rfuse_req *try_rfuse_request_alloc(struct fuse_mount *fm, spinlock_t *file_lock){
+static struct rfuse_req *try_rfuse_request_alloc(struct fuse_mount *fm,
+						 size_t payload_len,
+						 spinlock_t *file_lock){
 	struct fuse_conn *fc = fm->fc;
-	struct rfuse_iqueue *riq = rfuse_get_iqueue_for_async(fc);
+	struct rfuse_iqueue *riq = payload_len ?
+		rfuse_get_iqueue_with_payload_space(fc, payload_len) :
+		rfuse_get_iqueue_for_async(fc);
 	int riq_id = riq->riq_id;
 	struct rfuse_req *r_req = NULL;
 	uint32_t req_index;
@@ -1192,7 +1227,9 @@ static struct rfuse_req *try_rfuse_request_alloc(struct fuse_mount *fm, spinlock
 	return r_req;
 }
 
-struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background, bool force, spinlock_t *file_lock){
+struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background,
+				    bool force, size_t payload_len,
+				    spinlock_t *file_lock){
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_req *r_req;
 	struct rfuse_iqueue *riq;
@@ -1201,7 +1238,7 @@ struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background, 
 	if(force) {
 		atomic_inc(&fc->num_waiting);
 
-		r_req = try_rfuse_request_alloc(fm, file_lock);
+		r_req = try_rfuse_request_alloc(fm, payload_len, file_lock);
 		err = -ENOMEM;
 		if (!r_req) {
 			if (for_background)
@@ -1232,7 +1269,7 @@ struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background, 
 			goto out; 
 		}
 
-		r_req = try_rfuse_request_alloc(fm, file_lock);
+		r_req = try_rfuse_request_alloc(fm, payload_len, file_lock);
 		err = -ENOMEM;
 		if (!r_req) {
 			if (for_background)

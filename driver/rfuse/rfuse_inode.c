@@ -190,7 +190,7 @@ void rfuse_send_init(struct fuse_mount *fm){
 	struct rfuse_req *r_req;
 	struct fuse_init_in *inarg;
 
-	r_req = rfuse_get_req(fm, true, true);
+	r_req = rfuse_get_req(fm, true, true, 0);
 	if (IS_ERR(r_req)) {
 		fm->fc->conn_init = 0;
 		fm->fc->conn_error = 1;
@@ -252,7 +252,7 @@ int rfuse_statfs(struct dentry *dentry, struct kstatfs *buf)
 		return 0;
 	}
 
-	r_req = rfuse_get_req(fm, false, false);
+	r_req = rfuse_get_req(fm, false, false, 0);
 	if (IS_ERR(r_req))
 		return PTR_ERR(r_req);
 	outarg = (struct fuse_statfs_out*)&r_req->args;
@@ -275,7 +275,7 @@ void rfuse_send_destroy(struct fuse_mount *fm)
 {
 	if (fm->fc->conn_init) {
 		struct rfuse_req *r_req;
-		r_req = rfuse_get_req(fm, false, true);
+		r_req = rfuse_get_req(fm, false, true, 0);
 		if (IS_ERR(r_req))
 			return;
 		r_req->in.opcode = FUSE_DESTROY;
