@@ -551,6 +551,34 @@ static int select_cpu_id(void){
   */
 }
 
+static int select_available_riq(struct fuse_conn *fc)
+{
+	int start = select_cpu_id();
+	int id = start;
+	unsigned int checked = 0;
+
+	/*
+	 * This is an advisory, lockless selection. The actual background
+	 * throttle is rechecked before submission in rfuse_block_alloc().
+	 */
+	while (checked < RFUSE_NUM_IQUEUE) {
+		struct rfuse_iqueue *riq = fc->riq[id];
+
+		if (READ_ONCE(riq->connected) &&
+		    !READ_ONCE(riq->blocked) &&
+		    READ_ONCE(riq->num_background) <
+		    READ_ONCE(riq->max_background))
+			return id;
+
+		id++;
+		if (id == RFUSE_NUM_IQUEUE)
+			id = 0;
+		checked++;
+	}
+
+	return start;
+}
+
 static unsigned int rfuse_cpu_to_set(int cpu)
 {
 	if (cpu < 0)
@@ -682,6 +710,7 @@ static unsigned int rfuse_pending_depth(struct rfuse_iqueue *riq)
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc, u64 inode){
+	struct rfuse_iqueue *riq;
 	int id;
 
 	switch (RFUSE_ASYNC_SELECTION_ALGO) {
@@ -706,11 +735,14 @@ struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc, u64 inode)
 	case 6:
 		id = select_all_cpu_active_bg(fc, inode);
 		break;
+	case 7:
+		id = select_available_riq(fc);
+		break;
 	default:
 		id = select_round_robin(fc);
 		break;
 	}
-	struct rfuse_iqueue *riq = fc->riq[id];
+	riq = fc->riq[id];
 	
 	return riq;
 }
@@ -1582,14 +1614,14 @@ static void rfuse_queue_request(struct rfuse_req *r_req){
 	entry = rfuse_read_pending_tail(riq);		// Get an entry
 	r_req->in.unique = rfuse_get_unique(riq); 
 	entry->request = r_req->index;				// fill entry
-  
+  /*
 	pr_info("[DEBUG] rfuse_queue_request: cpu=%u riq=%d op=%s inode=%llu pos=%lld bytes=%u\n",
 		raw_smp_processor_id(), riq->riq_id,
 		rfuse_opcode_name(r_req->in.opcode),
 		(unsigned long long)r_req->in.nodeid,
 		(long long)rfuse_request_pos(r_req),
 		rfuse_request_size(r_req));
-  
+  */
 	if(!test_bit(FR_BACKGROUND, &r_req->flags)) // only increase the reference count for synchronous requests
 		__rfuse_get_request(r_req);
 	rfuse_submit_pending_tail(riq);				// Commit entry
