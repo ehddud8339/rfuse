@@ -10,6 +10,7 @@
 #include <linux/falloc.h>
 #include <linux/uio.h>
 #include <linux/fs.h>
+#include <linux/ktime.h>
 
 struct rfuse_release_in {
 	struct fuse_release_in inarg;
@@ -41,19 +42,30 @@ static bool rfuse_async_writes_inflight(struct inode *inode)
 	return READ_ONCE(fi->async_writectr) > 0;
 }
 
-static void rfuse_wait_async_writes(struct inode *inode)
+static void rfuse_wait_async_writes(struct inode *inode,
+				    enum rfuse_async_wait_reason reason)
 {
 	struct fuse_inode *fi = get_fuse_inode(inode);
+	struct fuse_conn *fc = get_fuse_conn(inode);
+	bool blocked;
+	u64 start_ns = 0;
+	u64 wait_ns = 0;
 
 	/*
 	 * half-sync write는 page cache에는 먼저 보일 수 있지만 backing file은
 	 * daemon completion 전까지 stale할 수 있다. backing READ 직전에만
 	 * inode 단위로 drain을 기다려 read-after-write 역전을 막는다.
 	 */
-	if (!rfuse_async_writes_inflight(inode))
+	blocked = rfuse_async_writes_inflight(inode);
+	if (!blocked) {
+		rfuse_async_stats_record_wait(fc, reason, false, 0);
 		return;
+	}
 
+	start_ns = ktime_get_ns();
 	wait_event(fi->page_waitq, !rfuse_async_writes_inflight(inode));
+	wait_ns = ktime_get_ns() - start_ns;
+	rfuse_async_stats_record_wait(fc, reason, true, wait_ns);
 }
 
 static unsigned int rfuse_write_flags(struct kiocb *iocb)
@@ -177,7 +189,7 @@ int rfuse_flush(struct file *file, fl_owner_t id)
 	 * async buffered write도 모두 끝난 뒤에만 내려가야 한다.
 	 */
 	rfuse_sync_writes(inode);
-	rfuse_wait_async_writes(inode);
+	rfuse_wait_async_writes(inode, RFUSE_ASYNC_WAIT_FLUSH);
 
 	if (fm->fc->no_flush)
 		goto out_unlock;
@@ -267,7 +279,7 @@ int rfuse_fsync(struct file *file, loff_t start, loff_t end,
 		goto out;
 
 	rfuse_sync_writes(inode);
-	rfuse_wait_async_writes(inode);
+	rfuse_wait_async_writes(inode, RFUSE_ASYNC_WAIT_FSYNC);
 
 	/*
 	 * Due to implementation of fuse writeback
@@ -582,24 +594,37 @@ static void rfuse_log_async_range_wait(struct inode *inode, pgoff_t idx_from,
 				       pgoff_t idx_to)
 {
 	struct fuse_inode *fi = get_fuse_inode(inode);
-	long long count = atomic64_inc_return(&fi->async_range_wait_count);
+
+	atomic64_inc(&fi->async_range_wait_count);
 
 	/*
 	pr_info("RFUSE: async submit blocked cause=async-range-overlap inode=%lu idx_from=%lu idx_to=%lu count=%lld\n",
-		inode->i_ino, (unsigned long)idx_from, (unsigned long)idx_to, count);
+		inode->i_ino, (unsigned long)idx_from, (unsigned long)idx_to,
+		atomic64_read(&fi->async_range_wait_count));
 	*/
 }
 
 static void rfuse_wait_async_write_range(struct inode *inode, pgoff_t idx_from,
-					 pgoff_t idx_to)
+					 pgoff_t idx_to,
+					 enum rfuse_async_wait_reason reason)
 {
 	struct fuse_inode *fi = get_fuse_inode(inode);
+	struct fuse_conn *fc = get_fuse_conn(inode);
+	bool blocked;
+	u64 start_ns = 0;
+	u64 wait_ns = 0;
 
-	if (rfuse_async_range_overlaps(inode, idx_from, idx_to))
+	blocked = rfuse_async_range_overlaps(inode, idx_from, idx_to);
+	if (blocked) {
 		rfuse_log_async_range_wait(inode, idx_from, idx_to);
+		start_ns = ktime_get_ns();
+	}
 
 	wait_event(fi->page_waitq,
 		   !rfuse_async_range_overlaps(inode, idx_from, idx_to));
+	if (blocked)
+		wait_ns = ktime_get_ns() - start_ns;
+	rfuse_async_stats_record_wait(fc, reason, blocked, wait_ns);
 }
 
 static struct rfuse_writepage_args *rfuse_find_writeback(struct fuse_inode *fi,
@@ -1331,6 +1356,7 @@ static void rfuse_bwrite_complete_req(struct fuse_mount *fm, struct rfuse_req *r
 		mapping_set_error(io->inode->i_mapping, err ? err : -EIO);
 
 	count = err ? 0 : outarg->size;
+	rfuse_async_stats_record_complete(fm->fc, r_req, err);
 	rfuse_release_bwrite_pages(ria, count, short_write, err);
 	spin_lock(&fi->lock);
 	if (ria->async_wb_node) {
@@ -1348,8 +1374,11 @@ static void rfuse_bwrite_complete_req(struct fuse_mount *fm, struct rfuse_req *r
 		wake = true;
 	}
 	spin_unlock(&fi->lock);
-	if (wake)
+	if (wake) {
+		rfuse_async_stats_record_page_waitq_wake(fm->fc,
+							 waitqueue_active(&fi->page_waitq));
 		wake_up(&fi->page_waitq);
+	}
 	rfuse_aio_complete(io, err, pos);
 	rfuse_io_free(ria);
 }
@@ -1429,6 +1458,7 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 		 */
 		bool wake = false;
 
+		rfuse_async_stats_record_submit_fail(fm->fc);
 		spin_lock(&fi->lock);
 		if (ria->async_wb_node) {
 			struct rfuse_async_write_range *failed_range =
@@ -1446,14 +1476,19 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 			wake = true;
 		}
 		spin_unlock(&fi->lock);
-		if (wake)
+		if (wake) {
+			rfuse_async_stats_record_page_waitq_wake(fm->fc,
+								 waitqueue_active(&fi->page_waitq));
 			wake_up(&fi->page_waitq);
+		}
 		rfuse_release_bwrite_pages(ria, 0, false, true);
 		spin_lock(&io->lock);
 		io->size -= count;
 		io->reqs--;
 		spin_unlock(&io->lock);
 		kref_put(&io->refcnt, rfuse_io_release);
+	} else {
+		rfuse_async_stats_record_submit(fm->fc, count, ria->rp.num_pages);
 	}
 
 	return err;
@@ -1554,7 +1589,7 @@ async:
 				break;
 			}
 
-			r_req = try_rfuse_get_wr_req(fm, fi, true, false, NULL);
+			r_req = try_rfuse_get_req(fm, true, false, NULL, fi->nodeid);
 			if (IS_ERR(r_req)) {
         printk("RFUSE: request allocation failed\n");
 				err = PTR_ERR(r_req);
@@ -1871,7 +1906,7 @@ __acquires(fi->lock)
 	__u64 data_size = r_wpa->ria.rp.num_pages * PAGE_SIZE;
 	int err;
 
-	r_req = try_rfuse_get_req(fm, true, true, &fi->lock);
+	r_req = try_rfuse_get_req(fm, true, true, &fi->lock, fi->nodeid);
 	if (IS_ERR(r_req)) {
 		err = PTR_ERR(r_req);
 		spin_lock(&fi->lock);
@@ -2443,7 +2478,8 @@ int rfuse_do_readpage(struct file *file, struct page *page){
 	ssize_t res;
 	u64 attr_ver;
 
-	rfuse_wait_async_write_range(inode, page->index, page->index);
+	rfuse_wait_async_write_range(inode, page->index, page->index,
+				     RFUSE_ASYNC_WAIT_READPAGE);
 	r_req = rfuse_get_req(fm, false, false);
 	if (IS_ERR(r_req))
 		return PTR_ERR(r_req);
@@ -2567,10 +2603,12 @@ void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, int is_a
 	ssize_t res;
 	int err;
 
-	rfuse_wait_async_write_range(file_inode(file), idx_from, idx_to);
+	rfuse_wait_async_write_range(file_inode(file), idx_from, idx_to,
+				     RFUSE_ASYNC_WAIT_READPAGES);
 	if(is_async)
   //if (fm->fc->async_read)
-		r_req = try_rfuse_get_req(fm, true, false, NULL);
+		r_req = try_rfuse_get_req(fm, true, false, NULL,
+					  get_fuse_inode(file_inode(file))->nodeid);
 	else
 		r_req = rfuse_get_req(fm, false, false);
 
@@ -2669,7 +2707,8 @@ static ssize_t rfuse_send_read(struct rfuse_io_args *ria, loff_t pos, size_t cou
 	struct rfuse_req *r_req;
 	int res;
 
-	rfuse_wait_async_write_range(file_inode(file), idx_from, idx_to);
+	rfuse_wait_async_write_range(file_inode(file), idx_from, idx_to,
+				     RFUSE_ASYNC_WAIT_DIRECT_READ);
 	/* Allocate rfuse request for write) */
 	if (ria->io->async) {
 		r_req = rfuse_get_req(fm, true, false);

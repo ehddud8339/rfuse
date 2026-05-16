@@ -36,6 +36,55 @@
 
 #include "rfuse.h"
 
+enum rfuse_stat_op {
+	RFUSE_STAT_OP_PUT_REQUEST_BUFFER = 0,
+	RFUSE_STAT_OP_PUT_ARGUMENT_BUFFER,
+	RFUSE_STAT_OP_PUT_REQUEST_BG_RELEASE,
+	RFUSE_STAT_OP_TRY_GET_REQUEST_BUFFER,
+	RFUSE_STAT_OP_QUEUE_REQUEST,
+	RFUSE_STAT_OP_REQUEST_QUEUE_BG_ACCOUNT,
+	RFUSE_STAT_OP_REQUEST_QUEUE_BG_ENQUEUE,
+	RFUSE_STAT_OP_REQUEST_END_BG_RELEASE,
+	RFUSE_STAT_OP_MAX,
+};
+
+struct rfuse_latency_stat {
+	u64 count;
+	u64 total_ns;
+	u64 min_ns;
+	u64 max_ns;
+};
+
+struct rfuse_latency_stats {
+	spinlock_t lock;
+	struct rfuse_latency_stat ops[RFUSE_STAT_OP_MAX];
+};
+
+enum rfuse_async_wait_reason {
+	RFUSE_ASYNC_WAIT_FLUSH = 0,
+	RFUSE_ASYNC_WAIT_FSYNC,
+	RFUSE_ASYNC_WAIT_READPAGE,
+	RFUSE_ASYNC_WAIT_READPAGES,
+	RFUSE_ASYNC_WAIT_DIRECT_READ,
+	RFUSE_ASYNC_WAIT_MAX,
+};
+
+struct rfuse_async_stats {
+	atomic64_t submit_count;
+	atomic64_t submit_fail_count;
+	atomic64_t submit_bytes;
+	atomic64_t submit_pages;
+	atomic64_t complete_count;
+	atomic64_t complete_error_count;
+	atomic64_t complete_same_cpu;
+	atomic64_t complete_diff_cpu;
+	atomic64_t page_waitq_wake_count;
+	atomic64_t page_waitq_wake_active_count;
+	atomic64_t wait_call[RFUSE_ASYNC_WAIT_MAX];
+	atomic64_t wait_blocked[RFUSE_ASYNC_WAIT_MAX];
+	atomic64_t wait_time_ns[RFUSE_ASYNC_WAIT_MAX];
+};
+
 /** Default max number of pages that can be used in a single read request */
 #define FUSE_DEFAULT_MAX_PAGES_PER_REQ 32
 
@@ -623,6 +672,12 @@ struct fuse_conn {
 
 	/** rfuse Input queue */
 	struct rfuse_iqueue **riq;
+
+	/** rfuse lock timing statistics */
+	struct rfuse_latency_stats rfuse_stats;
+
+	/** rfuse async buffered-write behavior statistics */
+	struct rfuse_async_stats rfuse_async_stats;
 
 	/** rfuse async queue round-robin cursor per associated set */
 	atomic_t rfuse_async_set[RFUSE_ASSO_SET];
@@ -1435,10 +1490,9 @@ void rfuse_put_request_buffer(struct fuse_mount *fm, uint32_t arg_index, int riq
 uint32_t rfuse_get_argument_buffer(struct fuse_mount *fm, int riq_id);
 void rfuse_put_argument_buffer(struct fuse_mount *fm, uint32_t arg_index, int riq_id);
 
-struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background, bool force, spinlock_t *file_lock);
-struct rfuse_req *try_rfuse_get_wr_req(struct fuse_mount *fm, struct fuse_inode *fi,
-				       bool for_background, bool force,
-				       spinlock_t *file_lock);
+struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background,
+				    bool force, spinlock_t *file_lock,
+				    u64 inode);
 
 // SUBMIT A REQUEST TO PENDING/BACKGROUND
 ssize_t rfuse_simple_request(struct rfuse_req *r_req);
@@ -1458,4 +1512,16 @@ ssize_t rfuse_dev_splice_write(struct pipe_inode_info *pipe, struct file *out, l
 // For FUSE compatability
 struct fuse_req *fuse_request_alloc(struct fuse_mount *fm, gfp_t flags);
 void rfuse_abort_conn(struct fuse_conn *fc);
+void rfuse_stats_dump(struct fuse_conn *fc);
+void rfuse_async_stats_record_submit(struct fuse_conn *fc, size_t bytes,
+				     unsigned int pages);
+void rfuse_async_stats_record_submit_fail(struct fuse_conn *fc);
+void rfuse_async_stats_record_complete(struct fuse_conn *fc,
+				       struct rfuse_req *r_req, int err);
+void rfuse_async_stats_record_page_waitq_wake(struct fuse_conn *fc,
+					      bool waiters);
+void rfuse_async_stats_record_wait(struct fuse_conn *fc,
+				   enum rfuse_async_wait_reason reason,
+				   bool blocked, u64 wait_ns);
+void rfuse_async_stats_dump(struct fuse_conn *fc);
 #endif /* _FS_FUSE_I_H */

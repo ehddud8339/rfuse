@@ -35,6 +35,23 @@
 #define RFUSE_READ	     0x40000000ULL
 #define RFUSE_WRITE	     0x48000000ULL
 
+#define RFUSE_LAT_BUCKETS 9
+
+enum rfuse_latency_metric {
+	RFUSE_LAT_BG_QUEUE_WAIT = 0,
+	RFUSE_LAT_ASYNC_TOTAL,
+	RFUSE_LAT_MAX,
+};
+
+struct rfuse_latency_hist {
+	spinlock_t lock;
+	u64 count;
+	u64 total_ns;
+	u64 min_ns;
+	u64 max_ns;
+	u64 buckets[RFUSE_LAT_BUCKETS];
+};
+
 struct rfuse_req{
 	/** Request input header **/
 	struct{
@@ -112,6 +129,7 @@ struct rfuse_bg_entry{
 	struct list_head list;
 	uint32_t request;
 	int32_t riq_id;
+	u64 enqueue_ns;
 };
 
 // Pending queue, Complete Queue
@@ -242,6 +260,8 @@ struct rfuse_iqueue{
 	atomic64_t daemon_last_sleep_start_ns;
 	atomic64_t daemon_last_reply_async_ns;
 	unsigned int pending_max_depth;
+
+	struct rfuse_latency_hist lat[RFUSE_LAT_MAX];
 };
 
 #endif
