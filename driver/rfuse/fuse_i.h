@@ -682,6 +682,15 @@ struct fuse_conn {
 	/** rfuse async queue round-robin cursor per associated set */
 	atomic_t rfuse_async_set[RFUSE_ASSO_SET];
 
+	/** rfuse dynamic sync queue scheduler state */
+	atomic64_t rfuse_sched_mask;
+	atomic64_t rfuse_sched_window_start_ns;
+	atomic_t rfuse_sched_mode;
+	atomic_t rfuse_sched_low_windows;
+	atomic64_t rfuse_sched_local_count;
+	atomic64_t rfuse_sched_spread_count;
+	atomic64_t rfuse_sched_switch_count;
+
 	/** The next unique kernel file handle */
 	atomic64_t khctr;
 

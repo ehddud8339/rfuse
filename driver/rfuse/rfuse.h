@@ -21,6 +21,16 @@
 #define RFUSE_MAX_QUEUE_SIZE 1024*4      // Maximum number of requests in a queue
 #define RFUSE_ASYNC_PENDING_RR_THRESHOLD 1
 
+#define RFUSE_SCHED_WINDOW_NS      1000000ULL
+#define RFUSE_SCHED_SPREAD_ON      4
+#define RFUSE_SCHED_LOCAL_ON       1
+#define RFUSE_SCHED_LOCAL_WINDOWS  3
+
+enum rfuse_sched_mode {
+	RFUSE_SCHED_LOCAL = 0,
+	RFUSE_SCHED_SPREAD = 1,
+};
+
 #define RFUSE_RIQ_ID_MASK    0x00ff0000ULL
 #define RFUSE_QUEUE_MAP_MASK 0xff000000ULL
 #define RFUSE_REQ_IDX_MASK   0x0000ffff00000000ULL

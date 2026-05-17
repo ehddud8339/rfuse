@@ -33,6 +33,7 @@
    5: LDY background-aware cross-NUMA CPU ID
    6: LDY background-aware same-NUMA CPU ID except current CPU
    7: LDY background-aware inode-hash ID
+   8: LDY dynamic local/spread scheduler
  */
 
 #define RFUSE_SELECTION_ALGO 2
@@ -491,6 +492,13 @@ void rfuse_iqueue_release(struct fuse_conn *fc){
 	struct rfuse_iqueue **riq = fc->riq;
 
 	rfuse_async_stats_dump(fc);
+	pr_info("RFUSE_SCHED mode=%d local=%llu spread=%llu switches=%llu mask=0x%llx low_windows=%d\n",
+		atomic_read(&fc->rfuse_sched_mode),
+		atomic64_read(&fc->rfuse_sched_local_count),
+		atomic64_read(&fc->rfuse_sched_spread_count),
+		atomic64_read(&fc->rfuse_sched_switch_count),
+		atomic64_read(&fc->rfuse_sched_mask),
+		atomic_read(&fc->rfuse_sched_low_windows));
 
 	for(i = 0; i < RFUSE_NUM_IQUEUE; i++) {
 		rfuse_latency_dump_riq(riq[i]);
@@ -610,6 +618,64 @@ static int select_cpu_id(void){
 	int ret = task_cpu(current);
 	
 	return (ret % RFUSE_NUM_IQUEUE);
+}
+
+static void rfuse_sched_or_submitter(struct fuse_conn *fc, u64 bit)
+{
+	u64 old;
+
+	do {
+		old = atomic64_read(&fc->rfuse_sched_mask);
+		if (old & bit)
+			return;
+	} while (atomic64_cmpxchg(&fc->rfuse_sched_mask, old, old | bit) != old);
+}
+
+static int rfuse_sched_record_submitter(struct fuse_conn *fc, int start)
+{
+	u64 now = ktime_get_ns();
+	u64 window_start = atomic64_read(&fc->rfuse_sched_window_start_ns);
+	u64 bit = BIT_ULL(start);
+	int mode;
+
+	if (now - window_start < RFUSE_SCHED_WINDOW_NS) {
+		rfuse_sched_or_submitter(fc, bit);
+		return atomic_read(&fc->rfuse_sched_mode);
+	}
+
+	if (atomic64_cmpxchg(&fc->rfuse_sched_window_start_ns,
+			     window_start, now) == window_start) {
+		u64 mask = atomic64_xchg(&fc->rfuse_sched_mask, bit);
+		unsigned int active = hweight64(mask);
+
+		mode = atomic_read(&fc->rfuse_sched_mode);
+		if (mode == RFUSE_SCHED_LOCAL &&
+		    active >= RFUSE_SCHED_SPREAD_ON) {
+			if (atomic_cmpxchg(&fc->rfuse_sched_mode,
+					   RFUSE_SCHED_LOCAL,
+					   RFUSE_SCHED_SPREAD) ==
+			    RFUSE_SCHED_LOCAL)
+				atomic64_inc(&fc->rfuse_sched_switch_count);
+			atomic_set(&fc->rfuse_sched_low_windows, 0);
+		} else if (mode == RFUSE_SCHED_SPREAD &&
+			   active <= RFUSE_SCHED_LOCAL_ON) {
+			if (atomic_inc_return(&fc->rfuse_sched_low_windows) >=
+			    RFUSE_SCHED_LOCAL_WINDOWS) {
+				if (atomic_cmpxchg(&fc->rfuse_sched_mode,
+						   RFUSE_SCHED_SPREAD,
+						   RFUSE_SCHED_LOCAL) ==
+				    RFUSE_SCHED_SPREAD)
+					atomic64_inc(&fc->rfuse_sched_switch_count);
+				atomic_set(&fc->rfuse_sched_low_windows, 0);
+			}
+		} else {
+			atomic_set(&fc->rfuse_sched_low_windows, 0);
+		}
+	} else {
+		rfuse_sched_or_submitter(fc, bit);
+	}
+
+	return atomic_read(&fc->rfuse_sched_mode);
 }
 
 static int select_ldy(struct fuse_conn *fc){
@@ -820,12 +886,26 @@ static int select_ldy_v5(struct fuse_conn *fc, u64 inode){
 	return start;
 }
 
+static int select_ldy_dynamic(struct fuse_conn *fc)
+{
+	int start = select_cpu_id();
+	int mode = rfuse_sched_record_submitter(fc, start);
+
+	if (mode == RFUSE_SCHED_SPREAD) {
+		atomic64_inc(&fc->rfuse_sched_spread_count);
+		return select_ldy_v4(fc);
+	}
+
+	atomic64_inc(&fc->rfuse_sched_local_count);
+	return select_ldy(fc);
+}
+
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc, u64 inode){
 	int id = 0;
 
 	// id = select_round_robin(fc);
 
-	id = select_ldy(fc);
+	id = select_ldy_dynamic(fc);
 
 	return fc->riq[id];
 }
@@ -858,6 +938,9 @@ struct rfuse_iqueue *rfuse_get_iqueue(struct fuse_conn *fc){
 			break;
 		case 7:
 			id = select_ldy_v5(fc, 0);
+			break;
+		case 8:
+			id = select_ldy_dynamic(fc);
 			break;
 		default:
 			/* default is use only first rfuse_iqueue */

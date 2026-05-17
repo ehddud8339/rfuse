@@ -810,6 +810,13 @@ void fuse_conn_init(struct fuse_conn *fc, struct fuse_mount *fm,
 
 	for (i = 0; i < RFUSE_ASSO_SET; i++)
 		atomic_set(&fc->rfuse_async_set[i], 0);
+	atomic64_set(&fc->rfuse_sched_mask, 0);
+	atomic64_set(&fc->rfuse_sched_window_start_ns, ktime_get_ns());
+	atomic_set(&fc->rfuse_sched_mode, RFUSE_SCHED_LOCAL);
+	atomic_set(&fc->rfuse_sched_low_windows, 0);
+	atomic64_set(&fc->rfuse_sched_local_count, 0);
+	atomic64_set(&fc->rfuse_sched_spread_count, 0);
+	atomic64_set(&fc->rfuse_sched_switch_count, 0);
 	
 	// (rfuse) Initialize the "RFUSE_NUM_IQUEUE" iqueues in fuse_conn 
 	rfuse_iqueue_init(fc, fiq_priv);	
