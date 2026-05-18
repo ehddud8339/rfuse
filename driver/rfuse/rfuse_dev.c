@@ -780,6 +780,7 @@ static struct rfuse_iqueue *rfuse_get_iqueue_with_payload_space(struct fuse_conn
 	int start = select_cpu_id();
 	int i;
 
+  /*
 	if (!need || need > fc->riq[start]->payload.size)
 		return fc->riq[start];
 
@@ -799,6 +800,9 @@ static struct rfuse_iqueue *rfuse_get_iqueue_with_payload_space(struct fuse_conn
 
 		cond_resched();
 	}
+  */
+
+  return fc->riq[start];
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc){
