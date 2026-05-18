@@ -33,6 +33,8 @@ struct list_head fuse_conn_list;
 DEFINE_MUTEX(fuse_mutex);
 
 static int set_global_limit(const char *val, const struct kernel_param *kp);
+static int set_path_latency_dump(const char *val, const struct kernel_param *kp);
+static void rfuse_path_latency_dump_all(void);
 
 unsigned max_user_bgreq;
 module_param_call(max_user_bgreq, set_global_limit, param_get_uint,
@@ -49,6 +51,13 @@ __MODULE_PARM_TYPE(max_user_congthresh, "uint");
 MODULE_PARM_DESC(max_user_congthresh,
  "Global limit for the maximum congestion threshold an "
  "unprivileged user can set");
+
+static int path_latency_dump;
+module_param_call(path_latency_dump, set_path_latency_dump, param_get_int,
+		  &path_latency_dump, 0644);
+__MODULE_PARM_TYPE(path_latency_dump, "int");
+MODULE_PARM_DESC(path_latency_dump,
+ "Write non-zero to dump RFUSE path latency statistics for active connections");
 
 #define FUSE_SUPER_MAGIC 0x65735546
 
@@ -859,6 +868,34 @@ struct fuse_conn *fuse_conn_get(struct fuse_conn *fc)
 	return fc;
 }
 EXPORT_SYMBOL_GPL(fuse_conn_get);
+
+static void rfuse_path_latency_dump_all(void)
+{
+	struct fuse_conn *fc;
+
+	mutex_lock(&fuse_mutex);
+	list_for_each_entry(fc, &fuse_conn_list, entry)
+		rfuse_path_latency_dump(fc);
+	mutex_unlock(&fuse_mutex);
+}
+
+static int set_path_latency_dump(const char *val, const struct kernel_param *kp)
+{
+	int ret;
+	int dump;
+
+	ret = kstrtoint(val, 0, &dump);
+	if (ret)
+		return ret;
+
+	*(int *)kp->arg = dump;
+	if (dump) {
+		rfuse_path_latency_dump_all();
+		*(int *)kp->arg = 0;
+	}
+
+	return 0;
+}
 
 static struct inode *fuse_get_root_inode(struct super_block *sb, unsigned mode)
 {

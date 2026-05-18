@@ -37,14 +37,17 @@
 #include "rfuse.h"
 
 enum rfuse_stat_op {
-	RFUSE_STAT_OP_PUT_REQUEST_BUFFER = 0,
-	RFUSE_STAT_OP_PUT_ARGUMENT_BUFFER,
-	RFUSE_STAT_OP_PUT_REQUEST_BG_RELEASE,
-	RFUSE_STAT_OP_TRY_GET_REQUEST_BUFFER,
-	RFUSE_STAT_OP_QUEUE_REQUEST,
-	RFUSE_STAT_OP_REQUEST_QUEUE_BG_ACCOUNT,
-	RFUSE_STAT_OP_REQUEST_QUEUE_BG_ENQUEUE,
-	RFUSE_STAT_OP_REQUEST_END_BG_RELEASE,
+	RFUSE_STAT_OP_BWRITE_NR_PAGES_ALLOC = 0,
+	RFUSE_STAT_OP_BWRITE_GET_REQ,
+	RFUSE_STAT_OP_BWRITE_FILL_PAGES,
+	RFUSE_STAT_OP_BWRITE_ARGS_FILL,
+	RFUSE_STAT_OP_BWRITE_RANGE_ALLOC,
+	RFUSE_STAT_OP_BWRITE_RANGE_LOCK,
+	RFUSE_STAT_OP_BWRITE_SIMPLE_BACKGROUND,
+	RFUSE_STAT_OP_BWRITE_AIO_COMPLETE,
+	RFUSE_STAT_OP_TRY_GET_REQ_REQUEST_ALLOC,
+	RFUSE_STAT_OP_TRY_GET_REQ_BLOCK_ALLOC,
+	RFUSE_STAT_OP_SIMPLE_BACKGROUND,
 	RFUSE_STAT_OP_MAX,
 };
 
@@ -1505,7 +1508,7 @@ struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background,
 
 // SUBMIT A REQUEST TO PENDING/BACKGROUND
 ssize_t rfuse_simple_request(struct rfuse_req *r_req);
-bool rfuse_simple_background(struct fuse_mount *fm, struct rfuse_req *r_req);
+int rfuse_simple_background(struct fuse_mount *fm, struct rfuse_req *r_req);
 void rfuse_request_end(struct rfuse_req *r_req);
 
 // Queue into the forget queue
@@ -1522,6 +1525,9 @@ ssize_t rfuse_dev_splice_write(struct pipe_inode_info *pipe, struct file *out, l
 struct fuse_req *fuse_request_alloc(struct fuse_mount *fm, gfp_t flags);
 void rfuse_abort_conn(struct fuse_conn *fc);
 void rfuse_stats_dump(struct fuse_conn *fc);
+void rfuse_path_latency_dump(struct fuse_conn *fc);
+void rfuse_path_latency_record(struct fuse_conn *fc, enum rfuse_stat_op op,
+			       u64 ns);
 void rfuse_async_stats_record_submit(struct fuse_conn *fc, size_t bytes,
 				     unsigned int pages);
 void rfuse_async_stats_record_submit_fail(struct fuse_conn *fc);
