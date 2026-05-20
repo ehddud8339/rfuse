@@ -33,7 +33,6 @@ struct list_head fuse_conn_list;
 DEFINE_MUTEX(fuse_mutex);
 
 static int set_global_limit(const char *val, const struct kernel_param *kp);
-static int set_path_latency_dump(const char *val, const struct kernel_param *kp);
 
 unsigned max_user_bgreq;
 module_param_call(max_user_bgreq, set_global_limit, param_get_uint,
@@ -50,13 +49,6 @@ __MODULE_PARM_TYPE(max_user_congthresh, "uint");
 MODULE_PARM_DESC(max_user_congthresh,
  "Global limit for the maximum congestion threshold an "
  "unprivileged user can set");
-
-static unsigned path_latency_dump;
-module_param_call(path_latency_dump, set_path_latency_dump, param_get_uint,
-		  &path_latency_dump, 0644);
-__MODULE_PARM_TYPE(path_latency_dump, "uint");
-MODULE_PARM_DESC(path_latency_dump,
- "Write 1 to dump and reset RFUSE path latency histograms");
 
 #define FUSE_SUPER_MAGIC 0x65735546
 
@@ -1056,22 +1048,6 @@ static int set_global_limit(const char *val, const struct kernel_param *kp)
 	return 0;
 }
 
-static int set_path_latency_dump(const char *val, const struct kernel_param *kp)
-{
-	int rv;
-
-	rv = param_set_uint(val, kp);
-	if (rv)
-		return rv;
-
-	if (*(unsigned *)kp->arg) {
-		rfuse_path_latency_stats_dump_and_reset();
-		*(unsigned *)kp->arg = 0;
-	}
-
-	return 0;
-}
-
 struct fuse_init_args {
 	struct fuse_args args;
 	struct fuse_init_in in;
@@ -1812,21 +1788,15 @@ static int __init fuse_init(void)
 	if (res)
 		goto err_dev_cleanup;
 
-	res = rfuse_path_latency_stats_init();
-	if (res)
-		goto err_sysfs_cleanup;
-
 	res = fuse_ctl_init();
 	if (res)
-		goto err_stats_cleanup;
+		goto err_sysfs_cleanup;
 
 	sanitize_global_limit(&max_user_bgreq);
 	sanitize_global_limit(&max_user_congthresh);
 
 	return 0;
 
- err_stats_cleanup:
-	rfuse_path_latency_stats_destroy();
  err_sysfs_cleanup:
 	fuse_sysfs_cleanup();
  err_dev_cleanup:
@@ -1841,7 +1811,6 @@ static void __exit fuse_exit(void)
 {
 	pr_debug("exit\n");
 
-	rfuse_path_latency_stats_destroy();
 	fuse_ctl_cleanup();
 	fuse_sysfs_cleanup();
 	fuse_fs_cleanup();
