@@ -21,6 +21,7 @@
 #include <linux/swap.h>
 #include <linux/splice.h>
 #include <linux/sched.h>
+#include <linux/vmalloc.h>
 
 
 MODULE_ALIAS_MISCDEV(FUSE_MINOR);
@@ -2439,6 +2440,15 @@ static int rfuse_dev_mmap(struct file *file, struct vm_area_struct *vma){
 		else{
 			return 0;
 		}
+	} else if (map_queue == RFUSE_PAYLOAD) {
+		void *payload = fud->fc->riq[riq_id]->payload.kaddr;
+
+		if (!payload || size > fud->fc->riq[riq_id]->payload.size)
+			return -EINVAL;
+
+		if (remap_vmalloc_range(vma, payload, 0))
+			return -EAGAIN;
+		return 0;
 	}
 	else
 		ptr = rfuse_validate_mmap_request(fud, vma->vm_pgoff, size);

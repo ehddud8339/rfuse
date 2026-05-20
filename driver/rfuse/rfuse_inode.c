@@ -190,7 +190,13 @@ void rfuse_send_init(struct fuse_mount *fm){
 	struct rfuse_req *r_req;
 	struct fuse_init_in *inarg;
 
-	r_req = rfuse_get_req(fm, true, true);
+	r_req = rfuse_get_req(fm, true, true, 0);
+	if (IS_ERR(r_req)) {
+		fm->fc->conn_init = 0;
+		fm->fc->conn_error = 1;
+		wake_up_all(&fm->fc->blocked_waitq);
+		return;
+	}
 	inarg = (struct fuse_init_in*)&r_req->args;
 
 	inarg->major = FUSE_KERNEL_VERSION;
@@ -202,7 +208,8 @@ void rfuse_send_init(struct fuse_mount *fm){
 		FUSE_SPLICE_WRITE | FUSE_SPLICE_MOVE | FUSE_SPLICE_READ |
 		FUSE_FLOCK_LOCKS | FUSE_HAS_IOCTL_DIR | FUSE_AUTO_INVAL_DATA |
 		FUSE_DO_READDIRPLUS | FUSE_READDIRPLUS_AUTO | FUSE_ASYNC_DIO |
-		FUSE_WRITEBACK_CACHE | FUSE_NO_OPEN_SUPPORT |
+		/* FUSE_WRITEBACK_CACHE | */
+		FUSE_NO_OPEN_SUPPORT |
 		FUSE_PARALLEL_DIROPS | FUSE_HANDLE_KILLPRIV | FUSE_POSIX_ACL |
 		FUSE_ABORT_ERROR | FUSE_MAX_PAGES | FUSE_CACHE_SYMLINKS |
 		FUSE_NO_OPENDIR_SUPPORT | FUSE_EXPLICIT_INVAL_DATA |
@@ -222,6 +229,7 @@ void rfuse_send_init(struct fuse_mount *fm){
 	if(rfuse_simple_background(fm, r_req) != 0){
 		printk("RFUSE: rfuse_send_init: rfuse_simple_background failed\n");
 		rfuse_process_init_reply(fm, r_req, -ENOTCONN);
+		rfuse_put_request(r_req);
 	}
 
 }
@@ -244,7 +252,9 @@ int rfuse_statfs(struct dentry *dentry, struct kstatfs *buf)
 		return 0;
 	}
 
-	r_req = rfuse_get_req(fm, false, false);
+	r_req = rfuse_get_req(fm, false, false, 0);
+	if (IS_ERR(r_req))
+		return PTR_ERR(r_req);
 	outarg = (struct fuse_statfs_out*)&r_req->args;
 
 	r_req->in.opcode = FUSE_STATFS;
@@ -265,7 +275,9 @@ void rfuse_send_destroy(struct fuse_mount *fm)
 {
 	if (fm->fc->conn_init) {
 		struct rfuse_req *r_req;
-		r_req = rfuse_get_req(fm, false, true);
+		r_req = rfuse_get_req(fm, false, true, 0);
+		if (IS_ERR(r_req))
+			return;
 		r_req->in.opcode = FUSE_DESTROY;
 		r_req->force = true;
 		r_req->nocreds = true;

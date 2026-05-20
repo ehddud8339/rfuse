@@ -7,6 +7,7 @@
 
 #include "fuse_common.h"
 
+#include <stddef.h>
 #include <stdint.h>
 #include <utime.h>
 #include <fcntl.h>
@@ -123,7 +124,7 @@ extern "C" {
 #define COMP_NEED_WAKEUP_FROM_USER  (1U << 3)
 #define COMP_ALL_COMP_WORKING 	    (1U << 4)
 
-#define RFUSE_NUM_IQUEUE 		32	
+#define RFUSE_NUM_IQUEUE 		    40
 #define RFUSE_MAX_QUEUE_SIZE 		1024*4	
 #define RFUSE_WORKER_PER_RING		2
 
@@ -140,6 +141,11 @@ extern "C" {
 #define RFUSE_REQ					0x38000000ULL
 #define RFUSE_READ					0x40000000ULL
 #define RFUSE_WRITE					0x48000000ULL
+#define RFUSE_PAYLOAD				0x50000000ULL
+
+#define RFUSE_PAYLOAD_IN        (1U << 0)
+#define RFUSE_PAYLOAD_OUT       (1U << 1)
+#define RFUSE_PAYLOAD_FALLBACK  (1U << 2)
 
 struct rfuse_req{
 	/** Request input header **/
@@ -179,11 +185,27 @@ struct rfuse_req{
 	char no_touch_3[24];
 
 	struct{
-		uint8_t argument_space[120];
-	}args; // 120
+		uint8_t argument_space[112];
+	}args; // 112
+
+	uint32_t payload_offset;
+	uint32_t payload_len;
+	uint32_t payload_capacity;
+	uint32_t payload_generation;
+	uint32_t payload_flags;
 	
 	uint64_t padding[2];
 };
+
+#ifdef __cplusplus
+static_assert(sizeof(struct rfuse_req) == 272, "rfuse_req ABI drift");
+static_assert(offsetof(struct rfuse_req, riq_id) == 68, "rfuse_req riq_id offset drift");
+static_assert(offsetof(struct rfuse_req, payload_offset) == 232, "rfuse_req payload offset drift");
+#else
+_Static_assert(sizeof(struct rfuse_req) == 272, "rfuse_req ABI drift");
+_Static_assert(offsetof(struct rfuse_req, riq_id) == 68, "rfuse_req riq_id offset drift");
+_Static_assert(offsetof(struct rfuse_req, payload_offset) == 232, "rfuse_req payload offset drift");
+#endif
 
 struct rfuse_interrupt_entry{
 	uint64_t    unique;
@@ -237,6 +259,13 @@ struct rfuse_arg{
 	uint8_t garbage[256];
 };
 
+struct rfuse_payload_map {
+	void *uaddr;
+	void *kaddr;
+	uint32_t size;
+	uint32_t used;
+};
+
 /**
   mmap the total rfuse_iqueue to fuse daemon
  **/
@@ -256,6 +285,7 @@ struct rfuse_iqueue{
 	struct rfuse_arg *karg; // kernel address
 	struct rfuse_req *ureq;
 	struct rfuse_req *kreq;
+	struct rfuse_payload_map payload;
 	
 	/** unused **/
 	const unsigned connected;
@@ -309,6 +339,13 @@ struct rfuse_mt {
 	int clone_fd;
 	int max_idle;
 	int riq_id;
+};
+
+struct rfuse_payload_view {
+	void *addr;
+	size_t len;
+	size_t capacity;
+	uint32_t flags;
 };
 // ******************************* rfuse_lowlevel.c Operations ******************************* //
 /**
@@ -433,6 +470,12 @@ void *fuse_req_userdata(fuse_req_t req);
 const struct fuse_ctx *fuse_req_ctx(fuse_req_t req);
 
 int fuse_req_getgroups(fuse_req_t req, int size, gid_t list[]);
+
+void *rfuse_req_payload_addr(fuse_req_t req);
+
+int rfuse_req_payload_view(fuse_req_t req, struct rfuse_payload_view *view);
+
+int rfuse_reply_read_from_fd(fuse_req_t req, int fd, off_t off, size_t size);
 
 /**
  * This description is about old_fuse_session_loop...

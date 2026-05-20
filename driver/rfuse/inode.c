@@ -23,6 +23,7 @@
 #include <linux/exportfs.h>
 #include <linux/posix_acl.h>
 #include <linux/pid_namespace.h>
+#include <linux/ktime.h>
 
 MODULE_AUTHOR("Miklos Szeredi <miklos@szeredi.hu>");
 MODULE_DESCRIPTION("Filesystem in Userspace");
@@ -798,6 +799,13 @@ void fuse_conn_init(struct fuse_conn *fc, struct fuse_mount *fm,
 	fc->user_ns = get_user_ns(user_ns);
 	fc->max_pages = FUSE_DEFAULT_MAX_PAGES_PER_REQ;
 	fc->max_pages_limit = FUSE_MAX_MAX_PAGES;
+	atomic64_set(&fc->rfuse_sched_mask, 0);
+	atomic64_set(&fc->rfuse_sched_window_start_ns, ktime_get_ns());
+	atomic_set(&fc->rfuse_sched_mode, RFUSE_SCHED_LOCAL);
+	atomic_set(&fc->rfuse_sched_low_windows, 0);
+	atomic64_set(&fc->rfuse_sched_local_count, 0);
+	atomic64_set(&fc->rfuse_sched_spread_count, 0);
+	atomic64_set(&fc->rfuse_sched_switch_count, 0);
 	
 	// (rfuse) Initialize the "RFUSE_NUM_IQUEUE" iqueues in fuse_conn 
 	rfuse_iqueue_init(fc, fiq_priv);	
@@ -874,12 +882,16 @@ static struct dentry *fuse_get_dentry(struct super_block *sb,
 		const struct qstr name = QSTR_INIT(".", 1);
 		struct fuse_mount *fm = get_fuse_mount_super(sb);
 
-		if (!fc->export_support)
-			goto out_err;
+			if (!fc->export_support)
+				goto out_err;
 
-		r_req = rfuse_get_req(fm,false, false);
-		err = rfuse_lookup_name(sb, handle->nodeid, &name, r_req, &inode);
-		rfuse_put_request(r_req);
+			r_req = rfuse_get_req(fm, false, false, 0);
+			if (IS_ERR(r_req)) {
+				err = PTR_ERR(r_req);
+				goto out_err;
+			}
+			err = rfuse_lookup_name(sb, handle->nodeid, &name, r_req, &inode);
+			rfuse_put_request(r_req);
 		
 		if (err && err != -ENOENT)
 			goto out_err;
@@ -980,7 +992,9 @@ static struct dentry *fuse_get_parent(struct dentry *child)
 	if (!fc->export_support)
 		return ERR_PTR(-ESTALE);
 
-	r_req = rfuse_get_req(fm, false, false);
+	r_req = rfuse_get_req(fm, false, false, 0);
+	if (IS_ERR(r_req))
+		return ERR_PTR(PTR_ERR(r_req));
 	err = rfuse_lookup_name(child_inode->i_sb, get_node_id(child_inode), &dotdot_name, r_req, &inode);
 	rfuse_put_request(r_req); 
 

@@ -120,6 +120,16 @@ struct fuse_inode {
 			/* Waitq for writepage completion */
 			wait_queue_head_t page_waitq;
 
+			/*
+			 * Half-sync buffered writes complete to the caller before
+			 * daemon completion.  These fields track daemon-side
+			 * inflight ranges so flush/fsync/read paths can drain or
+			 * wait on overlapping writes.
+			 */
+			int async_writectr;
+			atomic64_t async_range_wait_count;
+			struct rb_root_cached async_write_ranges;
+
 			/* List of writepage requestst (pending or sent) */
 			struct rb_root writepages;
 		};
@@ -287,6 +297,25 @@ struct rfuse_pages{
 	struct page **pages;
 	struct fuse_page_desc *descs;
 	unsigned int num_pages;
+	u64 latency_start_ns;
+	u64 readahead_count_ns;
+	u64 io_alloc_ns;
+	u64 readahead_batch_ns;
+	u64 wait_async_write_ns;
+	u64 get_req_ns;
+	u64 read_args_fill_ns;
+	u64 prepare_payload_ns;
+	u64 simple_background_ns;
+	u64 simple_request_ns;
+	u64 readpages_end_ns;
+	u64 put_request_ns;
+	u64 async_submit_ns;
+	u64 async_completion_enter_ns;
+	u64 async_completion_bg_ns;
+	u64 async_completion_import_ns;
+	size_t latency_requested;
+	int latency_ret;
+	bool latency_sync;
 };
 
 /*
@@ -607,6 +636,17 @@ struct fuse_conn {
 
 	/** rfuse Input queue */
 	struct rfuse_iqueue **riq;
+	unsigned int riq_node_count[MAX_NUMNODES];
+	int riq_node_ids[MAX_NUMNODES][RFUSE_NUM_IQUEUE];
+
+	/** rfuse dynamic sync queue scheduler state */
+	atomic64_t rfuse_sched_mask;
+	atomic64_t rfuse_sched_window_start_ns;
+	atomic_t rfuse_sched_mode;
+	atomic_t rfuse_sched_low_windows;
+	atomic64_t rfuse_sched_local_count;
+	atomic64_t rfuse_sched_spread_count;
+	atomic64_t rfuse_sched_switch_count;
 
 	/** The next unique kernel file handle */
 	atomic64_t khctr;
@@ -1325,8 +1365,6 @@ int fuse_fileattr_get(struct dentry *dentry, struct fileattr *fa);
 int fuse_fileattr_set(struct user_namespace *mnt_userns,
 		      struct dentry *dentry, struct fileattr *fa);
 
-/* file.c */
-
 struct fuse_file *fuse_file_open(struct fuse_mount *fm, u64 nodeid,
 				 unsigned int open_flags, bool isdir);
 void fuse_file_release(struct inode *inode, struct fuse_file *ff,
@@ -1410,18 +1448,32 @@ void rfuse_extract_complete_head(struct rfuse_iqueue *riq);
 
 // ALLOCATE NEW REQUEST AND ARGUMENTS
 void rfuse_put_request(struct rfuse_req *req);
-struct rfuse_req *rfuse_get_req(struct fuse_mount *fm, bool for_background, bool force);
+struct rfuse_req *rfuse_get_req(struct fuse_mount *fm, bool for_background,
+				bool force, size_t payload_len);
 uint32_t rfuse_get_request_buffer(struct fuse_mount *fm, int riq_id);
 void rfuse_put_request_buffer(struct fuse_mount *fm, uint32_t arg_index, int riq_id);
 uint32_t rfuse_get_argument_buffer(struct fuse_mount *fm, int riq_id);
 void rfuse_put_argument_buffer(struct fuse_mount *fm, uint32_t arg_index, int riq_id);
 
-struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background, bool force, spinlock_t *file_lock);
+struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm,
+				    bool for_background, bool force,
+				    size_t payload_len, spinlock_t *file_lock);
+struct rfuse_req *try_rfuse_get_wr_req(struct fuse_mount *fm,
+				       bool for_background, bool force,
+				       size_t payload_len,
+				       spinlock_t *file_lock);
 
 // SUBMIT A REQUEST TO PENDING/BACKGROUND
 ssize_t rfuse_simple_request(struct rfuse_req *r_req);
-bool rfuse_simple_background(struct fuse_mount *fm, struct rfuse_req *r_req);
+int rfuse_simple_background(struct fuse_mount *fm, struct rfuse_req *r_req);
 void rfuse_request_end(struct rfuse_req *r_req);
+int rfuse_prepare_payload(struct rfuse_req *r_req, bool may_wait);
+int rfuse_reserve_payload(struct rfuse_req *r_req, size_t len,
+			  unsigned int payload_flags, bool may_wait);
+ssize_t rfuse_payload_copy_from_iter(struct rfuse_req *r_req,
+				     struct iov_iter *ii, size_t len);
+int rfuse_import_payload(struct rfuse_req *r_req);
+void rfuse_release_payload(struct rfuse_req *r_req);
 
 // Queue into the forget queue
 void rfuse_queue_forget(struct fuse_conn *fc, u64 nodeid, u64 nlookup);

@@ -1044,26 +1044,30 @@ static ssize_t fuse_cache_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	ssize_t written = 0;
 	ssize_t written_buffered = 0;
 	struct inode *inode = mapping->host;
-	ssize_t err;
+	ssize_t err = 0;
 	struct fuse_conn *fc = get_fuse_conn(inode);
 	loff_t endbyte = 0;
+	ssize_t ret;
+	bool inode_locked = false;
 
 	if (fc->writeback_cache) {
 		/* Update size (EOF optimization) and mode (SUID clearing) */
 		err = fuse_update_attributes(mapping->host, file);
 		if (err)
-			return err;
+			goto out;
 
 		if (fc->handle_killpriv_v2 &&
 		    should_remove_suid(file_dentry(file))) {
 			goto writethrough;
 		}
 
-		return generic_file_write_iter(iocb, from);
+		written = generic_file_write_iter(iocb, from);
+		goto out;
 	}
 
 writethrough:
 	inode_lock(inode);
+	inode_locked = true;
 
 	/* We can write back this queue in page reclaim */
 	current->backing_dev_info = inode_to_bdi(inode);
@@ -1112,12 +1116,15 @@ writethrough:
 			iocb->ki_pos += written;
 	}
 out:
-	current->backing_dev_info = NULL;
-	inode_unlock(inode);
+	if (inode_locked) {
+		current->backing_dev_info = NULL;
+		inode_unlock(inode);
+	}
 	if (written > 0)
 		written = generic_write_sync(iocb, written);
 
-	return written ? written : err;
+	ret = written ? written : err;
+	return ret;
 }
 
 static inline unsigned long fuse_get_user_addr(const struct iov_iter *ii)
@@ -2378,7 +2385,10 @@ void fuse_init_file_inode(struct inode *inode)
 	INIT_LIST_HEAD(&fi->write_files);
 	INIT_LIST_HEAD(&fi->queued_writes);
 	fi->writectr = 0;
+	fi->async_writectr = 0;
+	atomic64_set(&fi->async_range_wait_count, 0);
 	init_waitqueue_head(&fi->page_waitq);
+	fi->async_write_ranges = RB_ROOT_CACHED;
 	fi->writepages = RB_ROOT;
 
 	if (IS_ENABLED(CONFIG_FUSE_DAX))

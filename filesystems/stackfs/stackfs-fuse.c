@@ -246,6 +246,7 @@ struct lo_data {
 	struct lo_inode root;
 	/* do we still need this ? let's see*/
 	double attr_valid;
+	int writeback;
 };
 
 struct lo_dirptr {
@@ -270,6 +271,37 @@ static struct lo_inode *lo_inode(fuse_req_t req, fuse_ino_t ino)
 		return &get_lo_data(req)->root;
 	else
 		return (struct lo_inode *) (uintptr_t) ino;
+}
+
+static int stackfs_backing_open_flags(fuse_req_t req, int flags)
+{
+	struct lo_data *lo = get_lo_data(req);
+
+	if (!lo->writeback)
+		return flags;
+
+	/* writeback_cache에서는 write fd로도 read 요청이 올 수 있다. */
+	if ((flags & O_ACCMODE) == O_WRONLY) {
+		flags &= ~O_ACCMODE;
+		flags |= O_RDWR;
+	}
+
+	/*
+	 * append 위치 결정은 writeback 커널 캐시가 관리한다.
+	 * backing fd에 그대로 남기면 위치 계산이 이중 적용될 수 있다.
+	 */
+	if (flags & O_APPEND)
+		flags &= ~O_APPEND;
+
+	return flags;
+}
+
+static void stackfs_ll_init(void *userdata, struct fuse_conn_info *conn)
+{
+	struct lo_data *lo = userdata;
+
+	lo->writeback = (conn->want & FUSE_CAP_WRITEBACK_CACHE) &&
+			(conn->capable & FUSE_CAP_WRITEBACK_CACHE);
 }
 
 static char *lo_name(fuse_req_t req, fuse_ino_t ino)
@@ -677,6 +709,7 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 		const char *name, mode_t mode, struct fuse_file_info *fi)
 {
 	int fd, res;
+	int backing_flags;
 	struct fuse_entry_param e;
 	char *fullPath = NULL;
 	double attr_val;
@@ -693,7 +726,8 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 
 	//struct timespec start,end;
 	//clock_gettime(CLOCK_MONOTONIC, &start);
-	fd = creat(fullPath, mode);
+	backing_flags = stackfs_backing_open_flags(req, fi->flags);
+	fd = open(fullPath, backing_flags | O_CREAT, mode);
 	//clock_gettime(CLOCK_MONOTONIC, &end);
 	//printf("CREATE TIME: %lu\n", (end.tv_sec * 1000000000 + end.tv_nsec) - (start.tv_sec * 1000000000 + start.tv_nsec));	
 	if (fd == -1) {
@@ -718,6 +752,7 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 
 		lo_inode = calloc(1, sizeof(struct lo_inode));
 		if (!lo_inode) {
+			close(fd);
 			if (fullPath)
 				free(fullPath);
 
@@ -740,6 +775,7 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 		pthread_spin_unlock(&lo_data->spinlock);
 
 		if (res == -1) {
+			close(fd);
 			free(lo_inode->name);
 			free(lo_inode);
 			fuse_reply_err(req, EBUSY);
@@ -751,6 +787,7 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 			fuse_reply_create(req, &e, fi);
 		}
 	} else {
+		close(fd);
 		if (fullPath)
 			free(fullPath);
 		fuse_reply_err(req, errno);
@@ -845,7 +882,10 @@ static void stackfs_ll_open(fuse_req_t req, fuse_ino_t ino,
 		struct fuse_file_info *fi)
 {
 	int fd;
-	fd = open(lo_name(req, ino), fi->flags);
+	int backing_flags;
+
+	backing_flags = stackfs_backing_open_flags(req, fi->flags);
+	fd = open(lo_name(req, ino), backing_flags);
 	
 	if (fd == -1)
 		return (void) fuse_reply_err(req, errno);
@@ -1395,6 +1435,7 @@ static void stackfs_ll_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t newparent
 
 }
 static struct fuse_lowlevel_ops hello_ll_oper = {
+	.init		=	stackfs_ll_init,
 	.lookup		=	stackfs_ll_lookup,
 	.getattr	=	stackfs_ll_getattr,	
 	.statfs		=	stackfs_ll_statfs,	

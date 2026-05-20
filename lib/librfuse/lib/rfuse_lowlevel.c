@@ -35,6 +35,27 @@
 
 #define RFUSE_SPLICE_READ_NO_DATA 0x1000
 
+/*
+static unsigned long long rfuse_pread_count;
+static unsigned long long rfuse_pwrite_count;
+
+static void rfuse_count_pread(void)
+{
+	unsigned long long count;
+
+	count = __atomic_add_fetch(&rfuse_pread_count, 1, __ATOMIC_RELAXED);
+	fprintf(stderr, "rfuse: pread_count=%llu\n", count);
+}
+
+static void rfuse_count_pwrite(void)
+{
+	unsigned long long count;
+
+	count = __atomic_add_fetch(&rfuse_pwrite_count, 1, __ATOMIC_RELAXED);
+	fprintf(stderr, "rfuse: pwrite_count=%llu\n", count);
+}
+*/
+
 // ******************************* Ring buffer operations ******************************* //
 
 struct rfuse_address_entry *rfuse_read_pending_head(struct rfuse_iqueue *riq){
@@ -399,16 +420,73 @@ static int rfuse_send_reply_ok(fuse_req_t u_req){
 	return rfuse_send_reply(u_req, 0);
 }
 
+void *rfuse_req_payload_addr(fuse_req_t req)
+{
+	struct rfuse_req *r_req;
+
+	if (!req || !req->riq || !req->riq->payload.uaddr)
+		return 0;
+
+	r_req = &req->riq->ureq[req->index];
+	if (!r_req->payload_capacity ||
+	    (r_req->payload_flags & RFUSE_PAYLOAD_FALLBACK))
+		return 0;
+
+	return (char *)req->riq->payload.uaddr + r_req->payload_offset;
+}
+
+static int rfuse_req_payload_buffer(fuse_req_t req, struct rfuse_payload_view *view)
+{
+	struct rfuse_req *r_req;
+	void *addr;
+
+	if (!req || !view)
+		return -EINVAL;
+
+	r_req = &req->riq->ureq[req->index];
+	addr = rfuse_req_payload_addr(req);
+	if (!addr)
+		return -ENODATA;
+
+	view->addr = addr;
+	view->len = r_req->payload_len;
+	view->capacity = r_req->payload_capacity;
+	view->flags = r_req->payload_flags;
+
+	return 0;
+}
+
+static int rfuse_req_has_input_payload(fuse_req_t req)
+{
+	struct rfuse_payload_view payload;
+
+	return rfuse_req_payload_buffer(req, &payload) == 0 &&
+	       (payload.flags & RFUSE_PAYLOAD_IN);
+}
+
 int fuse_reply_buf(fuse_req_t u_req, const char *buf, size_t size){
 	// Write to the kernel buffer
 	struct fuse_chan *ch = u_req->ch;
 	struct fuse_session *se = u_req->se;
+	struct rfuse_req *r_req = &u_req->riq->ureq[u_req->index];
+	struct rfuse_payload_view payload;
 	int req_index = u_req->index;
 	int riq_id = u_req->riq->riq_id;
 	long long int pp_req_index = ((long long int)req_index << 32) & RFUSE_REQ_IDX_MASK;
 	int pp_riq_id = (riq_id << 16) & RFUSE_RIQ_ID_MASK;
 
+	if (rfuse_req_payload_buffer(u_req, &payload) == 0) {
+		if (size > payload.capacity)
+			return fuse_reply_err(u_req, EIO);
+
+		memcpy(payload.addr, buf, size);
+		r_req->payload_len = size;
+		r_req->out.arglen = size;
+		return rfuse_send_reply_ok(u_req);
+	}
+
 	ssize_t res = pwrite(ch ? ch->fd : se->fd, buf, size, (long long int)pp_riq_id | pp_req_index);
+	//rfuse_count_pwrite();
 	int err = errno;
 	if(res == -1){
 		if(!fuse_session_exited(se) && err != ENOENT)
@@ -1100,11 +1178,19 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 	struct fuse_write_in *arg = (struct fuse_write_in *)&r_req->args;
 	struct fuse_file_info fi;
 	char *param;
+	struct rfuse_payload_view payload;
 	int req_index = u_req->index;
 	int riq_id = u_req->riq->riq_id;
 	long long int pp_req_index = ((long long int)req_index << 32) & RFUSE_REQ_IDX_MASK;
 	int pp_riq_id = (riq_id << 16) & RFUSE_RIQ_ID_MASK;
 	
+	if (rfuse_req_payload_buffer(u_req, &payload) == 0 &&
+	    (payload.flags & RFUSE_PAYLOAD_IN)) {
+		res = payload.len;
+		param = payload.addr;
+		goto do_write;
+	}
+
 	if(!u_req->w->fbuf.mem) {
 		u_req->w->fbuf.mem = malloc(FUSE_MAX_MAX_PAGES * getpagesize());
 		if(!u_req->w->fbuf.mem) {
@@ -1116,12 +1202,15 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 
 	// 1.Call a system call to receive the data from the kernel page
 	res = pread(ch ? ch->fd : se->fd, u_req->w->fbuf.mem, u_req->w->fbuf.size, (long long int)pp_riq_id | pp_req_index);
+	//rfuse_count_pread();
 	if(res == -1) {
 		printf("Error : pread for write I/O failed\n");
 		fuse_reply_err(u_req, EIO);
 	}
 
 	// 2. Call "u_req->se->op.write" to process write
+	param = (char *)u_req->w->fbuf.mem;
+do_write:
 	memset(&fi, 0, sizeof(fi));
 	fi.fh = arg->fh;
 	fi.writepage = (arg->write_flags & FUSE_WRITE_CACHE) != 0;
@@ -1129,7 +1218,6 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 		fi.lock_owner = arg->lock_owner;
 		fi.flags = arg->flags;
 	}
-	param = (char *)u_req->w->fbuf.mem;
 
 	if (u_req->se->op.write)
 		u_req->se->op.write(u_req, nodeid, param, res,
@@ -1386,6 +1474,22 @@ int fuse_reply_data(fuse_req_t u_req, struct fuse_bufvec *bufv,
 		    enum fuse_buf_copy_flags flags)
 {
 	int res;
+	struct rfuse_payload_view payload;
+
+	if (rfuse_req_payload_buffer(u_req, &payload) == 0) {
+		struct fuse_bufvec src = *bufv;
+		struct fuse_bufvec dst = FUSE_BUFVEC_INIT(payload.capacity);
+		struct rfuse_req *r_req = &u_req->riq->ureq[u_req->index];
+
+		dst.buf[0].mem = payload.addr;
+		res = fuse_buf_copy(&dst, &src, 0);
+		if (res < 0)
+			return fuse_reply_err(u_req, -res);
+
+		r_req->payload_len = res;
+		r_req->out.arglen = res;
+		return rfuse_send_reply_ok(u_req);
+	}
 
 	res = rfuse_send_data_iov(u_req, bufv, flags);
 	if(res == RFUSE_SPLICE_READ_NO_DATA) {
@@ -1804,7 +1908,9 @@ bool rfuse_read_queue(struct rfuse_worker *w, struct rfuse_mt *mt, struct fuse_c
 		goto reply_err;
 
 	GET_TIMESTAMPS(3)
-	if (r_req->in.opcode == FUSE_WRITE && se->op.write_buf) {
+	if (r_req->in.opcode == FUSE_WRITE && rfuse_req_has_input_payload(u_req)) {
+		rfuse_ll_ops[r_req->in.opcode].func(u_req, r_req->in.nodeid);
+	} else if (r_req->in.opcode == FUSE_WRITE && se->op.write_buf) {
 		err = rfuse_prep_write_buf(u_req, se, &w->fbuf, w->ch);
 		if(err < 0)
 			goto reply_err;
@@ -1825,6 +1931,42 @@ out:
 void *fuse_req_userdata(fuse_req_t req)
 {
 	return req->se->userdata;
+}
+
+int rfuse_req_payload_view(fuse_req_t req, struct rfuse_payload_view *view)
+{
+	return rfuse_req_payload_buffer(req, view);
+}
+
+int rfuse_reply_read_from_fd(fuse_req_t req, int fd, off_t off, size_t size)
+{
+	struct rfuse_payload_view payload;
+	struct rfuse_req *r_req;
+	ssize_t res;
+
+	if (rfuse_req_payload_buffer(req, &payload) == 0) {
+		r_req = &req->riq->ureq[req->index];
+		if (size > payload.capacity)
+			size = payload.capacity;
+
+		res = pread(fd, payload.addr, size, off);
+		//rfuse_count_pread();
+		if (res < 0)
+			return fuse_reply_err(req, errno);
+
+		r_req->payload_len = res;
+		r_req->out.arglen = res;
+		return rfuse_send_reply_ok(req);
+	}
+
+	{
+		struct fuse_bufvec buf = FUSE_BUFVEC_INIT(size);
+
+		buf.buf[0].flags = FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK;
+		buf.buf[0].fd = fd;
+		buf.buf[0].pos = off;
+		return fuse_reply_data(req, &buf, FUSE_BUF_SPLICE_MOVE);
+	}
 }
 
 const struct fuse_ctx *fuse_req_ctx(fuse_req_t req)
