@@ -10,7 +10,6 @@
 #include <linux/falloc.h>
 #include <linux/uio.h>
 #include <linux/fs.h>
-#include <linux/ktime.h>
 
 struct rfuse_release_in {
 	struct fuse_release_in inarg;
@@ -1353,14 +1352,10 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 	pgoff_t idx_from;
 	pgoff_t idx_to;
 	struct fuse_write_in *in;
-	u64 start_ns;
 	ssize_t err;
 	ria->r_req->in_pages = true;
 
-	start_ns = ktime_get_ns();
 	rfuse_write_args_fill(ria, ff, pos, count);
-	rfuse_path_latency_record(fm->fc, RFUSE_STAT_OP_BWRITE_ARGS_FILL,
-				  ktime_get_ns() - start_ns);
 	idx_from = pos >> PAGE_SHIFT;
 	idx_to = (pos + count - 1) >> PAGE_SHIFT;
 
@@ -1375,10 +1370,7 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 	io->reqs++;
 	spin_unlock(&io->lock);
 
-	start_ns = ktime_get_ns();
 	range = kmalloc(sizeof(*range), GFP_KERNEL);
-	rfuse_path_latency_record(fm->fc, RFUSE_STAT_OP_BWRITE_RANGE_ALLOC,
-				  ktime_get_ns() - start_ns);
 	if (!range) {
 		spin_lock(&io->lock);
 		io->size -= count;
@@ -1390,7 +1382,6 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 
 	range->idx_from = idx_from;
 	range->idx_to = idx_to;
-	start_ns = ktime_get_ns();
 	spin_lock(&fi->lock);
 	fi->async_writectr++;
 	p = &fi->async_writepages.rb_node;
@@ -1412,13 +1403,8 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 	rb_insert_color(&range->node, &fi->async_writepages);
 	ria->async_wb_node = &range->node;
 	spin_unlock(&fi->lock);
-	rfuse_path_latency_record(fm->fc, RFUSE_STAT_OP_BWRITE_RANGE_LOCK,
-				  ktime_get_ns() - start_ns);
 	ria->r_req->end = rfuse_bwrite_complete_req;
-	start_ns = ktime_get_ns();
 	err = rfuse_simple_background(fm, ria->r_req);
-	rfuse_path_latency_record(fm->fc, RFUSE_STAT_OP_BWRITE_SIMPLE_BACKGROUND,
-				  ktime_get_ns() - start_ns);
 	if (err) {
 		/*
 		 * background queue에 들어가지 못한 request는 completion callback이
@@ -1530,7 +1516,6 @@ async:
 		loff_t offset = pos;
 		size_t count = iov_iter_count(ii);
 		struct fuse_io_priv *io;
-		u64 start_ns;
 
 		io = rfuse_io_args_init(iocb, inode, offset);
 		if (!io) {
@@ -1544,21 +1529,15 @@ async:
 			unsigned int nr_pages;
 			ssize_t nbytes;
 
-			start_ns = ktime_get_ns();
 			nr_pages = rfuse_wr_pages(pos, count, fc->max_pages);
 			ria = rfuse_io_alloc(io, nr_pages);
-			rfuse_path_latency_record(fc, RFUSE_STAT_OP_BWRITE_NR_PAGES_ALLOC,
-						  ktime_get_ns() - start_ns);
 			if (!ria) {
         printk("RFUSE: rfuse_io_alloc failed\n");
 				err = -ENOMEM;
 				break;
 			}
 
-			start_ns = ktime_get_ns();
 			r_req = try_rfuse_get_req(fm, true, false, NULL, fi->nodeid);
-			rfuse_path_latency_record(fc, RFUSE_STAT_OP_BWRITE_GET_REQ,
-						  ktime_get_ns() - start_ns);
 			if (IS_ERR(r_req)) {
         printk("RFUSE: request allocation failed\n");
 				err = PTR_ERR(r_req);
@@ -1567,10 +1546,7 @@ async:
 			}
 			ria->r_req = r_req;
 
-			start_ns = ktime_get_ns();
 			nbytes = rfuse_fill_write_pages(ria, mapping, ii, pos, nr_pages);
-			rfuse_path_latency_record(fc, RFUSE_STAT_OP_BWRITE_FILL_PAGES,
-						  ktime_get_ns() - start_ns);
 			if (nbytes <= 0) {
         printk("RFUSE: rfuse_fill_write_pages failed\n");
 				err = nbytes;
@@ -1593,10 +1569,7 @@ async:
 		if (res > 0)
 			fuse_write_update_size(inode, pos);
 
-		start_ns = ktime_get_ns();
 		rfuse_aio_complete(io, res > 0 ? 0 : err, -1);
-		rfuse_path_latency_record(fc, RFUSE_STAT_OP_BWRITE_AIO_COMPLETE,
-					  ktime_get_ns() - start_ns);
 		return res > 0 ? res : err;
 	}
 }

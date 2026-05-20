@@ -36,33 +36,6 @@
 
 #include "rfuse.h"
 
-enum rfuse_stat_op {
-	RFUSE_STAT_OP_BWRITE_NR_PAGES_ALLOC = 0,
-	RFUSE_STAT_OP_BWRITE_GET_REQ,
-	RFUSE_STAT_OP_BWRITE_FILL_PAGES,
-	RFUSE_STAT_OP_BWRITE_ARGS_FILL,
-	RFUSE_STAT_OP_BWRITE_RANGE_ALLOC,
-	RFUSE_STAT_OP_BWRITE_RANGE_LOCK,
-	RFUSE_STAT_OP_BWRITE_SIMPLE_BACKGROUND,
-	RFUSE_STAT_OP_BWRITE_AIO_COMPLETE,
-	RFUSE_STAT_OP_TRY_GET_REQ_REQUEST_ALLOC,
-	RFUSE_STAT_OP_TRY_GET_REQ_BLOCK_ALLOC,
-	RFUSE_STAT_OP_SIMPLE_BACKGROUND,
-	RFUSE_STAT_OP_MAX,
-};
-
-struct rfuse_latency_stat {
-	u64 count;
-	u64 total_ns;
-	u64 min_ns;
-	u64 max_ns;
-};
-
-struct rfuse_latency_stats {
-	spinlock_t lock;
-	struct rfuse_latency_stat ops[RFUSE_STAT_OP_MAX];
-};
-
 enum rfuse_async_wait_reason {
 	RFUSE_ASYNC_WAIT_FLUSH = 0,
 	RFUSE_ASYNC_WAIT_FSYNC,
@@ -675,9 +648,6 @@ struct fuse_conn {
 
 	/** rfuse Input queue */
 	struct rfuse_iqueue **riq;
-
-	/** rfuse lock timing statistics */
-	struct rfuse_latency_stats rfuse_stats;
 
 	/** rfuse async buffered-write behavior statistics */
 	struct rfuse_async_stats rfuse_async_stats;
@@ -1524,10 +1494,6 @@ ssize_t rfuse_dev_splice_write(struct pipe_inode_info *pipe, struct file *out, l
 // For FUSE compatability
 struct fuse_req *fuse_request_alloc(struct fuse_mount *fm, gfp_t flags);
 void rfuse_abort_conn(struct fuse_conn *fc);
-void rfuse_stats_dump(struct fuse_conn *fc);
-void rfuse_path_latency_dump(struct fuse_conn *fc);
-void rfuse_path_latency_record(struct fuse_conn *fc, enum rfuse_stat_op op,
-			       u64 ns);
 void rfuse_async_stats_record_submit(struct fuse_conn *fc, size_t bytes,
 				     unsigned int pages);
 void rfuse_async_stats_record_submit_fail(struct fuse_conn *fc);

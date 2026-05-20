@@ -15,7 +15,6 @@
 #include <linux/sched.h>
 #include <linux/random.h>
 #include <linux/ktime.h>
-#include <linux/math64.h>
 #include <linux/hash.h>
 #include <asm/atomic.h>
 
@@ -59,82 +58,6 @@ static void rfuse_drop_waiting(struct fuse_conn *fc)
 			!READ_ONCE(fc->connected)) {
 		/* wake up aborters */
 		wake_up_all(&fc->blocked_waitq);
-	}
-}
-
-static const char * const rfuse_stat_op_names[RFUSE_STAT_OP_MAX] = {
-	[RFUSE_STAT_OP_BWRITE_NR_PAGES_ALLOC] = "perform_write_async_nr_pages_alloc",
-	[RFUSE_STAT_OP_BWRITE_GET_REQ] = "perform_write_async_get_req",
-	[RFUSE_STAT_OP_BWRITE_FILL_PAGES] = "perform_write_async_fill_pages",
-	[RFUSE_STAT_OP_BWRITE_ARGS_FILL] = "bwrite_async_write_args_fill",
-	[RFUSE_STAT_OP_BWRITE_RANGE_ALLOC] = "bwrite_async_range_alloc",
-	[RFUSE_STAT_OP_BWRITE_RANGE_LOCK] = "bwrite_async_range_lock",
-	[RFUSE_STAT_OP_BWRITE_SIMPLE_BACKGROUND] = "bwrite_async_simple_background",
-	[RFUSE_STAT_OP_BWRITE_AIO_COMPLETE] = "perform_write_async_aio_complete",
-	[RFUSE_STAT_OP_TRY_GET_REQ_REQUEST_ALLOC] = "try_get_req_request_alloc",
-	[RFUSE_STAT_OP_TRY_GET_REQ_BLOCK_ALLOC] = "try_get_req_block_alloc",
-	[RFUSE_STAT_OP_SIMPLE_BACKGROUND] = "simple_background",
-};
-
-static void rfuse_path_latency_reset_locked(struct fuse_conn *fc)
-{
-	int i;
-
-	for (i = 0; i < RFUSE_STAT_OP_MAX; i++) {
-		fc->rfuse_stats.ops[i].count = 0;
-		fc->rfuse_stats.ops[i].total_ns = 0;
-		fc->rfuse_stats.ops[i].min_ns = U64_MAX;
-		fc->rfuse_stats.ops[i].max_ns = 0;
-	}
-}
-
-void rfuse_path_latency_record(struct fuse_conn *fc, enum rfuse_stat_op op,
-			       u64 ns)
-{
-	struct rfuse_latency_stat *stat;
-	unsigned long flags;
-
-	if (WARN_ON_ONCE(op >= RFUSE_STAT_OP_MAX))
-		return;
-
-	spin_lock_irqsave(&fc->rfuse_stats.lock, flags);
-	stat = &fc->rfuse_stats.ops[op];
-	stat->count++;
-	stat->total_ns += ns;
-	if (ns < stat->min_ns)
-		stat->min_ns = ns;
-	if (ns > stat->max_ns)
-		stat->max_ns = ns;
-	spin_unlock_irqrestore(&fc->rfuse_stats.lock, flags);
-}
-
-void rfuse_stats_dump(struct fuse_conn *fc)
-{
-	rfuse_path_latency_dump(fc);
-}
-
-void rfuse_path_latency_dump(struct fuse_conn *fc)
-{
-	struct rfuse_latency_stat snapshot[RFUSE_STAT_OP_MAX];
-	unsigned long flags;
-	int i;
-
-	spin_lock_irqsave(&fc->rfuse_stats.lock, flags);
-	memcpy(snapshot, fc->rfuse_stats.ops, sizeof(snapshot));
-	rfuse_path_latency_reset_locked(fc);
-	spin_unlock_irqrestore(&fc->rfuse_stats.lock, flags);
-
-	pr_info("rfuse path latency dump fc=%p\n", fc);
-	for (i = 0; i < RFUSE_STAT_OP_MAX; i++) {
-		struct rfuse_latency_stat *stat = &snapshot[i];
-		u64 avg = 0;
-
-		if (stat->count)
-			avg = div64_u64(stat->total_ns, stat->count);
-
-		pr_info("rfuse path latency %-36s count=%llu total_ns=%llu avg_ns=%llu min_ns=%llu max_ns=%llu\n",
-			rfuse_stat_op_names[i], stat->count, stat->total_ns,
-			avg, stat->count ? stat->min_ns : 0, stat->max_ns);
 	}
 }
 
@@ -1134,16 +1057,12 @@ struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background,
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_req *r_req;
 	struct rfuse_iqueue *riq;
-	u64 start_ns;
 	int err;
 
 	if(force) {
 		atomic_inc(&fc->num_waiting);
 
-		start_ns = ktime_get_ns();
 		r_req = try_rfuse_request_alloc(fm, file_lock, inode);
-		rfuse_path_latency_record(fc, RFUSE_STAT_OP_TRY_GET_REQ_REQUEST_ALLOC,
-					  ktime_get_ns() - start_ns);
 		err = -ENOMEM;
 		if (!r_req) {
 			if (for_background)
@@ -1174,10 +1093,7 @@ struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background,
 			goto out; 
 		}
 
-		start_ns = ktime_get_ns();
 		r_req = try_rfuse_request_alloc(fm, file_lock, inode);
-		rfuse_path_latency_record(fc, RFUSE_STAT_OP_TRY_GET_REQ_REQUEST_ALLOC,
-					  ktime_get_ns() - start_ns);
 		err = -ENOMEM;
 		if (!r_req) {
 			if (for_background)
@@ -1186,19 +1102,12 @@ struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background,
 		}
 
 		// Pass riq_id to find riq if it needs to wait
-		start_ns = ktime_get_ns();
 		if(rfuse_block_alloc(fc, for_background, r_req->riq_id)){
 			err = -EINTR;
 			riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
-			if (wait_event_killable_exclusive(riq->blocked_waitq, !rfuse_block_alloc(fc, for_background, r_req->riq_id))) {
-				rfuse_path_latency_record(fc, RFUSE_STAT_OP_TRY_GET_REQ_BLOCK_ALLOC,
-							  ktime_get_ns() - start_ns);
+			if (wait_event_killable_exclusive(riq->blocked_waitq, !rfuse_block_alloc(fc, for_background, r_req->riq_id)))
 				goto out;
-			}
 		}
-		rfuse_path_latency_record(fc, RFUSE_STAT_OP_TRY_GET_REQ_BLOCK_ALLOC,
-					  ktime_get_ns() - start_ns);
-
 
 		r_req->in.uid = from_kuid(fc->user_ns, current_fsuid());
 		r_req->in.gid = from_kgid(fc->user_ns, current_fsgid());
@@ -1475,19 +1384,12 @@ static bool rfuse_request_queue_background(struct rfuse_req *r_req)
 
 // BACKGROUND QUEUE INSERT
 int rfuse_simple_background(struct fuse_mount *fm, struct rfuse_req *r_req){
-	u64 start_ns = ktime_get_ns();
-	int err;
-
 	if(!rfuse_request_queue_background(r_req)){
 		rfuse_put_request(r_req);
-		err = -ENOTCONN;
-		goto out;
+		return -ENOTCONN;
 	}
-	err = 0;
-out:
-	rfuse_path_latency_record(fm->fc, RFUSE_STAT_OP_SIMPLE_BACKGROUND,
-				  ktime_get_ns() - start_ns);
-	return err;
+
+	return 0;
 }
 
 void rfuse_request_end(struct rfuse_req *r_req){

@@ -33,8 +33,6 @@ struct list_head fuse_conn_list;
 DEFINE_MUTEX(fuse_mutex);
 
 static int set_global_limit(const char *val, const struct kernel_param *kp);
-static int set_path_latency_dump(const char *val, const struct kernel_param *kp);
-static void rfuse_path_latency_dump_all(void);
 
 unsigned max_user_bgreq;
 module_param_call(max_user_bgreq, set_global_limit, param_get_uint,
@@ -51,13 +49,6 @@ __MODULE_PARM_TYPE(max_user_congthresh, "uint");
 MODULE_PARM_DESC(max_user_congthresh,
  "Global limit for the maximum congestion threshold an "
  "unprivileged user can set");
-
-static int path_latency_dump;
-module_param_call(path_latency_dump, set_path_latency_dump, param_get_int,
-		  &path_latency_dump, 0644);
-__MODULE_PARM_TYPE(path_latency_dump, "int");
-MODULE_PARM_DESC(path_latency_dump,
- "Write non-zero to dump RFUSE path latency statistics for active connections");
 
 #define FUSE_SUPER_MAGIC 0x65735546
 
@@ -807,9 +798,6 @@ void fuse_conn_init(struct fuse_conn *fc, struct fuse_mount *fm,
 	fc->blocked = 0;
 	fc->initialized = 0;
 	fc->connected = 1;
-	spin_lock_init(&fc->rfuse_stats.lock);
-	for (i = 0; i < RFUSE_STAT_OP_MAX; i++)
-		fc->rfuse_stats.ops[i].min_ns = U64_MAX;
 	atomic64_set(&fc->attr_version, 1);
 	get_random_bytes(&fc->scramble_key, sizeof(fc->scramble_key));
 	fc->pid_ns = get_pid_ns(task_active_pid_ns(current));
@@ -868,34 +856,6 @@ struct fuse_conn *fuse_conn_get(struct fuse_conn *fc)
 	return fc;
 }
 EXPORT_SYMBOL_GPL(fuse_conn_get);
-
-static void rfuse_path_latency_dump_all(void)
-{
-	struct fuse_conn *fc;
-
-	mutex_lock(&fuse_mutex);
-	list_for_each_entry(fc, &fuse_conn_list, entry)
-		rfuse_path_latency_dump(fc);
-	mutex_unlock(&fuse_mutex);
-}
-
-static int set_path_latency_dump(const char *val, const struct kernel_param *kp)
-{
-	int ret;
-	int dump;
-
-	ret = kstrtoint(val, 0, &dump);
-	if (ret)
-		return ret;
-
-	*(int *)kp->arg = dump;
-	if (dump) {
-		rfuse_path_latency_dump_all();
-		*(int *)kp->arg = 0;
-	}
-
-	return 0;
-}
 
 static struct inode *fuse_get_root_inode(struct super_block *sb, unsigned mode)
 {
@@ -1655,7 +1615,6 @@ void fuse_conn_destroy(struct fuse_mount *fm)
 {
 	struct fuse_conn *fc = fm->fc;
 
-	rfuse_stats_dump(fc);
 	if (fc->destroy)
 		fuse_send_destroy(fm);
 	
@@ -1692,7 +1651,6 @@ EXPORT_SYMBOL(fuse_mount_destroy);
 
 static void fuse_kill_sb_anon(struct super_block *sb)
 {
-	printk("RFUSE: Unmount... kill superblock\n");
 	fuse_sb_destroy(sb);
 	kill_anon_super(sb);
 	fuse_mount_destroy(get_fuse_mount_super(sb));
