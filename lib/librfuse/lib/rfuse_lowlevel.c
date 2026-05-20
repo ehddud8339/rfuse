@@ -466,12 +466,26 @@ static int rfuse_req_has_input_payload(fuse_req_t req)
 
 int fuse_reply_buf(fuse_req_t u_req, const char *buf, size_t size){
 	// Write to the kernel buffer
+	struct rfuse_iqueue *riq = u_req->riq;
+	struct rfuse_req *r_req = &riq->ureq[u_req->index];
 	struct fuse_chan *ch = u_req->ch;
 	struct fuse_session *se = u_req->se;
+	struct rfuse_payload_view payload;
 	int req_index = u_req->index;
 	int riq_id = u_req->riq->riq_id;
 	long long int pp_req_index = ((long long int)req_index << 32) & RFUSE_REQ_IDX_MASK;
 	int pp_riq_id = (riq_id << 16) & RFUSE_RIQ_ID_MASK;
+
+	if (rfuse_req_payload_buffer(u_req, &payload) == 0 &&
+	    (payload.flags & RFUSE_PAYLOAD_OUT)) {
+		if (size > payload.capacity)
+			return fuse_reply_err(u_req, EIO);
+		if (buf != payload.addr && size)
+			memcpy(payload.addr, buf, size);
+		r_req->payload_len = size;
+		r_req->out.arglen = size;
+		return rfuse_send_reply_ok(u_req);
+	}
 
 	ssize_t res = pwrite(ch ? ch->fd : se->fd, buf, size, (long long int)pp_riq_id | pp_req_index);
 	//rfuse_count_pwrite();
