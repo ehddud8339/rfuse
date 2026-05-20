@@ -1,0 +1,8 @@
+[56105.174220] fuse: rfuse path latency readpages_get_req: samples=4100 avg=1094 ns min=389 ns max=14040 ns p50=1046 ns p90=1384 ns p95=1540 ns p99=1862 ns p99.9=5592 ns
+[56105.177381] fuse: rfuse path latency readpages_args_fill: samples=4100 avg=25 ns min=16 ns max=396 ns p50=22 ns p90=42 ns p95=53 ns p99=64 ns p99.9=180 ns
+[56105.180034] fuse: rfuse path latency readpages_prepare_payload: samples=4100 avg=403 ns min=122 ns max=10967 ns p50=368 ns p90=568 ns p95=645 ns p99=873 ns p99.9=1343 ns
+[56105.182189] fuse: rfuse path latency readpages_simple_background: samples=4100 avg=4035 ns min=1327 ns max=27683 ns p50=3558 ns p90=6511 ns p95=7582 ns p99=10611 ns p99.9=13811 ns
+[56105.182329] fuse: rfuse path latency readpages_simple_request: no samples collected
+[56105.182330] fuse: rfuse path latency readpages_end: no samples collected
+[56105.184063] fuse: rfuse path latency queue_to_request_end: samples=4106 avg=368859 ns min=11031 ns max=7982096 ns p50=345311 ns p90=443835 ns p95=492656 ns p99=547839 ns p99.9=791834 ns
+[56105.186000] fuse: rfuse path latency request_end_to_completion_end: samples=4106 avg=82728 ns min=402 ns max=166692 ns p50=82876 ns p90=112330 ns p95=117114 ns p99=128413 ns p99.9=138795 ns

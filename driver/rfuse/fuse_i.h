@@ -1325,11 +1325,27 @@ int fuse_fileattr_get(struct dentry *dentry, struct fileattr *fa);
 int fuse_fileattr_set(struct user_namespace *mnt_userns,
 		      struct dentry *dentry, struct fileattr *fa);
 
-/* file.c */
+/* RFUSE path latency */
 
-int rfuse_write_latency_stats_init(void);
-void rfuse_write_latency_stats_destroy(void);
-void rfuse_write_latency_stats_maybe_dump_and_reset(void);
+enum rfuse_path_latency_id {
+	RFUSE_PATH_LATENCY_READPAGES_GET_REQ,
+	RFUSE_PATH_LATENCY_READPAGES_ARGS_FILL,
+	RFUSE_PATH_LATENCY_READPAGES_PREPARE_PAYLOAD,
+	RFUSE_PATH_LATENCY_READPAGES_SIMPLE_BACKGROUND,
+	RFUSE_PATH_LATENCY_READPAGES_SIMPLE_REQUEST,
+	RFUSE_PATH_LATENCY_READPAGES_END,
+	RFUSE_PATH_LATENCY_QUEUE_TO_END,
+	RFUSE_PATH_LATENCY_END_TO_COMPLETION,
+	RFUSE_PATH_LATENCY_COUNT,
+};
+
+int rfuse_path_latency_stats_init(void);
+void rfuse_path_latency_stats_destroy(void);
+void rfuse_path_latency_stats_dump_and_reset(void);
+void rfuse_path_latency_record(enum rfuse_path_latency_id id, u64 latency_ns);
+void rfuse_path_latency_submit_start(struct rfuse_req *r_req, u64 submit_ns);
+
+/* file.c */
 
 struct fuse_file *fuse_file_open(struct fuse_mount *fm, u64 nodeid,
 				 unsigned int open_flags, bool isdir);

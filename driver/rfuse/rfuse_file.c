@@ -10,7 +10,9 @@
 #include <linux/falloc.h>
 #include <linux/uio.h>
 #include <linux/fs.h>
+#include <linux/ktime.h>
 
+#define LDY_NO_PAYLOAD 1
 #define LDY_NO_PAGE_CACHE 1
 
 struct rfuse_release_in {
@@ -2124,11 +2126,13 @@ int rfuse_do_readpage(struct file *file, struct page *page){
 		desc.length--;
 
 	rfuse_read_args_fill(&ria, file, pos, desc.length, FUSE_READ);
+#if !LDY_NO_PAYLOAD
 	res = rfuse_prepare_payload(r_req, true);
 	if (res) {
 		rfuse_put_request(r_req);
 		return res;
 	}
+#endif
 	res = rfuse_simple_request(r_req);
 	rfuse_put_request(r_req);
 	if (res < 0)
@@ -2224,13 +2228,19 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, i
 	struct rfuse_req *r_req;
 
 	ssize_t res;
+	u64 latency_start_ns;
 	int err;
 
+  // get_req()
+	latency_start_ns = ktime_get_ns();
 	//if(is_async)
 	if (fm->fc->async_read)
 		r_req = try_rfuse_get_req(fm, true, false, count, NULL);
 	else
 		r_req = rfuse_get_req(fm, false, false, count);
+	rfuse_path_latency_record(RFUSE_PATH_LATENCY_READPAGES_GET_REQ,
+				  ktime_get_ns() - latency_start_ns);
+  // get_req()
 	if (IS_ERR(r_req)) {
 		int i;
 
@@ -2259,33 +2269,79 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, i
 	}
 	WARN_ON((loff_t) (pos + count) < 0);
 
+  // args_fill()
+	latency_start_ns = ktime_get_ns();
 	rfuse_read_args_fill(ria, file, pos, count, FUSE_READ);
+	rfuse_path_latency_record(RFUSE_PATH_LATENCY_READPAGES_ARGS_FILL,
+				  ktime_get_ns() - latency_start_ns);
+  // args_fill()
 	ria->read.attr_ver = fuse_get_attr_version(fm->fc);
 	//if (is_async) {
 	if (fm->fc->async_read) {
 		ria->ff = rfuse_file_get(ff);
 		r_req->end = rfuse_readpages_end;
+#if !LDY_NO_PAYLOAD
+    // prepare_payload()
+		latency_start_ns = ktime_get_ns();
 		err = rfuse_prepare_payload(r_req, true);
+		rfuse_path_latency_record(
+			RFUSE_PATH_LATENCY_READPAGES_PREPARE_PAYLOAD,
+			ktime_get_ns() - latency_start_ns);
+    // prepare_payload()
 		if (err)
 			goto out_end;
+#endif
+    // simple_background()
+		latency_start_ns = ktime_get_ns();
 		err = rfuse_simple_background(fm, r_req);
+		rfuse_path_latency_record(
+			RFUSE_PATH_LATENCY_READPAGES_SIMPLE_BACKGROUND,
+			ktime_get_ns() - latency_start_ns);
+    // simple_backgorund()
 		if (!err)
 			return;
 	} else {
+#if !LDY_NO_PAYLOAD
+    // prepare_payload()
+		latency_start_ns = ktime_get_ns();
 		err = rfuse_prepare_payload(r_req, true);
+		rfuse_path_latency_record(
+			RFUSE_PATH_LATENCY_READPAGES_PREPARE_PAYLOAD,
+			ktime_get_ns() - latency_start_ns);
+    // prepare_payload()
 		if (err) {
+			latency_start_ns = ktime_get_ns();
 			rfuse_readpages_end(fm, r_req, err);
+			rfuse_path_latency_record(RFUSE_PATH_LATENCY_READPAGES_END,
+						  ktime_get_ns() - latency_start_ns);
 			rfuse_put_request(r_req);
 			return;
 		}
+#endif
+    // simple_request()
+		latency_start_ns = ktime_get_ns();
 		res = rfuse_simple_request(r_req);
+		rfuse_path_latency_record(
+			RFUSE_PATH_LATENCY_READPAGES_SIMPLE_REQUEST,
+			ktime_get_ns() - latency_start_ns);
+    // simple_request()
 		err = res < 0 ? res : 0;
+    // readpages_end()
+		latency_start_ns = ktime_get_ns();
 		rfuse_readpages_end(fm, r_req, err);
+		rfuse_path_latency_record(RFUSE_PATH_LATENCY_READPAGES_END,
+					  ktime_get_ns() - latency_start_ns);
+    // readpages_end()
 		rfuse_put_request(r_req);
 		return;
 	}
+#if !LDY_NO_PAYLOAD
 out_end:
+#endif
+	latency_start_ns = ktime_get_ns();
 	rfuse_readpages_end(fm, r_req, err);
+	rfuse_path_latency_record(RFUSE_PATH_LATENCY_READPAGES_END,
+				  ktime_get_ns() - latency_start_ns);
 	rfuse_put_request(r_req);
 }
 
@@ -2354,20 +2410,26 @@ static ssize_t rfuse_send_read(struct rfuse_io_args *ria, loff_t pos, size_t cou
 	}
 
 	if (ria->io->async) {
+#if !LDY_NO_PAYLOAD
 		res = rfuse_prepare_payload(r_req, true);
 		if (res)
 			goto out_put_req;
+#endif
 		return rfuse_async_req_send(fm, ria, count);
 	}
+#if !LDY_NO_PAYLOAD
 	res = rfuse_prepare_payload(r_req, true);
 	if (res)
 		goto out_put_req;
+#endif
 	res = rfuse_simple_request(r_req);
 	rfuse_put_request(r_req);
 
 	return res;
 
+#if !LDY_NO_PAYLOAD
 out_put_req:
+#endif
 	rfuse_put_request(r_req);
 	return res;
 }

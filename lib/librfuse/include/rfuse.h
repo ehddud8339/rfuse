@@ -471,9 +471,7 @@ const struct fuse_ctx *fuse_req_ctx(fuse_req_t req);
 
 int fuse_req_getgroups(fuse_req_t req, int size, gid_t list[]);
 
-int rfuse_req_payload_view(fuse_req_t req, struct rfuse_payload_view *view);
-
-int rfuse_reply_read_from_fd(fuse_req_t req, int fd, off_t off, size_t size);
+void *rfuse_req_payload_addr(fuse_req_t req);
 
 /**
  * This description is about old_fuse_session_loop...

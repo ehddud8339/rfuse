@@ -314,9 +314,6 @@ struct dentry *rfuse_lookup(struct inode *dir, struct dentry *entry, unsigned in
 	bool outarg_valid = true;
 	bool locked;
 
-	if (!strcmp(current->comm, "tee"))
-		rfuse_write_latency_stats_maybe_dump_and_reset();
-
 	if (fuse_is_bad(dir))
 		return ERR_PTR(-EIO);
 

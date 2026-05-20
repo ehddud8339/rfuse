@@ -143,8 +143,7 @@ FUSE_3.0 {
 		fuse_reply_entry;
 		fuse_reply_write;
 		fuse_reply_data;
-		rfuse_reply_read_from_fd;
-		rfuse_req_payload_view;
+		rfuse_req_payload_addr;
 		fuse_add_direntry;
 		fuse_session_loop;
 		fuse_session_loop_mt_31;
