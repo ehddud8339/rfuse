@@ -780,7 +780,7 @@ static struct rfuse_iqueue *rfuse_get_iqueue_with_payload_space(struct fuse_conn
 	int start = select_cpu_id();
 	int i;
 
-  /*
+  
 	if (!need || need > fc->riq[start]->payload.size)
 		return fc->riq[start];
 
@@ -800,7 +800,7 @@ static struct rfuse_iqueue *rfuse_get_iqueue_with_payload_space(struct fuse_conn
 
 		cond_resched();
 	}
-  */
+  
 
   return fc->riq[start];
 }
@@ -1199,12 +1199,12 @@ static struct rfuse_req *try_rfuse_request_alloc(struct fuse_mount *fm,
 						 size_t payload_len,
 						 spinlock_t *file_lock){
 	struct fuse_conn *fc = fm->fc;
-  /*
+  
 	struct rfuse_iqueue *riq = payload_len ?
 		rfuse_get_iqueue_with_payload_space(fc, payload_len) :
 		rfuse_get_iqueue_for_async(fc);
-  */
-  struct rfuse_iqueue *riq = rfuse_get_iqueue_for_async(fc);
+  
+  //struct rfuse_iqueue *riq = rfuse_get_iqueue_for_async(fc);
 	int riq_id = riq->riq_id;
 	struct rfuse_req *r_req = NULL;
 	uint32_t req_index;
