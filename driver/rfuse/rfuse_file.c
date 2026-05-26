@@ -1185,6 +1185,32 @@ out_put_req:
 	rfuse_put_request(r_req);
 	return err ?: copied;
 }
+
+static int rfuse_invalidate_written_cache(struct address_space *mapping,
+					  loff_t start, loff_t end)
+{
+	pgoff_t start_index = start >> PAGE_SHIFT;
+	pgoff_t end_index = end >> PAGE_SHIFT;
+	int invalidate_err = 0;
+	int wait_err;
+
+	filemap_invalidate_lock(mapping);
+
+	wait_err = filemap_write_and_wait_range(mapping, start, end);
+	if (!wait_err)
+		invalidate_err = invalidate_inode_pages2_range(mapping,
+							       start_index,
+							       end_index);
+
+	filemap_invalidate_unlock(mapping);
+  /*
+	pr_info("RFUSE_PAGECACHE_INVALIDATE inode=%lu start=%lld end=%lld start_index=%lu end_index=%lu wait_ret=%d invalidate_ret=%d\n",
+		inode->i_ino, (long long)start, (long long)end,
+		(unsigned long)start_index, (unsigned long)end_index,
+		wait_err, invalidate_err);
+  */
+	return wait_err ?: invalidate_err;
+}
 #endif
 
 ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, struct iov_iter *ii, loff_t pos){
@@ -1203,12 +1229,21 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 	do {
 		ssize_t count;
 #ifdef LDY_NO_PAGE_CACHE
+		loff_t write_start = pos;
 		size_t bytes = min_t(size_t, iov_iter_count(ii), fc->max_write);
 
 		count = rfuse_send_write_payload(iocb, ii, pos, bytes);
 		if (count <= 0) {
 			err = count;
 		} else {
+			int invalidate_err;
+
+			invalidate_err = rfuse_invalidate_written_cache(mapping,
+									write_start,
+									write_start + count - 1);
+			if (invalidate_err && !err)
+				err = invalidate_err;
+
 			res += count;
 			pos += count;
 

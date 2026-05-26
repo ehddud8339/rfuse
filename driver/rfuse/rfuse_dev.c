@@ -327,25 +327,114 @@ static int rfuse_payload_copy_from_pages(struct rfuse_req *r_req, size_t len)
 	return remaining ? -EIO : 0;
 }
 
+static int rfuse_payload_pages_capacity(struct rfuse_pages *rp, size_t *capacity)
+{
+	size_t total = 0;
+	unsigned int i;
+
+	if (!rp || !rp->pages || !rp->descs || !capacity)
+		return -EINVAL;
+
+	for (i = 0; i < rp->num_pages; i++) {
+		struct fuse_page_desc *desc = &rp->descs[i];
+
+		if (!rp->pages[i])
+			return -EIO;
+		if (desc->offset > PAGE_SIZE ||
+		    desc->length > PAGE_SIZE - desc->offset)
+			return -EIO;
+		if ((size_t)-1 - total < desc->length)
+			return -EIO;
+
+		total += desc->length;
+	}
+
+	*capacity = total;
+	return 0;
+}
+
+static size_t rfuse_requested_out_payload_len(struct rfuse_req *r_req)
+{
+	if (r_req->in.opcode == FUSE_READ) {
+		struct fuse_read_in *in = (struct fuse_read_in *)&r_req->args;
+
+		return in->size;
+	}
+
+	return r_req->payload_capacity;
+}
+
+static void rfuse_zero_payload_tail(struct rfuse_pages *rp, size_t copied,
+				    size_t requested)
+{
+	size_t payload_pos = 0;
+	unsigned int i;
+
+	for (i = 0; i < rp->num_pages && payload_pos < requested; i++) {
+		struct fuse_page_desc *desc = &rp->descs[i];
+		size_t desc_len = min_t(size_t, desc->length,
+					requested - payload_pos);
+
+		if (copied < payload_pos + desc_len) {
+			size_t zero_start = 0;
+			size_t zero_len;
+			void *addr;
+
+			if (copied > payload_pos)
+				zero_start = copied - payload_pos;
+			zero_len = desc_len - zero_start;
+
+			addr = kmap_atomic(rp->pages[i]);
+			memset(addr + desc->offset + zero_start, 0, zero_len);
+			kunmap_atomic(addr);
+			flush_dcache_page(rp->pages[i]);
+		}
+
+		payload_pos += desc_len;
+	}
+}
+
 int rfuse_import_payload(struct rfuse_req *r_req)
 {
 	struct rfuse_pages *rp = r_req->rp;
+	struct rfuse_iqueue *riq;
 	char *src;
 	unsigned int i;
+	size_t actual;
+	size_t requested;
+	size_t page_capacity;
 	size_t remaining;
+	int err;
 
-	if (!rp || !r_req->payload_capacity || (r_req->payload_flags & RFUSE_PAYLOAD_FALLBACK))
+	if (!rp || !r_req->payload_capacity ||
+	    (r_req->payload_flags & RFUSE_PAYLOAD_FALLBACK))
 		return 0;
 	if (!(r_req->payload_flags & RFUSE_PAYLOAD_OUT))
 		return 0;
+	if (r_req->out.error)
+		return 0;
 
-	remaining = r_req->out.arglen;
-	src = (char *)r_req->fm->fc->riq[r_req->riq_id]->payload.kaddr + r_req->payload_offset;
+	actual = r_req->out.arglen;
+	requested = rfuse_requested_out_payload_len(r_req);
+	err = rfuse_payload_pages_capacity(rp, &page_capacity);
+	if (err)
+		return err;
+	if (requested > r_req->payload_capacity ||
+	    requested > page_capacity ||
+	    actual > r_req->payload_capacity ||
+	    actual > requested ||
+	    actual > page_capacity)
+		return -EIO;
+
+	remaining = actual;
+	riq = rfuse_get_specific_iqueue(r_req->fm->fc, r_req->riq_id);
+	src = (char *)riq->payload.kaddr + r_req->payload_offset;
 	r_req->payload_len = remaining;
 
 	for (i = 0; i < rp->num_pages && remaining; i++) {
 		unsigned int offset = rp->descs[i].offset;
-		unsigned int count = min_t(size_t, remaining, rp->descs[i].length);
+		unsigned int count = min_t(size_t, remaining,
+					   rp->descs[i].length);
 		void *dst = kmap_atomic(rp->pages[i]);
 
 		memcpy(dst + offset, src, count);
@@ -353,6 +442,10 @@ int rfuse_import_payload(struct rfuse_req *r_req)
 		src += count;
 		remaining -= count;
 	}
+
+	if (!remaining && r_req->page_zeroing &&
+	    r_req->payload_len < requested)
+		rfuse_zero_payload_tail(rp, r_req->payload_len, requested);
 
 	return remaining ? -EIO : 0;
 }
