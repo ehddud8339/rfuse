@@ -11,7 +11,7 @@
 #include <linux/uio.h>
 #include <linux/fs.h>
 
-#define LDY_NO_PAYLOAD 0
+#define LDY_NO_PAYLOAD 1
 #define LDY_NO_PAGE_CACHE 1
 
 struct rfuse_release_in {
