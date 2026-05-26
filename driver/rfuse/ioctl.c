@@ -187,6 +187,7 @@ long fuse_do_ioctl(struct file *file, unsigned int cmd, unsigned long arg,
 		goto out;
 
 	fuse_page_descs_length_init(ap.descs, 0, fm->fc->max_pages);
+	rfuse_wait_async_writes(file_inode(file));
 
 	/*
 	 * If restricted, initialize IO parameters as encoded in @cmd.
@@ -393,6 +394,7 @@ static int fuse_priv_ioctl(struct inode *inode, struct fuse_file *ff,
 	args.out_args[1].size = inarg.out_size;
 	args.out_args[1].value = ptr;
 
+	rfuse_wait_async_writes(inode);
 	err = fuse_simple_request(fm, &args);
 	if (!err && outarg.flags & FUSE_IOCTL_RETRY)
 		err = -EIO;
@@ -424,6 +426,7 @@ int fuse_fileattr_get(struct dentry *dentry, struct fileattr *fa)
 	struct fsxattr xfa;
 	int err;
 
+	rfuse_wait_async_writes(inode);
 	ff = fuse_priv_ioctl_prepare(inode);
 	if (IS_ERR(ff))
 		return PTR_ERR(ff);
@@ -462,6 +465,7 @@ int fuse_fileattr_set(struct user_namespace *mnt_userns,
 	struct fsxattr xfa;
 	int err;
 
+	rfuse_wait_async_writes(inode);
 	ff = fuse_priv_ioctl_prepare(inode);
 	if (IS_ERR(ff))
 		return PTR_ERR(ff);

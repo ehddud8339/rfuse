@@ -30,7 +30,7 @@
 
 #define RFUSE_SELECTION_ALGO 2
 #ifndef LDY_PAYLOAD_AWARE
-#define LDY_PAYLOAD_AWARE 0
+#define LDY_PAYLOAD_AWARE 1
 #endif
 
 atomic_t rr_id = ATOMIC_INIT(0);
@@ -198,7 +198,7 @@ static int rfuse_payload_alloc(struct rfuse_req *r_req, size_t need, bool may_wa
 		if (ret != -EAGAIN || !may_wait)
 			break;
 
-		pr_info("RFUSE: payload alloc throttle start riq=%d req=%u opcode=%u need=%zu used=%u size=%u largest_free=%u attempts=%u waits=%u pid=%d\n",
+		pr_info("RFUSE: payload alloc throttle riq=%d req=%u opcode=%u need=%zu used=%u size=%u largest_free=%u attempts=%u waits=%u pid=%d\n",
 			 r_req->riq_id, r_req->index, r_req->in.opcode,
 			 aligned_need, riq->payload.used, riq->payload.size,
 			 riq->payload_largest_free, attempts, waits,
@@ -207,12 +207,14 @@ static int rfuse_payload_alloc(struct rfuse_req *r_req, size_t need, bool may_wa
 		ret = wait_event_interruptible(riq->payload_waitq,
 				!r_req->fm->fc->connected ||
 				rfuse_payload_find_extent(riq, aligned_need));
+    /*
 		pr_info("RFUSE: payload alloc throttle end riq=%d req=%u opcode=%u need=%zu ret=%d used=%u size=%u largest_free=%u connected=%d pid=%d\n",
 			 r_req->riq_id, r_req->index, r_req->in.opcode,
 			 aligned_need, ret,
 			 riq->payload.used, riq->payload.size,
 			 riq->payload_largest_free, r_req->fm->fc->connected,
 			 current->pid);
+    */
 		if (ret)
 			break;
 		if (!r_req->fm->fc->connected) {
@@ -257,15 +259,49 @@ void rfuse_release_payload(struct rfuse_req *r_req)
 	r_req->payload_flags = 0;
 }
 
+static int rfuse_payload_pages_capacity(struct rfuse_pages *rp, size_t *capacity)
+{
+	size_t total = 0;
+	unsigned int i;
+
+	if (!rp || !rp->pages || !rp->descs || !capacity)
+		return -EINVAL;
+
+	for (i = 0; i < rp->num_pages; i++) {
+		struct fuse_page_desc *desc = &rp->descs[i];
+
+		if (!rp->pages[i])
+			return -EIO;
+		if (desc->offset > PAGE_SIZE ||
+		    desc->length > PAGE_SIZE - desc->offset)
+			return -EIO;
+		if ((size_t)-1 - total < desc->length)
+			return -EIO;
+
+		total += desc->length;
+	}
+
+	*capacity = total;
+	return 0;
+}
+
 static int rfuse_payload_copy_from_pages(struct rfuse_req *r_req, size_t len)
 {
 	struct rfuse_pages *rp = r_req->rp;
 	char *dst;
 	unsigned int i;
+	size_t capacity;
 	size_t remaining = len;
+	int err;
 
 	if (!rp || !len)
 		return 0;
+
+	err = rfuse_payload_pages_capacity(rp, &capacity);
+	if (err)
+		return err;
+	if (len > capacity)
+		return -EIO;
 
 	dst = (char *)r_req->fm->fc->riq[r_req->riq_id]->payload.kaddr + r_req->payload_offset;
 	for (i = 0; i < rp->num_pages && remaining; i++) {
@@ -282,20 +318,82 @@ static int rfuse_payload_copy_from_pages(struct rfuse_req *r_req, size_t len)
 	return remaining ? -EIO : 0;
 }
 
+static size_t rfuse_requested_out_payload_len(struct rfuse_req *r_req)
+{
+	if (r_req->in.opcode == FUSE_READ) {
+		struct fuse_read_in *in = (struct fuse_read_in *)&r_req->args;
+
+		return in->size;
+	}
+
+	return r_req->payload_capacity;
+}
+
+static void rfuse_zero_payload_tail(struct rfuse_pages *rp, size_t copied,
+				    size_t requested)
+{
+	size_t payload_pos = 0;
+	unsigned int i;
+
+	for (i = 0; i < rp->num_pages && payload_pos < requested; i++) {
+		struct fuse_page_desc *desc = &rp->descs[i];
+		size_t desc_len = min_t(size_t, desc->length,
+					requested - payload_pos);
+
+		if (copied < payload_pos + desc_len) {
+			size_t zero_start = 0;
+			size_t zero_len;
+			void *addr;
+
+			if (copied > payload_pos)
+				zero_start = copied - payload_pos;
+			zero_len = desc_len - zero_start;
+
+			addr = kmap_atomic(rp->pages[i]);
+			memset(addr + desc->offset + zero_start, 0, zero_len);
+			kunmap_atomic(addr);
+			flush_dcache_page(rp->pages[i]);
+		}
+
+		payload_pos += desc_len;
+	}
+}
+
 int rfuse_import_payload(struct rfuse_req *r_req)
 {
 	struct rfuse_pages *rp = r_req->rp;
+	struct rfuse_iqueue *riq;
 	char *src;
 	unsigned int i;
+	size_t actual;
+	size_t requested;
+	size_t page_capacity;
 	size_t remaining;
+	int err;
 
 	if (!rp || !r_req->payload_capacity || (r_req->payload_flags & RFUSE_PAYLOAD_FALLBACK))
 		return 0;
 	if (!(r_req->payload_flags & RFUSE_PAYLOAD_OUT))
 		return 0;
+	if (r_req->out.error)
+		return 0;
 
-	remaining = r_req->out.arglen;
-	src = (char *)r_req->fm->fc->riq[r_req->riq_id]->payload.kaddr + r_req->payload_offset;
+	actual = r_req->out.arglen;
+	requested = rfuse_requested_out_payload_len(r_req);
+
+	err = rfuse_payload_pages_capacity(rp, &page_capacity);
+	if (err)
+		return err;
+	if (requested > r_req->payload_capacity ||
+	    requested > page_capacity ||
+	    actual > r_req->payload_capacity ||
+	    actual > requested ||
+	    actual > page_capacity)
+		return -EIO;
+
+	remaining = actual;
+	riq = rfuse_get_specific_iqueue(r_req->fm->fc, r_req->riq_id);
+	src = (char *)riq->payload.kaddr + r_req->payload_offset;
 	r_req->payload_len = remaining;
 
 	for (i = 0; i < rp->num_pages && remaining; i++) {
@@ -305,11 +403,17 @@ int rfuse_import_payload(struct rfuse_req *r_req)
 
 		memcpy(dst + offset, src, count);
 		kunmap_atomic(dst);
+		flush_dcache_page(rp->pages[i]);
 		src += count;
 		remaining -= count;
 	}
 
-	return remaining ? -EIO : 0;
+	if (remaining)
+		return -EIO;
+	if (r_req->page_zeroing && r_req->payload_len < requested)
+		rfuse_zero_payload_tail(rp, r_req->payload_len, requested);
+
+	return 0;
 }
 
 int rfuse_reserve_payload(struct rfuse_req *r_req, size_t len,
@@ -826,7 +930,7 @@ static int check_numa_group(int cpu, const int **group)
 	return 1;
 }
 
-static int select_payload_aware_v2(struct fuse_conn *fc, size_t len)
+static int __maybe_unused select_payload_aware_v2(struct fuse_conn *fc, size_t len)
 {
 	size_t need = PAGE_ALIGN(len);
 	const int *group;
@@ -850,8 +954,8 @@ static int select_payload_aware_v2(struct fuse_conn *fc, size_t len)
 
 			riq = fc->riq[id];
 			spin_lock(&riq->payload_lock);
-			free_payload = riq->payload.size - riq->payload.used;
-      //free_payload = riq->payload_largest_free;
+			//free_payload = riq->payload.size - riq->payload.used;
+      free_payload = riq->payload_largest_free;
 			spin_unlock(&riq->payload_lock);
 
 			if (free_payload >= need)
@@ -862,13 +966,151 @@ static int select_payload_aware_v2(struct fuse_conn *fc, size_t len)
 	}
 }
 
+static int select_payload_aware_v3(struct fuse_conn *fc, size_t len)
+{
+	size_t need = PAGE_ALIGN(len);
+	const int *group;
+	int start = select_cpu_id();
+	unsigned int start_idx;
+	unsigned int i;
+
+	if (!need || need > fc->riq[start]->payload.size)
+		return start;
+
+	if (check_numa_group(start, &group))
+		return start;
+
+	for (start_idx = 0; start_idx < nr_numa_nodes; start_idx++) {
+		if (group[start_idx] == start)
+			break;
+	}
+
+	if (start_idx == nr_numa_nodes)
+		return start;
+
+	for (;;) {
+		for (i = 0; i < nr_numa_nodes; i++) {
+			int id = group[(start_idx + i + 1) % nr_numa_nodes];
+			struct rfuse_iqueue *riq;
+			u32 free_payload;
+
+			if (id < 0 || id >= RFUSE_NUM_IQUEUE || id == start)
+				continue;
+
+			riq = fc->riq[id];
+			spin_lock(&riq->payload_lock);
+			free_payload = riq->payload_largest_free;
+			spin_unlock(&riq->payload_lock);
+
+			if (free_payload >= need)
+				return id;
+		}
+
+		cond_resched();
+	}
+}
+
+static int select_payload_aware_v4(struct fuse_conn *fc, size_t len)
+{
+	size_t need = PAGE_ALIGN(len);
+	const int *group;
+	int start = select_cpu_id();
+	unsigned int start_idx;
+	unsigned int i;
+
+	if (!need || need > fc->riq[start]->payload.size)
+		return start;
+
+	if (check_numa_group(start, &group))
+		return start;
+
+	for (start_idx = 0; start_idx < nr_numa_nodes; start_idx++) {
+		if (group[start_idx] == start)
+			break;
+	}
+
+	if (start_idx == nr_numa_nodes)
+		return start;
+
+	for (;;) {
+		for (i = 0; i < nr_numa_nodes; i++) {
+			int id = group[(start_idx + i + 1) % nr_numa_nodes];
+			struct rfuse_iqueue *riq;
+			u32 free_payload;
+
+			if (id < 0 || id >= RFUSE_NUM_IQUEUE || id == start)
+				continue;
+
+			riq = fc->riq[id];
+			if (READ_ONCE(riq->num_sync_sleeping))
+				continue;
+
+			spin_lock(&riq->payload_lock);
+			free_payload = riq->payload_largest_free;
+			spin_unlock(&riq->payload_lock);
+
+			if (free_payload >= need)
+				return id;
+		}
+
+		cond_resched();
+	}
+}
+
+static int select_bg_aware(struct fuse_conn *fc) {
+  const int *group;
+  int start = select_cpu_id();
+  unsigned int i;
+
+  if (check_numa_group(start, &group))
+    return start;
+
+  for (;;) {
+    for (i = 0; i < nr_numa_nodes; i++) {
+      int id = group[i];
+      struct rfuse_iqueue *riq;
+      bool available;
+
+      if (id < 0 || id >= RFUSE_NUM_IQUEUE || id == start)
+        continue;
+
+      riq = fc->riq[id];
+      if (READ_ONCE(riq->num_sync_sleeping))
+        continue;
+
+      spin_lock(&riq->bg_lock);
+      available = riq->num_background < riq->max_background;
+      spin_unlock(&riq->bg_lock);
+
+      if (available)
+        return id;
+    }
+
+    cond_resched();
+  }
+}
+
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc,
 						size_t payload_len)
 {
 	int id;
 
-	id = payload_len ? select_payload_aware_v2(fc, payload_len) :
-		select_round_robin(fc);
+  /*
+	id = payload_len ? select_payload_aware_v4(fc, payload_len) :
+		select_bg_aware(fc);
+  */
+  id = select_cpu_id();
+
+	return fc->riq[id];
+}
+
+struct rfuse_iqueue *rfuse_get_iqueue_for_wt_async(struct fuse_conn *fc,
+						   size_t payload_len)
+{
+	int id;
+
+	id = payload_len ? select_payload_aware_v4(fc, payload_len) :
+		select_bg_aware(fc);
 
 	return fc->riq[id];
 }
@@ -1012,9 +1254,11 @@ uint32_t rfuse_get_request_buffer(struct fuse_mount *fm, int riq_id){
 				 current->pid);
 			spin_unlock(&riq->lock);
 			wait_event_interruptible(riq->waitq, !READ_ONCE(riq->reqbm.full));
+      /*
 			pr_info("RFUSE: request buffer throttle end riq=%d full=%d pid=%d\n",
 				 riq_id, READ_ONCE(riq->reqbm.full),
 				 current->pid);
+      */
 		}
 		else{
 			__set_bit(request_index,riq->reqbm.bitmap);
@@ -1054,9 +1298,11 @@ uint32_t rfuse_get_argument_buffer(struct fuse_mount *fm, int riq_id){
 				 current->pid);
 			spin_unlock(&riq->lock);
 			wait_event_interruptible(riq->waitq,!READ_ONCE(riq->argbm.full));
+      /*
 			pr_info("RFUSE: argument buffer throttle end riq=%d full=%d pid=%d\n",
 				 riq_id, READ_ONCE(riq->argbm.full),
 				 current->pid);
+      */
 		}
 		else{
 			__set_bit(arg_index,riq->argbm.bitmap);
@@ -1131,12 +1377,12 @@ void rfuse_put_request(struct rfuse_req *r_req){
 
 struct rfuse_req *rfuse_request_alloc(struct fuse_mount *fm, size_t payload_len){
 	struct fuse_conn *fc = fm->fc;
-  /*
+  
 	struct rfuse_iqueue *riq = payload_len ?
-		fc->riq[select_payload_aware_v2(fc, payload_len)] :
+		fc->riq[select_payload_aware_v3(fc, payload_len)] :
 		rfuse_get_iqueue(fc);
-  */
-  struct rfuse_iqueue *riq = rfuse_get_iqueue(fc);
+  
+  //struct rfuse_iqueue *riq = rfuse_get_iqueue(fc);
 	int riq_id = riq->riq_id;
 	struct rfuse_req *r_req = NULL;
 	uint32_t req_index;
@@ -1212,13 +1458,13 @@ struct rfuse_req *rfuse_get_req(struct fuse_mount *fm, bool for_background,
 		if(rfuse_block_alloc(fc, for_background, r_req->riq_id)){
 			err = -EINTR;
 			riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
-      /*
+      
 			pr_info("RFUSE: background depth throttle start riq=%d req=%u opcode=%u num_background=%u active_background=%u max_background=%u blocked=%d pid=%d\n",
 				 r_req->riq_id, r_req->index, r_req->in.opcode,
 				 riq->num_background, riq->active_background,
 				 riq->max_background, riq->blocked,
 				 current->pid);
-      */
+      
 			if (wait_event_killable_exclusive(riq->blocked_waitq, !rfuse_block_alloc(fc, for_background, r_req->riq_id))) {
 				goto out;
 			}
@@ -1303,9 +1549,11 @@ static struct rfuse_req *try_rfuse_request_alloc(struct fuse_mount *fm,
 			wait_event_interruptible(riq->waitq, !READ_ONCE(riq->reqbm.full));
 			if(file_lock)
 				spin_lock(file_lock);
+      /*
 			pr_info("RFUSE: request buffer throttle end riq=%d async=1 full=%d pid=%d\n",
 				 riq_id, READ_ONCE(riq->reqbm.full),
 				 current->pid);
+      */
 		}
 	} while(req_index == -1);
 	
@@ -1326,7 +1574,7 @@ static struct rfuse_req *try_rfuse_request_alloc(struct fuse_mount *fm,
 	return r_req;
 }
 
-static struct rfuse_req *try_rfuse_wr_request_alloc(struct fuse_mount *fm,
+static struct rfuse_req *try_rfuse_wt_request_alloc(struct fuse_mount *fm,
 						    size_t payload_len,
 						    spinlock_t *file_lock)
 {
@@ -1336,7 +1584,7 @@ static struct rfuse_req *try_rfuse_wr_request_alloc(struct fuse_mount *fm,
 	struct rfuse_req *r_req = NULL;
 	uint32_t req_index;
 
-	riq = rfuse_get_iqueue_for_async(fc, payload_len);
+	riq = rfuse_get_iqueue_for_wt_async(fc, payload_len);
 	riq_id = riq->riq_id;
 	do {
 		req_index = try_rfuse_get_request_buffer(fm, riq_id);
@@ -1350,9 +1598,11 @@ static struct rfuse_req *try_rfuse_wr_request_alloc(struct fuse_mount *fm,
 						 !READ_ONCE(riq->reqbm.full));
 			if (file_lock)
 				spin_lock(file_lock);
+      /*
 			pr_info("RFUSE: write request buffer throttle end riq=%d async=1 full=%d pid=%d\n",
 				 riq_id, READ_ONCE(riq->reqbm.full),
 				 current->pid);
+      */
 		}
 	} while (req_index == -1);
 
@@ -1467,7 +1717,7 @@ out:
 	return ERR_PTR(err);
 }
 
-struct rfuse_req *try_rfuse_get_wr_req(struct fuse_mount *fm,
+struct rfuse_req *try_rfuse_wt_get_req(struct fuse_mount *fm,
 				       bool for_background, bool force,
 				       size_t payload_len,
 				       spinlock_t *file_lock)
@@ -1480,7 +1730,7 @@ struct rfuse_req *try_rfuse_get_wr_req(struct fuse_mount *fm,
 	if(force) {
 		atomic_inc(&fc->num_waiting);
 
-		r_req = try_rfuse_wr_request_alloc(fm, payload_len, file_lock);
+		r_req = try_rfuse_wt_request_alloc(fm, payload_len, file_lock);
 		err = -ENOMEM;
 		if (!r_req) {
 			if (for_background)
@@ -1511,7 +1761,7 @@ struct rfuse_req *try_rfuse_get_wr_req(struct fuse_mount *fm,
 			goto out;
 		}
 
-		r_req = try_rfuse_wr_request_alloc(fm, payload_len, file_lock);
+		r_req = try_rfuse_wt_request_alloc(fm, payload_len, file_lock);
 		err = -ENOMEM;
 		if (!r_req) {
 			if (for_background)

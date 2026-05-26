@@ -1060,6 +1060,8 @@ struct fuse_release_args {
 	struct fuse_args args;
 	struct fuse_release_in inarg;
 	struct inode *inode;
+	bool rfuse_sync;
+	bool rfuse_isdir;
 };
 
 void fuse_read_args_fill(struct fuse_io_args *ia, struct file *file, loff_t pos,
@@ -1247,6 +1249,8 @@ void fuse_flush_writepages(struct inode *inode);
 
 void fuse_set_nowrite(struct inode *inode);
 void fuse_release_nowrite(struct inode *inode);
+void __rfuse_release_nowrite_async(struct inode *inode);
+void rfuse_release_nowrite_async(struct inode *inode);
 
 /**
  * Scan all fuse_mounts belonging to fc to find the first where
@@ -1436,6 +1440,7 @@ int rfuse_launder_page(struct page *page);
 
 int rfuse_flush_times(struct inode *inode, struct fuse_file *ff);
 int rfuse_write_inode(struct inode *inode, struct writeback_control *wbc);
+void rfuse_wait_async_writes(struct inode *inode);
 
 int rfuse_rename_common(struct inode *olddir, struct dentry *oldent, struct inode *newdir, struct dentry *newent, unsigned int flags, int opcode, size_t argsize);
 
@@ -1458,7 +1463,7 @@ void rfuse_put_argument_buffer(struct fuse_mount *fm, uint32_t arg_index, int ri
 struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm,
 				    bool for_background, bool force,
 				    size_t payload_len, spinlock_t *file_lock);
-struct rfuse_req *try_rfuse_get_wr_req(struct fuse_mount *fm,
+struct rfuse_req *try_rfuse_wt_get_req(struct fuse_mount *fm,
 				       bool for_background, bool force,
 				       size_t payload_len,
 				       spinlock_t *file_lock);
