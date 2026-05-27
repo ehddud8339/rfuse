@@ -297,25 +297,6 @@ struct rfuse_pages{
 	struct page **pages;
 	struct fuse_page_desc *descs;
 	unsigned int num_pages;
-	u64 latency_start_ns;
-	u64 readahead_count_ns;
-	u64 io_alloc_ns;
-	u64 readahead_batch_ns;
-	u64 wait_async_write_ns;
-	u64 get_req_ns;
-	u64 read_args_fill_ns;
-	u64 prepare_payload_ns;
-	u64 simple_background_ns;
-	u64 simple_request_ns;
-	u64 readpages_end_ns;
-	u64 put_request_ns;
-	u64 async_submit_ns;
-	u64 async_completion_enter_ns;
-	u64 async_completion_bg_ns;
-	u64 async_completion_import_ns;
-	size_t latency_requested;
-	int latency_ret;
-	bool latency_sync;
 };
 
 /*

@@ -176,6 +176,10 @@ struct lo_inode {
 	ino_t lo_ino;
 	/* Lookup count of this node */
 	uint64_t nlookup;
+	uint64_t open_count;
+	int forgotten;
+	int unhashed;
+	struct lo_inode *retired_next;
 };
 
 #define HASH_TABLE_MIN_SIZE 8192
@@ -248,13 +252,25 @@ struct lo_data {
 	/* do we still need this ? let's see*/
 	double attr_valid;
 	int writeback;
+	struct lo_inode *retired_inodes;
+};
+
+struct lo_file {
+	int fd;
+	struct lo_inode *inode;
 };
 
 struct lo_dirptr {
 	DIR *dp;
 	struct dirent *entry;
 	off_t offset;
+	struct lo_inode *inode;
 };
+
+static struct lo_file *lo_file(struct fuse_file_info *fi)
+{
+	return (struct lo_file *) (uintptr_t) fi->fh;
+}
 
 static struct lo_dirptr *lo_dirptr(struct fuse_file_info *fi)
 {
@@ -457,7 +473,13 @@ static void remerge_hash_table(struct lo_data *lo_data)
 	}
 }
 
-static int delete_from_hash_table(struct lo_data *lo_data,
+static void destroy_lo_inode(struct lo_inode *lo_inode)
+{
+	free(lo_inode->name);
+	free(lo_inode);
+}
+
+static int detach_from_hash_table_locked(struct lo_data *lo_data,
 		struct lo_inode *lo_inode)
 {
 	struct lo_inode *prev, *next;
@@ -465,7 +487,8 @@ static int delete_from_hash_table(struct lo_data *lo_data,
 	prev = next = NULL;
 	size_t hash = 0;
 
-	pthread_spin_lock(&lo_data->spinlock);
+	if (lo_inode->unhashed)
+		return 0;
 
 	prev = lo_inode->prev;
 	next = lo_inode->next;
@@ -485,17 +508,77 @@ static int delete_from_hash_table(struct lo_data *lo_data,
 	}
 
 del_out:
-	/* free the lo_inode  */
 	lo_inode->prev = lo_inode->next = NULL;
-	free(lo_inode->name);
-	free(lo_inode);
+	lo_inode->unhashed = 1;
 
-	lo_data->hash_table.use--;
+	if (lo_data->hash_table.use)
+		lo_data->hash_table.use--;
 	if (lo_data->hash_table.use < lo_data->hash_table.size / 4)
 		remerge_hash_table(lo_data);
 
-	pthread_spin_unlock(&lo_data->spinlock);
 	return 0;
+}
+
+static int lo_inode_can_destroy(struct lo_data *lo_data,
+		struct lo_inode *lo_inode)
+{
+	return lo_inode != &lo_data->root &&
+		lo_inode->forgotten &&
+		lo_inode->nlookup == 0 &&
+		lo_inode->open_count == 0;
+}
+
+static void retire_lo_inode_locked(struct lo_data *lo_data,
+		struct lo_inode *lo_inode)
+{
+	if (lo_inode == &lo_data->root || lo_inode->forgotten)
+		return;
+
+	lo_inode->forgotten = 1;
+	lo_inode->retired_next = lo_data->retired_inodes;
+	lo_data->retired_inodes = lo_inode;
+}
+
+static void unretire_lo_inode_locked(struct lo_data *lo_data,
+		struct lo_inode *lo_inode)
+{
+	struct lo_inode **nodep;
+
+	for (nodep = &lo_data->retired_inodes; *nodep;
+			nodep = &(*nodep)->retired_next) {
+		if (*nodep == lo_inode) {
+			*nodep = lo_inode->retired_next;
+			lo_inode->retired_next = NULL;
+			return;
+		}
+	}
+}
+
+static void lo_inode_get_open(fuse_req_t req, struct lo_inode *lo_inode)
+{
+	struct lo_data *lo_data = get_lo_data(req);
+
+	pthread_spin_lock(&lo_data->spinlock);
+	lo_inode->open_count++;
+	pthread_spin_unlock(&lo_data->spinlock);
+}
+
+static void lo_inode_put_open(fuse_req_t req, struct lo_inode *lo_inode)
+{
+	struct lo_data *lo_data = get_lo_data(req);
+	struct lo_inode *to_destroy = NULL;
+
+	pthread_spin_lock(&lo_data->spinlock);
+	assert(lo_inode->open_count > 0);
+	lo_inode->open_count--;
+	if (lo_inode_can_destroy(lo_data, lo_inode)) {
+		unretire_lo_inode_locked(lo_data, lo_inode);
+		to_destroy = lo_inode;
+	}
+	pthread_spin_unlock(&lo_data->spinlock);
+
+	if (to_destroy)
+		destroy_lo_inode(to_destroy);
 }
 
 /* Function which checks the inode in the hash table
@@ -526,11 +609,18 @@ void free_hash_table(struct lo_data *lo_data)
 		while (node) {
 			next = node->next;
 			/* free up the node */
-			free(node->name);
-			free(node);
+			destroy_lo_inode(node);
 			node = next;
 		}
 	}
+
+	node = lo_data->retired_inodes;
+	while (node) {
+		next = node->retired_next;
+		destroy_lo_inode(node);
+		node = next;
+	}
+	lo_data->retired_inodes = NULL;
 }
 
 /* A function which checks the hash table and returns the lo_inode
@@ -712,6 +802,7 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 	int fd, res;
 	int backing_flags;
 	struct fuse_entry_param e;
+	struct lo_file *lf;
 	char *fullPath = NULL;
 	double attr_val;
 
@@ -737,6 +828,14 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 		return (void)fuse_reply_err(req, errno);
 	}
 
+	lf = calloc(1, sizeof(*lf));
+	if (!lf) {
+		close(fd);
+		if (fullPath)
+			free(fullPath);
+		return (void) fuse_reply_err(req, ENOMEM);
+	}
+
 	memset(&e, 0, sizeof(e));
 
 	e.attr_timeout = attr_val;
@@ -754,10 +853,11 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 		lo_inode = calloc(1, sizeof(struct lo_inode));
 		if (!lo_inode) {
 			close(fd);
+			free(lf);
 			if (fullPath)
 				free(fullPath);
 
-			return (void) fuse_reply_err(req, errno);
+			return (void) fuse_reply_err(req, ENOMEM);
 		}
 
 		lo_inode->ino = e.attr.st_ino;
@@ -777,18 +877,23 @@ static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
 
 		if (res == -1) {
 			close(fd);
+			free(lf);
 			free(lo_inode->name);
 			free(lo_inode);
 			fuse_reply_err(req, EBUSY);
 		} else {
 			lo_inode->nlookup++;
+			lo_inode->open_count++;
 			e.ino = lo_inode->lo_ino;
 			//StackFS_trace("Create called, e.ino : %llu", e.ino);
-			fi->fh = fd;
+			lf->fd = fd;
+			lf->inode = lo_inode;
+			fi->fh = (uintptr_t) lf;
 			fuse_reply_create(req, &e, fi);
 		}
 	} else {
 		close(fd);
+		free(lf);
 		if (fullPath)
 			free(fullPath);
 		fuse_reply_err(req, errno);
@@ -884,14 +989,27 @@ static void stackfs_ll_open(fuse_req_t req, fuse_ino_t ino,
 {
 	int fd;
 	int backing_flags;
+	struct lo_file *lf;
+	struct lo_inode *inode;
 
+	lf = calloc(1, sizeof(*lf));
+	if (!lf)
+		return (void) fuse_reply_err(req, ENOMEM);
+
+	inode = lo_inode(req, ino);
+	lo_inode_get_open(req, inode);
 	backing_flags = stackfs_backing_open_flags(req, fi->flags);
-	fd = open(lo_name(req, ino), backing_flags);
+	fd = open(inode->name, backing_flags);
 	
-	if (fd == -1)
+	if (fd == -1) {
+		lo_inode_put_open(req, inode);
+		free(lf);
 		return (void) fuse_reply_err(req, errno);
+	}
 
-	fi->fh = fd;
+	lf->fd = fd;
+	lf->inode = inode;
+	fi->fh = (uintptr_t) lf;
 
 	fuse_reply_open(req, fi);
 }
@@ -903,17 +1021,27 @@ static void stackfs_ll_opendir(fuse_req_t req, fuse_ino_t ino,
 {
 	DIR *dp;
 	struct lo_dirptr *d;
+	struct lo_inode *inode;
 
-	
-	dp = opendir(lo_name(req, ino));
+	inode = lo_inode(req, ino);
+	lo_inode_get_open(req, inode);
+	dp = opendir(inode->name);
 
-	if (dp == NULL)
+	if (dp == NULL) {
+		lo_inode_put_open(req, inode);
 		return (void) fuse_reply_err(req, errno);
+	}
 
 	d = malloc(sizeof(struct lo_dirptr));
+	if (!d) {
+		closedir(dp);
+		lo_inode_put_open(req, inode);
+		return (void) fuse_reply_err(req, ENOMEM);
+	}
 	d->dp = dp;
 	d->offset = 0;
 	d->entry = NULL;
+	d->inode = inode;
 
 	fi->fh = (uintptr_t) d;
 
@@ -927,9 +1055,9 @@ static void stackfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size,
 		off_t offset, struct fuse_file_info *fi)
 {
 	int res;
+	struct lo_file *lf = lo_file(fi);
 	(void) ino;
 
-	StackFS_trace("StackFS Read start on inode : %llu", get_lower_fuse_inode_no(req, ino));
 	if (USE_SPLICE) {
 		struct fuse_bufvec buf = FUSE_BUFVEC_INIT(size);
 
@@ -937,31 +1065,31 @@ static void stackfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size,
 		//			lo_name(req, ino), offset, size);
 
 		buf.buf[0].flags = FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK;
-		buf.buf[0].fd = fi->fh;
+		buf.buf[0].fd = lf->fd;
 		buf.buf[0].pos = offset;
 		fuse_reply_data(req, &buf, FUSE_BUF_SPLICE_MOVE);
 	} else {
 		char *buf;
-		char *allocated_buf = NULL;
+		int has_payload;
 
 		//StackFS_trace("Read on name : %s, Kernel inode : %llu, fuse inode : %llu, off : %lu, size : %zu",
 		//			lo_name(req, ino), get_lower_fuse_inode_no(req, ino), get_higher_fuse_inode_no(req, ino), offset, size);
 		buf = rfuse_req_payload_addr(req);
-		if (buf == 0) {
-			allocated_buf = (char *)malloc(size);
-			if (allocated_buf == NULL && size != 0)
-				return (void) fuse_reply_err(req, ENOMEM);
-			buf = allocated_buf;
-		}
-		res = pread(fi->fh, buf, size, offset);
+		if (buf == NULL)
+			return (void) fuse_reply_err(req, ENOMEM);
+		has_payload = rfuse_has_payload(req);
+
+		res = pread(lf->fd, buf, size, offset);
 		if (res == -1) {
-			free(allocated_buf);
+			if (!has_payload)
+				free(buf);
 			return (void) fuse_reply_err(req, errno);
 		}
+
 		res = fuse_reply_buf(req, buf, res);
-		free(allocated_buf);
+		if (!has_payload)
+			free(buf);
 	}
-	StackFS_trace("StackFS Read end on inode : %llu", get_lower_fuse_inode_no(req, ino));
 }
 
 
@@ -1048,9 +1176,12 @@ error:
 static void stackfs_ll_release(fuse_req_t req, fuse_ino_t ino,
 		struct fuse_file_info *fi)
 {
+	struct lo_file *lf = lo_file(fi);
 	(void) ino;
 
-	close(fi->fh);
+	close(lf->fd);
+	lo_inode_put_open(req, lf->inode);
+	free(lf);
 
 	fuse_reply_err(req, 0);
 }
@@ -1069,6 +1200,7 @@ static void stackfs_ll_releasedir(fuse_req_t req, fuse_ino_t ino,
 	closedir(d->dp);
 	// generate_end_time(req);
 	// populate_time(req);
+	lo_inode_put_open(req, d->inode);
 	free(d);
 	fuse_reply_err(req, 0);
 }
@@ -1078,9 +1210,10 @@ static void stackfs_ll_write(fuse_req_t req, fuse_ino_t ino, const char *buf,
 		size_t size, off_t off, struct fuse_file_info *fi)
 {
 	int res;
+	struct lo_file *lf = lo_file(fi);
 	(void) ino;
 	
-	res = pwrite(fi->fh, buf, size, off);
+	res = pwrite(lf->fd, buf, size, off);
 
 	if (res == -1)
 		return (void) fuse_reply_err(req, errno);
@@ -1102,7 +1235,7 @@ static void stackfs_ll_write_buf(fuse_req_t req, fuse_ino_t ino,
 
 	// generate_start_time(req);
 	dst.buf[0].flags = FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK;
-	dst.buf[0].fd = fi->fh;
+	dst.buf[0].fd = lo_file(fi)->fd;
 	dst.buf[0].pos = off;
 	res = fuse_buf_copy(&dst, buf, FUSE_BUF_SPLICE_NONBLOCK);
 	// generate_end_time(req);
@@ -1168,15 +1301,25 @@ static void stackfs_ll_rmdir(fuse_req_t req, fuse_ino_t parent,
 static void forget_inode(fuse_req_t req, struct lo_inode *inode,
 		uint64_t nlookup)
 {
-	int res;
+	struct lo_data *lo_data = get_lo_data(req);
 
-	assert(inode->nlookup >= nlookup);
+	pthread_spin_lock(&lo_data->spinlock);
+	if (inode->nlookup < nlookup) {
+		fprintf(stderr,
+			"StackFS_ll: stale FORGET ino=%llu current=%llu forget=%llu\n",
+			(unsigned long long) inode->lo_ino,
+			(unsigned long long) inode->nlookup,
+			(unsigned long long) nlookup);
+		nlookup = inode->nlookup;
+	}
+
 	inode->nlookup -= nlookup;
+	if (!inode->nlookup && inode != &lo_data->root) {
+		detach_from_hash_table_locked(lo_data, inode);
+		retire_lo_inode_locked(lo_data, inode);
+	}
 
-	if (!inode->nlookup)
-		res = delete_from_hash_table(get_lo_data(req), inode);
-
-	(void) res;
+	pthread_spin_unlock(&lo_data->spinlock);
 }
 
 static void stackfs_ll_forget(fuse_req_t req, fuse_ino_t ino, uint64_t nlookup)
@@ -1216,12 +1359,13 @@ static void stackfs_ll_fsync(fuse_req_t req, fuse_ino_t ino, int datasync,
 		struct fuse_file_info *fi)
 {
 	int res;
+	struct lo_file *lf = lo_file(fi);
 
 
 	if (datasync)
-		res = fdatasync(fi->fh);
+		res = fdatasync(lf->fd);
 	else
-		res = fsync(fi->fh);
+		res = fsync(lf->fd);
 
 	fuse_reply_err(req, res);
 }

@@ -82,6 +82,7 @@ static void rfuse_list_del_worker(struct rfuse_worker *w)
 	next->prev = prev;
 }
 
+/*
 static void *rfuse_do_work(void *data)
 {
 	struct rfuse_worker *w = (struct rfuse_worker *) data;
@@ -93,12 +94,10 @@ static void *rfuse_do_work(void *data)
 	bool retry_pending;
 
 	while (!fuse_session_exited(mt->se)) {
-		/**
-		 * Currently We check the forget queue once and pending queue once. 
-		 * We do not check the interrupt queue yet.	
-		 * isforget == 0 : handle general request
-		 * isforget == 1 : handle forget request 
-		**/
+		// Currently We check the forget queue once and pending queue once.
+		// We do not check the interrupt queue yet.
+		// isforget == 0 : handle general request
+		// isforget == 1 : handle forget request
 
 		retry_pending = false;
 retry_read_queue:
@@ -117,7 +116,7 @@ retry_read_queue:
 		pthread_mutex_unlock(&mt->lock);
 
 		processed = rfuse_read_queue(w, mt, NULL, isforget);
-		
+
 		pthread_mutex_lock(&mt->lock);
 		if (counted_general)
 			mt->numavail++;
@@ -164,16 +163,95 @@ retry_read_queue:
 				return NULL;
 			}
 			continue;
-		} 
-		
+		}
+
 		pthread_mutex_unlock(&mt->lock);
-		
+
 	}
 
 	sem_post(&mt->finish);
 
 	return NULL;
 }
+*/
+
+static void *rfuse_do_work(void *data)
+{
+	struct rfuse_worker *w = (struct rfuse_worker *) data;
+	struct rfuse_mt *mt = w->mt;
+	_Atomic int isforget = 0;
+	bool counted_general;
+	bool processed = false;
+
+	while (!fuse_session_exited(mt->se)) {
+		 // Currently We check the forget queue once and general queue once.
+		 // We do not check the interrupt queue yet.
+		 // isforget == 0 : handle general request
+		 // isforget == 1 : handle forget request
+
+		pthread_mutex_lock(&mt->lock);
+		if (mt->exit) {
+			pthread_mutex_unlock(&mt->lock);
+			return NULL;
+		}
+
+		counted_general = !isforget;
+		if (counted_general)
+			mt->numavail--;
+		if (mt->numavail == 0 && mt->numworker < RFUSE_WORKER_PER_RING)
+			rfuse_loop_start_thread(mt);
+		pthread_mutex_unlock(&mt->lock);
+
+		processed = rfuse_read_queue(w, mt, NULL, isforget);
+
+		pthread_mutex_lock(&mt->lock);
+		if (counted_general)
+			mt->numavail++;
+
+		 isforget++;
+		 if (isforget == 2)
+			 isforget = 0;
+
+		if (mt->numavail > mt->max_idle) {
+			if (mt->exit) {
+				pthread_mutex_unlock(&mt->lock);
+				return NULL;
+			}
+			rfuse_list_del_worker(w); // if it exceeds 10 workers, free this worker
+			mt->numavail--;
+			mt->numworker--;
+			pthread_mutex_unlock(&mt->lock);
+
+			pthread_detach(w->thread_id);
+			free(w->fbuf.mem);
+			rfuse_chan_put(w->ch);
+			free(w);
+			return NULL;
+		} else if (isforget == 0 && !processed) {
+			struct ioctl_args {
+				int riq_id;
+				int req_index;
+			} args = { .riq_id = mt->riq_id, .req_index = -1 };
+			int res;
+
+			pthread_mutex_unlock(&mt->lock);
+			res = ioctl(mt->se->fd, RFUSE_DAEMON_SLEEP, &args);
+			if (res == -ENOTCONN) {
+				printf("rfuse: User-level daemon lost connection, exit\n");
+				return NULL;
+			}
+			continue;
+		}
+
+		pthread_mutex_unlock(&mt->lock);
+
+	}
+
+	sem_post(&mt->finish);
+
+	return NULL;
+}
+
 
 int rfuse_start_thread(pthread_t *thread_id, void *(*func)(void *), void *arg)
 {

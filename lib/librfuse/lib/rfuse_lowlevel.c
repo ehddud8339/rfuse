@@ -365,7 +365,10 @@ static int rfuse_send_msg(struct fuse_session *se, fuse_req_t u_req){
 			struct ioctl_args {
 				int riq_id;
 				int req_index;
-			} args = { .riq_id = u_req->riq_id, .req_index = u_req->index };
+			} args = {
+				.riq_id = u_req->riq_id,
+				.req_index = u_req->index,
+			};
 			ioctl(se->fd, RFUSE_REPLY_ASYNC, &args);
 			
 			return 0;
@@ -395,7 +398,6 @@ static int rfuse_send_reply_iov_nofree(fuse_req_t u_req, int error){
 
 static int rfuse_send_reply_iov(fuse_req_t u_req, int error){
 	int res;
-	struct rfuse_req *r_req = &u_req->riq->ureq[u_req->index];
 
 	GET_TIMESTAMPS(4)
 	res = rfuse_send_reply_iov_nofree(u_req,error);
@@ -423,16 +425,52 @@ static int rfuse_send_reply_ok(fuse_req_t u_req){
 void *rfuse_req_payload_addr(fuse_req_t req)
 {
 	struct rfuse_req *r_req;
+	size_t len;
+	void *addr;
+
+	if (!req || !req->riq)
+		return 0;
+
+	r_req = &req->riq->ureq[req->index];
+	if (rfuse_has_payload(req)) {
+		addr = (char *)req->riq->payload.uaddr + r_req->payload_offset;
+		return addr;
+	}
+
+	switch (r_req->in.opcode) {
+	case FUSE_READ:
+	case FUSE_READDIR:
+	case FUSE_READDIRPLUS:
+		len = ((struct fuse_read_in *)&r_req->args)->size;
+		break;
+	case FUSE_WRITE:
+		len = ((struct fuse_write_in *)&r_req->args)->size;
+		break;
+	default:
+		if (r_req->out.arglen)
+			len = r_req->out.arglen;
+		else if (r_req->payload_len)
+			len = r_req->payload_len;
+		else
+			len = r_req->payload_capacity;
+		break;
+	}
+
+	addr = malloc(len ? len : 1);
+
+	return addr;
+}
+
+int rfuse_has_payload(fuse_req_t req)
+{
+	struct rfuse_req *r_req;
 
 	if (!req || !req->riq || !req->riq->payload.uaddr)
 		return 0;
 
 	r_req = &req->riq->ureq[req->index];
-	if (!r_req->payload_capacity ||
-	    (r_req->payload_flags & RFUSE_PAYLOAD_FALLBACK))
-		return 0;
-
-	return (char *)req->riq->payload.uaddr + r_req->payload_offset;
+	return r_req->payload_capacity &&
+	       !(r_req->payload_flags & RFUSE_PAYLOAD_FALLBACK);
 }
 
 static int rfuse_req_payload_buffer(fuse_req_t req, struct rfuse_payload_view *view)
@@ -443,11 +481,14 @@ static int rfuse_req_payload_buffer(fuse_req_t req, struct rfuse_payload_view *v
 	if (!req || !view)
 		return -EINVAL;
 
+	if (!req->riq)
+		return -EINVAL;
+
 	r_req = &req->riq->ureq[req->index];
-	addr = rfuse_req_payload_addr(req);
-	if (!addr)
+	if (!rfuse_has_payload(req))
 		return -ENODATA;
 
+	addr = (char *)req->riq->payload.uaddr + r_req->payload_offset;
 	view->addr = addr;
 	view->len = r_req->payload_len;
 	view->capacity = r_req->payload_capacity;
@@ -479,7 +520,8 @@ int fuse_reply_buf(fuse_req_t u_req, const char *buf, size_t size){
 		if (size > payload.capacity)
 			return fuse_reply_err(u_req, EIO);
 
-		memcpy(payload.addr, buf, size);
+		if (payload.addr != buf)
+			memcpy(payload.addr, buf, size);
 		r_req->payload_len = size;
 		r_req->out.arglen = size;
 		return rfuse_send_reply_ok(u_req);

@@ -144,6 +144,7 @@ FUSE_3.0 {
 		fuse_reply_write;
 		fuse_reply_data;
 		rfuse_req_payload_addr;
+		rfuse_has_payload;
 		rfuse_reply_read_from_fd;
 		rfuse_req_payload_view;
 		fuse_add_direntry;

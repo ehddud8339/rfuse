@@ -471,7 +471,13 @@ const struct fuse_ctx *fuse_req_ctx(fuse_req_t req);
 
 int fuse_req_getgroups(fuse_req_t req, int size, gid_t list[]);
 
+/*
+ * Returns the request payload buffer.  When the kernel did not provide a
+ * direct payload mapping, this returns a malloc buffer sized for the request.
+ */
 void *rfuse_req_payload_addr(fuse_req_t req);
+
+int rfuse_has_payload(fuse_req_t req);
 
 int rfuse_req_payload_view(fuse_req_t req, struct rfuse_payload_view *view);
 
