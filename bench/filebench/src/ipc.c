@@ -36,11 +36,14 @@
 #include <signal.h>
 #include <pthread.h>
 #include <sys/shm.h>
+#include <unistd.h>
 #include "filebench.h"
 #include "fb_cvar.h"
 
 filebench_shm_t *filebench_shm = NULL;
 char shmpath[128] = "/tmp/filebench-shm-XXXXXX";
+static int shm_owner = 0;
+static int shm_unlinked = 0;
 
 /*
  * Interprocess Communication mechanisms. If multiple processes
@@ -289,12 +292,17 @@ void ipc_init(void)
 			      "file %s: %s", shmpath, strerror(errno));
 		exit(1);
 	}
+	shm_owner = 1;
+	shm_unlinked = 0;
 
 	(void)lseek(shmfd, sizeof(filebench_shm_t), SEEK_SET);
 	if (write(shmfd, tmpbuf, MB) != MB) {
 		filebench_log(LOG_FATAL,
 		    "Could not write to the shared memory "
 		    "file: %s", strerror(errno));
+		(void) close(shmfd);
+		(void) unlink(shmpath);
+		shm_unlinked = 1;
 		exit(1);
 	}
 
@@ -303,8 +311,12 @@ void ipc_init(void)
 	    MAP_SHARED, shmfd, 0)) == MAP_FAILED) {
 		filebench_log(LOG_FATAL, "Could not mmap the shared "
 		"memory file: %s", strerror(errno));
+		(void) close(shmfd);
+		(void) unlink(shmpath);
+		shm_unlinked = 1;
 		exit(1);
 	}
+	(void) close(shmfd);
 
 	(void) memset(filebench_shm, 0,
 		 (char *)&filebench_shm->shm_marker - (char *)filebench_shm);
@@ -361,6 +373,7 @@ void ipc_init(void)
 	if ((key = ftok(shmpath, 1)) < 0) {
 		filebench_log(LOG_ERROR, "cannot create sem: %s",
 		    strerror(errno));
+		ipc_fini();
 		exit(1);
 	}
 
@@ -381,14 +394,18 @@ void ipc_init(void)
 void
 ipc_fini(void)
 {
+	if (!shm_owner || shm_unlinked)
+		return;
+
 #ifdef HAVE_SEM_RMID
-	if (filebench_shm->shm_sys_semid != -1) {
+	if (filebench_shm && filebench_shm->shm_sys_semid != -1) {
 		(void) semctl(filebench_shm->shm_sys_semid, 0, IPC_RMID);
 		filebench_shm->shm_sys_semid = -1;
 	}
 #endif
 
 	(void) unlink(shmpath);
+	shm_unlinked = 1;
 }
 
 /*
@@ -407,14 +424,17 @@ ipc_attach(void *shmaddr, char *shmpath)
 			      "file %s: %s", shmpath, strerror(errno));
 		return (-1);
 	}
+	shm_owner = 0;
 
 	if ((filebench_shm = (filebench_shm_t *)mmap(shmaddr,
 	    sizeof (filebench_shm_t), PROT_READ | PROT_WRITE,
 	    MAP_SHARED | MAP_FIXED, shmfd, 0)) == MAP_FAILED) {
 		filebench_log(LOG_FATAL, "Could not mmap the shared "
 		"memory file: %s", strerror(errno));
+		(void) close(shmfd);
 		return (-1);
 	}
+	(void) close(shmfd);
 
 	if (filebench_shm != shmaddr) {
 		filebench_log(LOG_FATAL, "Could not mmap the shared "

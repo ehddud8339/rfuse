@@ -1475,11 +1475,15 @@ void rfuse_put_argument_buffer(struct fuse_mount *fm, uint32_t arg_index, int ri
 struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background,
 				    bool force, spinlock_t *file_lock,
 				    u64 inode);
+struct rfuse_req *try_rfuse_wt_get_req(struct fuse_mount *fm, bool for_background,
+				       bool force, spinlock_t *file_lock,
+				       u64 inode);
 
 // SUBMIT A REQUEST TO PENDING/BACKGROUND
 ssize_t rfuse_simple_request(struct rfuse_req *r_req);
 int rfuse_simple_background(struct fuse_mount *fm, struct rfuse_req *r_req);
 void rfuse_request_end(struct rfuse_req *r_req);
+void rfuse_completion_req(struct rfuse_req *r_req);
 
 // Queue into the forget queue
 void rfuse_queue_forget(struct fuse_conn *fc, u64 nodeid, u64 nlookup);
@@ -1505,4 +1509,9 @@ void rfuse_async_stats_record_wait(struct fuse_conn *fc,
 				   enum rfuse_async_wait_reason reason,
 				   bool blocked, u64 wait_ns);
 void rfuse_async_stats_dump(struct fuse_conn *fc);
+void rfuse_path_latency_record_write_pages_copy_from_pages(u64 delta_ns);
+void rfuse_path_latency_record_write_payload_copy_page_from_iter_atomic(u64 delta_ns);
+void rfuse_path_latency_dump_reset(void);
+void rfuse_queue_latency_dump_reset(void);
+void rfuse_user_path_latency_dump_reset(void);
 #endif /* _FS_FUSE_I_H */

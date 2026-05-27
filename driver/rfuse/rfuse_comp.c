@@ -24,7 +24,7 @@ int rfuse_completion_poll(struct fuse_conn *fc, struct rfuse_iqueue *riq, struct
 	unsigned long max_idle_due = jiffies + usecs_to_jiffies(RFUSE_COMP_MAX_IDLE);
 	while(fc->connected) {
 		if(test_bit(FR_FINISHED, &r_req->flags)){
-			rfuse_request_end(r_req);
+			rfuse_completion_req(r_req);
 			return 0;
 		}
 
