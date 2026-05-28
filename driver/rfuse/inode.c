@@ -15,6 +15,7 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
+#include <linux/math64.h>
 #include <linux/fs_context.h>
 #include <linux/fs_parser.h>
 #include <linux/statfs.h>
@@ -33,8 +34,10 @@ struct list_head fuse_conn_list;
 DEFINE_MUTEX(fuse_mutex);
 
 static int set_global_limit(const char *val, const struct kernel_param *kp);
-static int set_path_latency_dump(const char *val,
-				 const struct kernel_param *kp);
+static int param_set_path_lat_dump(const char *val,
+				   const struct kernel_param *kp);
+static int param_get_path_lat_dump(char *buffer,
+				   const struct kernel_param *kp);
 
 unsigned max_user_bgreq;
 module_param_call(max_user_bgreq, set_global_limit, param_get_uint,
@@ -52,12 +55,124 @@ MODULE_PARM_DESC(max_user_congthresh,
  "Global limit for the maximum congestion threshold an "
  "unprivileged user can set");
 
-static unsigned path_latency_dump;
-module_param_call(path_latency_dump, set_path_latency_dump, param_get_uint,
-		  &path_latency_dump, 0644);
-__MODULE_PARM_TYPE(path_latency_dump, "uint");
-MODULE_PARM_DESC(path_latency_dump,
- "Write nonzero to dump and reset rfuse read path latency stats");
+static int path_lat_dump;
+module_param_call(path_lat_dump, param_set_path_lat_dump,
+		  param_get_path_lat_dump, &path_lat_dump, 0644);
+__MODULE_PARM_TYPE(path_lat_dump, "string");
+MODULE_PARM_DESC(path_lat_dump,
+ "Read to dump and reset rfuse write path latency counters; write to reset");
+
+struct rfuse_path_lat_stat {
+	atomic64_t count;
+	atomic64_t total_ns;
+	atomic64_t min_ns;
+	atomic64_t max_ns;
+};
+
+static struct rfuse_path_lat_stat rfuse_path_lat_stats[RFUSE_PATH_LAT_MAX];
+
+static const char * const rfuse_path_lat_names[RFUSE_PATH_LAT_MAX] = {
+	[RFUSE_PATH_LAT_WR_PAGES] = "rfuse_wr_pages",
+	[RFUSE_PATH_LAT_PAGES_ALLOC] = "fuse_pages_alloc",
+	[RFUSE_PATH_LAT_GET_REQ] = "rfuse_get_req",
+	[RFUSE_PATH_LAT_FILL_WRITE_PAGES] = "rfuse_fill_write_pages",
+	[RFUSE_PATH_LAT_WRITE_ARGS_FILL] = "rfuse_send_write_pages.rfuse_write_args_fill",
+	[RFUSE_PATH_LAT_SIMPLE_REQUEST] = "rfuse_send_write_pages.rfuse_simple_request",
+	[RFUSE_PATH_LAT_ASYNC_WR_PAGES] = "async.rfuse_wr_pages",
+	[RFUSE_PATH_LAT_ASYNC_IO_ALLOC] = "async.rfuse_io_alloc",
+	[RFUSE_PATH_LAT_ASYNC_WT_GET_REQ] = "async.try_rfuse_wt_get_req",
+	[RFUSE_PATH_LAT_ASYNC_FILL_WRITE_PAGES] = "async.rfuse_fill_write_pages",
+	[RFUSE_PATH_LAT_ASYNC_WRITE_ARGS_FILL] = "async.rfuse_write_args_fill",
+	[RFUSE_PATH_LAT_ASYNC_SIMPLE_BACKGROUND] = "async.rfuse_simple_background",
+	[RFUSE_PATH_LAT_READPAGES_WAIT_ASYNC_WRITE_RANGE] = "rfuse_send_readpages.rfuse_wait_async_write_range",
+	[RFUSE_PATH_LAT_READPAGES_TRY_GET_REQ] = "rfuse_send_readpages.try_rfuse_get_req",
+	[RFUSE_PATH_LAT_READPAGES_GET_REQ] = "rfuse_send_readpages.rfuse_get_req",
+	[RFUSE_PATH_LAT_READPAGES_SIMPLE_BACKGROUND] = "rfuse_send_readpages.rfuse_simple_background",
+	[RFUSE_PATH_LAT_READPAGES_SIMPLE_REQUEST] = "rfuse_send_readpages.rfuse_simple_request",
+	[RFUSE_PATH_LAT_QUEUE_TO_COMP] = "rfuse_queue_request_to_completion",
+};
+
+static void rfuse_path_lat_atomic_min(atomic64_t *field, u64 value)
+{
+	s64 old = atomic64_read(field);
+
+	while ((!old || value < (u64)old) &&
+	       atomic64_cmpxchg(field, old, value) != old)
+		old = atomic64_read(field);
+}
+
+static void rfuse_path_lat_atomic_max(atomic64_t *field, u64 value)
+{
+	s64 old = atomic64_read(field);
+
+	while (value > (u64)old &&
+	       atomic64_cmpxchg(field, old, value) != old)
+		old = atomic64_read(field);
+}
+
+void rfuse_path_lat_record(enum rfuse_path_lat_metric metric, u64 delta_ns)
+{
+	struct rfuse_path_lat_stat *stat;
+
+	if (unlikely(metric >= RFUSE_PATH_LAT_MAX))
+		return;
+
+	stat = &rfuse_path_lat_stats[metric];
+	atomic64_inc(&stat->count);
+	atomic64_add(delta_ns, &stat->total_ns);
+	rfuse_path_lat_atomic_min(&stat->min_ns, delta_ns);
+	rfuse_path_lat_atomic_max(&stat->max_ns, delta_ns);
+}
+
+static void rfuse_path_lat_reset(void)
+{
+	int i;
+
+	for (i = 0; i < RFUSE_PATH_LAT_MAX; i++) {
+		struct rfuse_path_lat_stat *stat = &rfuse_path_lat_stats[i];
+
+		atomic64_set(&stat->count, 0);
+		atomic64_set(&stat->total_ns, 0);
+		atomic64_set(&stat->min_ns, 0);
+		atomic64_set(&stat->max_ns, 0);
+	}
+}
+
+static int param_set_path_lat_dump(const char *val,
+				   const struct kernel_param *kp)
+{
+	rfuse_path_lat_reset();
+	return 0;
+}
+
+static int param_get_path_lat_dump(char *buffer,
+				   const struct kernel_param *kp)
+{
+	int i;
+	int len = 0;
+
+	len += scnprintf(buffer + len, PAGE_SIZE - len,
+			 "rfuse write path latency (ns)\n");
+	len += scnprintf(buffer + len, PAGE_SIZE - len,
+			 "%-48s %12s %16s %12s %12s %12s\n",
+			 "metric", "count", "total", "avg", "min", "max");
+
+	for (i = 0; i < RFUSE_PATH_LAT_MAX && len < PAGE_SIZE; i++) {
+		struct rfuse_path_lat_stat *stat = &rfuse_path_lat_stats[i];
+		u64 count = atomic64_xchg(&stat->count, 0);
+		u64 total_ns = atomic64_xchg(&stat->total_ns, 0);
+		u64 min_ns = atomic64_xchg(&stat->min_ns, 0);
+		u64 max_ns = atomic64_xchg(&stat->max_ns, 0);
+		u64 avg_ns = count ? div64_u64(total_ns, count) : 0;
+
+		len += scnprintf(buffer + len, PAGE_SIZE - len,
+				 "%-48s %12llu %16llu %12llu %12llu %12llu\n",
+				 rfuse_path_lat_names[i],
+				 count, total_ns, avg_ns, min_ns, max_ns);
+	}
+
+	return len;
+}
 
 #define FUSE_SUPER_MAGIC 0x65735546
 
@@ -1069,26 +1184,6 @@ static int set_global_limit(const char *val, const struct kernel_param *kp)
 		return rv;
 
 	sanitize_global_limit((unsigned *)kp->arg);
-
-	return 0;
-}
-
-static int set_path_latency_dump(const char *val, const struct kernel_param *kp)
-{
-	int rv;
-	unsigned int dump;
-
-	rv = kstrtouint(val, 0, &dump);
-	if (rv)
-		return rv;
-
-	*(unsigned int *)kp->arg = dump;
-	if (dump) {
-		rfuse_path_latency_dump_reset();
-		rfuse_queue_latency_dump_reset();
-		rfuse_user_path_latency_dump_reset();
-		*(unsigned int *)kp->arg = 0;
-	}
 
 	return 0;
 }

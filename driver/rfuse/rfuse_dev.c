@@ -15,7 +15,6 @@
 #include <linux/sched.h>
 #include <linux/random.h>
 #include <linux/ktime.h>
-#include <linux/math64.h>
 #include <asm/atomic.h>
 
 #include <linux/limits.h>
@@ -28,342 +27,15 @@
    2: Application CPU ID
    3: Background-aware same-NUMA RR
    4: Background-aware same-NUMA next CPU
+   5: Background-aware same-NUMA power-of-two choices
  */
 
 #define RFUSE_SELECTION_ALGO 2
 atomic_t rr_id = ATOMIC_INIT(0);
 
-enum rfuse_queue_latency_metric {
-	RFUSE_QUEUE_LAT_QUEUE_TO_COMPLETE = 0,
-	RFUSE_QUEUE_LAT_COMPLETION_REQ,
-	RFUSE_QUEUE_LAT_MAX,
-};
-
-enum rfuse_queue_latency_req_class {
-	RFUSE_QUEUE_LAT_SYNC = 0,
-	RFUSE_QUEUE_LAT_BACKGROUND,
-	RFUSE_QUEUE_LAT_REQ_CLASS_MAX,
-};
-
-#define RFUSE_QUEUE_LAT_OPCODE_OTHER 0
-#define RFUSE_QUEUE_LAT_OPCODE_MAX 64
-
-struct rfuse_queue_latency_stat {
-	u64 count;
-	u64 total_ns;
-	u64 min_ns;
-	u64 max_ns;
-};
-
-struct rfuse_queue_latency_slot {
-	u64 queued_ns;
-	u32 opcode;
-	u8 req_class;
-};
-
-static DEFINE_SPINLOCK(rfuse_queue_latency_lock);
-static struct rfuse_queue_latency_stat rfuse_queue_latency[RFUSE_QUEUE_LAT_MAX];
-static struct rfuse_queue_latency_stat
-	rfuse_queue_latency_detail[RFUSE_QUEUE_LAT_REQ_CLASS_MAX]
-				  [RFUSE_QUEUE_LAT_OPCODE_MAX]
-				  [RFUSE_NUM_IQUEUE];
-static struct rfuse_queue_latency_stat
-	rfuse_queue_latency_detail_snapshot[RFUSE_QUEUE_LAT_REQ_CLASS_MAX]
-					   [RFUSE_QUEUE_LAT_OPCODE_MAX]
-					   [RFUSE_NUM_IQUEUE];
-static struct rfuse_queue_latency_slot
-	rfuse_queue_request_slot[RFUSE_NUM_IQUEUE][RFUSE_MAX_QUEUE_SIZE * 2];
-
-static const char * const rfuse_queue_latency_names[RFUSE_QUEUE_LAT_MAX] = {
-	[RFUSE_QUEUE_LAT_QUEUE_TO_COMPLETE] = "queue_to_complete",
-	[RFUSE_QUEUE_LAT_COMPLETION_REQ] = "completion_req",
-};
-
-static const char * const rfuse_queue_latency_req_class_names[] = {
-	[RFUSE_QUEUE_LAT_SYNC] = "sync",
-	[RFUSE_QUEUE_LAT_BACKGROUND] = "background",
-};
-
-static const char *rfuse_queue_latency_opcode_name(u32 opcode)
-{
-	switch (opcode) {
-	case FUSE_LOOKUP:
-		return "LOOKUP";
-	case FUSE_FORGET:
-		return "FORGET";
-	case FUSE_GETATTR:
-		return "GETATTR";
-	case FUSE_SETATTR:
-		return "SETATTR";
-	case FUSE_READLINK:
-		return "READLINK";
-	case FUSE_SYMLINK:
-		return "SYMLINK";
-	case FUSE_MKNOD:
-		return "MKNOD";
-	case FUSE_MKDIR:
-		return "MKDIR";
-	case FUSE_UNLINK:
-		return "UNLINK";
-	case FUSE_RMDIR:
-		return "RMDIR";
-	case FUSE_RENAME:
-		return "RENAME";
-	case FUSE_LINK:
-		return "LINK";
-	case FUSE_OPEN:
-		return "OPEN";
-	case FUSE_READ:
-		return "READ";
-	case FUSE_WRITE:
-		return "WRITE";
-	case FUSE_STATFS:
-		return "STATFS";
-	case FUSE_RELEASE:
-		return "RELEASE";
-	case FUSE_FSYNC:
-		return "FSYNC";
-	case FUSE_SETXATTR:
-		return "SETXATTR";
-	case FUSE_GETXATTR:
-		return "GETXATTR";
-	case FUSE_LISTXATTR:
-		return "LISTXATTR";
-	case FUSE_REMOVEXATTR:
-		return "REMOVEXATTR";
-	case FUSE_FLUSH:
-		return "FLUSH";
-	case FUSE_INIT:
-		return "INIT";
-	case FUSE_OPENDIR:
-		return "OPENDIR";
-	case FUSE_READDIR:
-		return "READDIR";
-	case FUSE_RELEASEDIR:
-		return "RELEASEDIR";
-	case FUSE_FSYNCDIR:
-		return "FSYNCDIR";
-	case FUSE_GETLK:
-		return "GETLK";
-	case FUSE_SETLK:
-		return "SETLK";
-	case FUSE_SETLKW:
-		return "SETLKW";
-	case FUSE_ACCESS:
-		return "ACCESS";
-	case FUSE_CREATE:
-		return "CREATE";
-	case FUSE_INTERRUPT:
-		return "INTERRUPT";
-	case FUSE_BMAP:
-		return "BMAP";
-	case FUSE_DESTROY:
-		return "DESTROY";
-	case FUSE_IOCTL:
-		return "IOCTL";
-	case FUSE_POLL:
-		return "POLL";
-	case FUSE_NOTIFY_REPLY:
-		return "NOTIFY_REPLY";
-	case FUSE_BATCH_FORGET:
-		return "BATCH_FORGET";
-	case FUSE_FALLOCATE:
-		return "FALLOCATE";
-	case FUSE_READDIRPLUS:
-		return "READDIRPLUS";
-	case FUSE_RENAME2:
-		return "RENAME2";
-	case FUSE_LSEEK:
-		return "LSEEK";
-	case FUSE_COPY_FILE_RANGE:
-		return "COPY_FILE_RANGE";
-	case FUSE_SETUPMAPPING:
-		return "SETUPMAPPING";
-	case FUSE_REMOVEMAPPING:
-		return "REMOVEMAPPING";
-	default:
-		return "OTHER";
-	}
-}
-
-static u32 rfuse_queue_latency_opcode_bucket(u32 opcode)
-{
-	if (opcode > RFUSE_QUEUE_LAT_OPCODE_OTHER &&
-	    opcode < RFUSE_QUEUE_LAT_OPCODE_MAX)
-		return opcode;
-
-	return RFUSE_QUEUE_LAT_OPCODE_OTHER;
-}
-
-static void rfuse_queue_latency_update_stat(struct rfuse_queue_latency_stat *stat,
-					    u64 delta_ns)
-{
-	if (!stat->count || delta_ns < stat->min_ns)
-		stat->min_ns = delta_ns;
-	if (!stat->count || delta_ns > stat->max_ns)
-		stat->max_ns = delta_ns;
-	stat->count++;
-	stat->total_ns += delta_ns;
-}
-
-static void rfuse_queue_latency_record(enum rfuse_queue_latency_metric metric,
-				       u64 delta_ns)
-{
-	struct rfuse_queue_latency_stat *stat;
-	unsigned long flags;
-
-	if (WARN_ON_ONCE(metric >= RFUSE_QUEUE_LAT_MAX))
-		return;
-
-	stat = &rfuse_queue_latency[metric];
-	spin_lock_irqsave(&rfuse_queue_latency_lock, flags);
-	rfuse_queue_latency_update_stat(stat, delta_ns);
-	spin_unlock_irqrestore(&rfuse_queue_latency_lock, flags);
-}
-
-static void
-rfuse_queue_latency_record_queue_to_complete(
-		enum rfuse_queue_latency_req_class req_class,
-		u32 opcode, int riq_id, u64 delta_ns)
-{
-	struct rfuse_queue_latency_stat *stat;
-	unsigned long flags;
-	u32 opcode_bucket;
-
-	if (WARN_ON_ONCE(req_class >= RFUSE_QUEUE_LAT_REQ_CLASS_MAX))
-		return;
-
-	if (WARN_ON_ONCE(riq_id < 0 || riq_id >= RFUSE_NUM_IQUEUE))
-		return;
-
-	opcode_bucket = rfuse_queue_latency_opcode_bucket(opcode);
-	stat = &rfuse_queue_latency_detail[req_class][opcode_bucket][riq_id];
-
-	spin_lock_irqsave(&rfuse_queue_latency_lock, flags);
-	rfuse_queue_latency_update_stat(
-		&rfuse_queue_latency[RFUSE_QUEUE_LAT_QUEUE_TO_COMPLETE],
-		delta_ns);
-	rfuse_queue_latency_update_stat(stat, delta_ns);
-	spin_unlock_irqrestore(&rfuse_queue_latency_lock, flags);
-}
-
-static bool rfuse_queue_latency_slot_valid(struct rfuse_req *r_req)
-{
-	if (r_req->riq_id < 0 || r_req->riq_id >= RFUSE_NUM_IQUEUE)
-		return false;
-
-	if (r_req->index >= RFUSE_MAX_QUEUE_SIZE * 2)
-		return false;
-
-	return true;
-}
-
-static void rfuse_queue_latency_set_queued(struct rfuse_req *r_req)
-{
-	struct rfuse_queue_latency_slot *slot;
-
-	if (!rfuse_queue_latency_slot_valid(r_req))
-		return;
-
-	slot = &rfuse_queue_request_slot[r_req->riq_id][r_req->index];
-
-	WRITE_ONCE(slot->opcode, r_req->in.opcode);
-	WRITE_ONCE(slot->req_class,
-		   test_bit(FR_BACKGROUND, &r_req->flags) ?
-		   RFUSE_QUEUE_LAT_BACKGROUND : RFUSE_QUEUE_LAT_SYNC);
-	smp_wmb();
-	WRITE_ONCE(slot->queued_ns, ktime_get_ns());
-}
-
-static u64 rfuse_queue_latency_take_queued(struct rfuse_req *r_req,
-					   u32 *opcode,
-					   enum rfuse_queue_latency_req_class *req_class)
-{
-	struct rfuse_queue_latency_slot *slot;
-	u64 queued_ns;
-
-	if (!rfuse_queue_latency_slot_valid(r_req))
-		return 0;
-
-	slot = &rfuse_queue_request_slot[r_req->riq_id][r_req->index];
-	queued_ns = READ_ONCE(slot->queued_ns);
-	if (!queued_ns)
-		return 0;
-
-	smp_rmb();
-	*opcode = READ_ONCE(slot->opcode);
-	*req_class = READ_ONCE(slot->req_class);
-	WRITE_ONCE(slot->queued_ns, 0);
-
-	return queued_ns;
-}
-
-void rfuse_queue_latency_dump_reset(void)
-{
-	struct rfuse_queue_latency_stat snapshot[RFUSE_QUEUE_LAT_MAX];
-	unsigned long flags;
-	int i, req_class, opcode, riq_id;
-
-	spin_lock_irqsave(&rfuse_queue_latency_lock, flags);
-	memcpy(snapshot, rfuse_queue_latency, sizeof(snapshot));
-	memset(rfuse_queue_latency, 0, sizeof(rfuse_queue_latency));
-	memcpy(rfuse_queue_latency_detail_snapshot, rfuse_queue_latency_detail,
-	       sizeof(rfuse_queue_latency_detail_snapshot));
-	memset(rfuse_queue_latency_detail, 0, sizeof(rfuse_queue_latency_detail));
-	spin_unlock_irqrestore(&rfuse_queue_latency_lock, flags);
-
-	pr_info("rfuse_queue_latency: dump and reset\n");
-	for (i = 0; i < RFUSE_QUEUE_LAT_MAX; i++) {
-		u64 avg_ns = 0;
-
-		if (snapshot[i].count)
-			avg_ns = div64_u64(snapshot[i].total_ns,
-					   snapshot[i].count);
-
-		pr_info("rfuse_queue_latency: %-36s count=%llu total_ns=%llu avg_ns=%llu min_ns=%llu max_ns=%llu\n",
-			rfuse_queue_latency_names[i],
-			snapshot[i].count,
-			snapshot[i].total_ns,
-			avg_ns,
-			snapshot[i].count ? snapshot[i].min_ns : 0,
-			snapshot[i].max_ns);
-	}
-
-	for (req_class = 0; req_class < RFUSE_QUEUE_LAT_REQ_CLASS_MAX;
-	     req_class++) {
-		for (opcode = 0; opcode < RFUSE_QUEUE_LAT_OPCODE_MAX; opcode++) {
-			for (riq_id = 0; riq_id < RFUSE_NUM_IQUEUE; riq_id++) {
-				struct rfuse_queue_latency_stat *stat;
-				u64 avg_ns = 0;
-
-				stat = &rfuse_queue_latency_detail_snapshot
-					[req_class][opcode][riq_id];
-				if (!stat->count)
-					continue;
-
-				avg_ns = div64_u64(stat->total_ns, stat->count);
-				pr_info("rfuse_queue_latency: queue_to_complete_detail opcode=%u(%s) class=%s riq_id=%d count=%llu total_ns=%llu avg_ns=%llu min_ns=%llu max_ns=%llu\n",
-					opcode,
-					rfuse_queue_latency_opcode_name(opcode),
-					rfuse_queue_latency_req_class_names[req_class],
-					riq_id,
-					stat->count,
-					stat->total_ns,
-					avg_ns,
-					stat->min_ns,
-					stat->max_ns);
-			}
-		}
-	}
-}
-
-void rfuse_user_path_latency_dump_reset(void)
-{
-	pr_info("rfuse_user_path_latency: skipped; shared ABI layout is unchanged\n");
-}
-
 #define RFUSE_NUMA_GROUPS 2
 #define RFUSE_CPUS_PER_NUMA_GROUP 20
+#define RFUSE_BG_AWARE_PTC_TRIES 1
 
 int numa_group[RFUSE_NUMA_GROUPS][RFUSE_CPUS_PER_NUMA_GROUP] = {
 	{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
@@ -505,6 +177,9 @@ void rfuse_iqueue_init(struct fuse_conn *fc, void *priv){
 
 	// init rfuse iqueue
 	riq = kzalloc(sizeof(struct rfuse_iqueue *) * RFUSE_NUM_IQUEUE, GFP_KERNEL);
+	fc->rfuse_queue_start_ns = kcalloc(RFUSE_NUM_IQUEUE,
+					   sizeof(*fc->rfuse_queue_start_ns),
+					   GFP_KERNEL);
 	for(i = 0; i < RFUSE_NUM_IQUEUE; i++){
 		printk("Initialize rfuse iqueue, id: %d\n", i);
 		if (!cpu_online(i) || !cpu_present(i)) {
@@ -534,6 +209,10 @@ void rfuse_iqueue_init(struct fuse_conn *fc, void *priv){
 		riq[i]->completes.kaddr = kmalloc_node(sizeof(struct rfuse_address_entry) * RFUSE_MAX_QUEUE_SIZE, GFP_KERNEL, node_id);
 		riq[i]->karg = kmalloc_node(sizeof(struct rfuse_arg)*RFUSE_MAX_QUEUE_SIZE * 2, GFP_KERNEL, node_id);
 		riq[i]->kreq = kmalloc_node(sizeof(struct rfuse_req)*RFUSE_MAX_QUEUE_SIZE * 2, GFP_KERNEL, node_id);
+		if (fc->rfuse_queue_start_ns)
+			fc->rfuse_queue_start_ns[i] =
+				kcalloc_node(RFUSE_MAX_QUEUE_SIZE * 2, sizeof(u64),
+					     GFP_KERNEL, node_id);
 	
 		// init bitmaps
 		riq[i]->argbm.bitmap_size = RFUSE_MAX_QUEUE_SIZE * 2;
@@ -574,9 +253,14 @@ void rfuse_iqueue_release(struct fuse_conn *fc){
 		kfree(riq[i]->argbm.bitmap);
 		kfree(riq[i]->reqbm.bitmap);
 		kfree(riq[i]);
+
+		if (fc->rfuse_queue_start_ns)
+			kfree(fc->rfuse_queue_start_ns[i]);
 	}
 
 	kfree(riq);
+	kfree(fc->rfuse_queue_start_ns);
+	fc->rfuse_queue_start_ns = NULL;
 }
 /* for I/O mmap pages*/
 int rfuse_io_mmap(struct vm_area_struct *vma, struct fuse_dev *fud, int req_index, int riq_id, unsigned nbytes){
@@ -693,26 +377,13 @@ static bool rfuse_riq_can_submit_bg(struct rfuse_iqueue *riq)
 	return available;
 }
 
-static int select_bg_aware_cpu_id(struct fuse_conn *fc)
-{
-	int start = select_cpu_id();
-	int i;
-
-	for (i = 0; i < RFUSE_NUM_IQUEUE; i++) {
-		int riq_id = (start + i) % RFUSE_NUM_IQUEUE;
-
-		if (rfuse_riq_can_submit_bg(fc->riq[riq_id]))
-			return riq_id;
-	}
-
-	return start;
-}
-
 static int select_bg_aware(struct fuse_conn *fc)
 {
 	int cpu = task_cpu(current);
 	int *group;
 	int group_id;
+	int start;
+	int i;
 
 	if (!check_numa_group(cpu, &group))
 		return select_cpu_id();
@@ -721,17 +392,19 @@ static int select_bg_aware(struct fuse_conn *fc)
 	if (group_id < 0)
 		return select_cpu_id();
 
-	while (true) {
+	start = atomic_inc_return(&numa_group_cursor[group_id]) - 1;
+	start %= RFUSE_CPUS_PER_NUMA_GROUP;
+	if (start < 0)
+		start += RFUSE_CPUS_PER_NUMA_GROUP;
+
+	for (i = 0; i < RFUSE_CPUS_PER_NUMA_GROUP; i++) {
 		int cursor;
 		int riq_id;
 		struct rfuse_iqueue *riq;
 		bool available;
 
-		cursor = atomic_inc_return(&numa_group_cursor[group_id]) - 1;
+		cursor = start + i;
 		cursor %= RFUSE_CPUS_PER_NUMA_GROUP;
-		if (cursor < 0)
-			cursor += RFUSE_CPUS_PER_NUMA_GROUP;
-
 		riq_id = group[cursor];
 
 		if (riq_id == cpu)
@@ -743,9 +416,40 @@ static int select_bg_aware(struct fuse_conn *fc)
 		if (available)
 			return riq_id;
 	}
+
+	return select_cpu_id();
 }
 
-static int select_bg_aware_v2(struct fuse_conn *fc)
+static int select_bg_aware_cpu_id(struct fuse_conn *fc)
+{
+	int cpu = task_cpu(current);
+	int *group;
+	int cpu_idx = -1;
+	int riq_id;
+	int i;
+
+	if (!check_numa_group(cpu, &group))
+		return select_cpu_id();
+
+	for (i = 0; i < RFUSE_CPUS_PER_NUMA_GROUP; i++) {
+		if (group[i] == cpu) {
+			cpu_idx = i;
+			break;
+		}
+	}
+
+	if (cpu_idx < 0)
+		return select_cpu_id();
+
+	riq_id = group[cpu_idx];
+
+	if (rfuse_riq_can_submit_bg(fc->riq[riq_id]))
+		return riq_id;
+
+	return select_cpu_id();
+}
+
+static int select_bg_aware_no_iter(struct fuse_conn *fc)
 {
 	int cpu = task_cpu(current);
 	int *group;
@@ -765,23 +469,62 @@ static int select_bg_aware_v2(struct fuse_conn *fc)
 	if (cpu_idx < 0)
 		return select_cpu_id();
 
-	while (true) {
-		for (i = 1; i < RFUSE_CPUS_PER_NUMA_GROUP; i++) {
-			int idx = (cpu_idx + i) % RFUSE_CPUS_PER_NUMA_GROUP;
-			int riq_id = group[idx];
-			struct rfuse_iqueue *riq;
-			bool available;
-      
-			if (riq_id == cpu)
-				continue;
-      
-			riq = fc->riq[riq_id];
-			available = rfuse_riq_can_submit_bg(riq);
+	for (i = 1; i < 4; i++) {
+		int idx = (cpu_idx + i) % RFUSE_CPUS_PER_NUMA_GROUP;
+		int riq_id = group[idx];
+		struct rfuse_iqueue *riq;
+		bool available;
 
-			if (available)
-				return riq_id;
+		if (riq_id == cpu)
+			continue;
+
+		riq = fc->riq[riq_id];
+		available = rfuse_riq_can_submit_bg(riq);
+
+		if (available)
+			return riq_id;
+	}
+
+	return select_cpu_id();
+}
+
+static int __maybe_unused select_bg_aware_iter(struct fuse_conn *fc)
+{
+	int cpu = task_cpu(current);
+	int *group;
+	int cpu_idx = -1;
+	int i;
+
+	if (!check_numa_group(cpu, &group))
+		return select_cpu_id();
+
+	for (i = 0; i < RFUSE_CPUS_PER_NUMA_GROUP; i++) {
+		if (group[i] == cpu) {
+			cpu_idx = i;
+			break;
 		}
 	}
+
+	if (cpu_idx < 0)
+		return select_cpu_id();
+
+	for (i = 1; i < RFUSE_CPUS_PER_NUMA_GROUP; i++) {
+		int idx = (cpu_idx + i) % RFUSE_CPUS_PER_NUMA_GROUP;
+		int riq_id = group[idx];
+		struct rfuse_iqueue *riq;
+		bool available;
+
+		if (riq_id == cpu)
+			continue;
+
+		riq = fc->riq[riq_id];
+		available = rfuse_riq_can_submit_bg(riq);
+
+		if (available)
+			return riq_id;
+	}
+
+	return select_cpu_id();
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc, u64 inode){
@@ -789,7 +532,7 @@ struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc, u64 inode)
 
 	// id = select_round_robin(fc);
 	// id = select_cpu_id();
-	id = select_bg_aware_v2(fc);
+	id = select_bg_aware_no_iter(fc);
 
 	return fc->riq[id];
 }
@@ -798,7 +541,7 @@ struct rfuse_iqueue *rfuse_get_iqueue_for_wt_async(struct fuse_conn *fc, u64 ino
 	int id = 0;
 
 	// id = select_round_robin(fc);
-	id = select_bg_aware_v2(fc);
+	id = select_bg_aware_no_iter(fc);
 	// id = select_cpu_id();
 
 	return fc->riq[id];
@@ -822,7 +565,10 @@ struct rfuse_iqueue *rfuse_get_iqueue(struct fuse_conn *fc){
 			id = select_bg_aware(fc);
 			break;
 		case 4:
-			id = select_bg_aware_v2(fc);
+			id = select_bg_aware_cpu_id(fc);
+			break;
+		case 5:
+			id = select_bg_aware_no_iter(fc);
 			break;
 		default:
 			/* default is use only first rfuse_iqueue */
@@ -1458,6 +1204,50 @@ void __rfuse_put_request(struct rfuse_req *r_req){
 	refcount_dec(&r_req->count);
 }
 
+static u64 *rfuse_queue_start_slot(struct rfuse_req *r_req)
+{
+	struct fuse_conn *fc = r_req->fm->fc;
+	int riq_id = r_req->riq_id;
+	u32 index = r_req->index;
+
+	if (unlikely(riq_id < 0 || riq_id >= RFUSE_NUM_IQUEUE))
+		return NULL;
+	if (unlikely(index >= RFUSE_MAX_QUEUE_SIZE * 2))
+		return NULL;
+	if (unlikely(!fc->rfuse_queue_start_ns ||
+		     !fc->rfuse_queue_start_ns[riq_id]))
+		return NULL;
+
+	return &fc->rfuse_queue_start_ns[riq_id][index];
+}
+
+static void rfuse_mark_queue_start(struct rfuse_req *r_req)
+{
+	u64 *slot = rfuse_queue_start_slot(r_req);
+
+	if (!slot)
+		return;
+
+	WRITE_ONCE(*slot, ktime_get_ns());
+}
+
+static void rfuse_record_queue_to_comp(struct rfuse_req *r_req)
+{
+	u64 *slot = rfuse_queue_start_slot(r_req);
+	u64 start_ns;
+
+	if (!slot)
+		return;
+
+	start_ns = READ_ONCE(*slot);
+	if (!start_ns)
+		return;
+
+	WRITE_ONCE(*slot, 0);
+	rfuse_path_lat_record(RFUSE_PATH_LAT_QUEUE_TO_COMP,
+			      ktime_get_ns() - start_ns);
+}
+
 static int rfuse_queue_interrupt(struct rfuse_req *r_req){
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(r_req->fm->fc, r_req->riq_id);
 	struct rfuse_interrupt_entry *target_entry;
@@ -1569,13 +1359,13 @@ static void rfuse_queue_request(struct rfuse_req *r_req){
 		__set_bit(FR_ASYNC,&r_req->flags);
 	}
 
+	rfuse_mark_queue_start(r_req);
 	spin_lock(&riq->lock);						// set lock
 	entry = rfuse_read_pending_tail(riq);		// Get an entry
 	r_req->in.unique = rfuse_get_unique(riq); 
 	entry->request = r_req->index;				// fill entry
 	if(!test_bit(FR_BACKGROUND, &r_req->flags)) // only increase the reference count for synchronous requests
 		__rfuse_get_request(r_req);
-	rfuse_queue_latency_set_queued(r_req);
 	rfuse_submit_pending_tail(riq);				// Commit entry
 	spin_unlock(&riq->lock);					// unlock
 	smp_mb();
@@ -1714,6 +1504,9 @@ void rfuse_request_end(struct rfuse_req *r_req){
 	struct fuse_mount *fm = r_req->fm;
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
+
+	rfuse_record_queue_to_comp(r_req);
+
 	if(test_bit(FR_BACKGROUND, &r_req->flags)){
 		spin_lock(&riq->bg_lock);
 		clear_bit(FR_BACKGROUND, &r_req->flags);
@@ -1754,27 +1547,10 @@ void rfuse_request_end(struct rfuse_req *r_req){
 
 void rfuse_completion_req(struct rfuse_req *r_req)
 {
-	u64 queue_request_ns;
-	u64 start_ns;
-	u32 opcode = 0;
-	enum rfuse_queue_latency_req_class req_class = RFUSE_QUEUE_LAT_SYNC;
-
 	if (!r_req)
 		return;
 
-	start_ns = ktime_get_ns();
-	queue_request_ns = rfuse_queue_latency_take_queued(r_req, &opcode,
-							   &req_class);
-	if (queue_request_ns) {
-		u64 queue_to_complete_ns = start_ns - queue_request_ns;
-
-		rfuse_queue_latency_record_queue_to_complete(
-			req_class, opcode, r_req->riq_id, queue_to_complete_ns);
-	}
-
 	rfuse_request_end(r_req);
-	rfuse_queue_latency_record(RFUSE_QUEUE_LAT_COMPLETION_REQ,
-				   ktime_get_ns() - start_ns);
 }
 
 
@@ -2293,6 +2069,7 @@ static int rfuse_dev_do_splice_write(struct fuse_dev *fud, struct rfuse_req *r_r
 	if(test_bit(FR_BACKGROUND, &r_req->flags)) {
 		rfuse_request_end(r_req);
 	} else {
+		rfuse_record_queue_to_comp(r_req);
 		set_bit(FR_FINISHED, &r_req->flags);
 		if(waitqueue_active(&r_req->waitq)) {
 			wake_up(&r_req->waitq);

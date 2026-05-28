@@ -45,6 +45,28 @@ enum rfuse_async_wait_reason {
 	RFUSE_ASYNC_WAIT_MAX,
 };
 
+enum rfuse_path_lat_metric {
+	RFUSE_PATH_LAT_WR_PAGES = 0,
+	RFUSE_PATH_LAT_PAGES_ALLOC,
+	RFUSE_PATH_LAT_GET_REQ,
+	RFUSE_PATH_LAT_FILL_WRITE_PAGES,
+	RFUSE_PATH_LAT_WRITE_ARGS_FILL,
+	RFUSE_PATH_LAT_SIMPLE_REQUEST,
+	RFUSE_PATH_LAT_ASYNC_WR_PAGES,
+	RFUSE_PATH_LAT_ASYNC_IO_ALLOC,
+	RFUSE_PATH_LAT_ASYNC_WT_GET_REQ,
+	RFUSE_PATH_LAT_ASYNC_FILL_WRITE_PAGES,
+	RFUSE_PATH_LAT_ASYNC_WRITE_ARGS_FILL,
+	RFUSE_PATH_LAT_ASYNC_SIMPLE_BACKGROUND,
+	RFUSE_PATH_LAT_READPAGES_WAIT_ASYNC_WRITE_RANGE,
+	RFUSE_PATH_LAT_READPAGES_TRY_GET_REQ,
+	RFUSE_PATH_LAT_READPAGES_GET_REQ,
+	RFUSE_PATH_LAT_READPAGES_SIMPLE_BACKGROUND,
+	RFUSE_PATH_LAT_READPAGES_SIMPLE_REQUEST,
+	RFUSE_PATH_LAT_QUEUE_TO_COMP,
+	RFUSE_PATH_LAT_MAX,
+};
+
 struct rfuse_async_stats {
 	atomic64_t submit_count;
 	atomic64_t submit_fail_count;
@@ -349,6 +371,7 @@ struct rfuse_io_args {
 	struct rfuse_pages rp;
 	struct fuse_io_priv *io;
 	struct fuse_file *ff;
+	bool path_lat;
 };
 
 #define FUSE_ARGS(args) struct fuse_args args = {}
@@ -648,6 +671,9 @@ struct fuse_conn {
 
 	/** rfuse Input queue */
 	struct rfuse_iqueue **riq;
+
+	/** rfuse private queue-to-completion timestamps, indexed by riq/id */
+	u64 **rfuse_queue_start_ns;
 
 	/** rfuse async buffered-write behavior statistics */
 	struct rfuse_async_stats rfuse_async_stats;
@@ -1509,9 +1535,5 @@ void rfuse_async_stats_record_wait(struct fuse_conn *fc,
 				   enum rfuse_async_wait_reason reason,
 				   bool blocked, u64 wait_ns);
 void rfuse_async_stats_dump(struct fuse_conn *fc);
-void rfuse_path_latency_record_write_pages_copy_from_pages(u64 delta_ns);
-void rfuse_path_latency_record_write_payload_copy_page_from_iter_atomic(u64 delta_ns);
-void rfuse_path_latency_dump_reset(void);
-void rfuse_queue_latency_dump_reset(void);
-void rfuse_user_path_latency_dump_reset(void);
+void rfuse_path_lat_record(enum rfuse_path_lat_metric metric, u64 delta_ns);
 #endif /* _FS_FUSE_I_H */

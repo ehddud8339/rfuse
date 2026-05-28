@@ -11,167 +11,11 @@
 #include <linux/uio.h>
 #include <linux/fs.h>
 #include <linux/ktime.h>
-#include <linux/math64.h>
 
 struct rfuse_release_in {
 	struct fuse_release_in inarg;
 	struct inode *inode;
 };
-
-enum rfuse_path_latency_metric {
-	RFUSE_PATH_LAT_READPAGES_WAIT_ASYNC_WRITE_RANGE = 0,
-	RFUSE_PATH_LAT_READPAGES_GET_REQ,
-	RFUSE_PATH_LAT_READPAGES_READ_ARGS_FILL,
-	RFUSE_PATH_LAT_READPAGES_SIMPLE_BACKGROUND,
-	RFUSE_PATH_LAT_READPAGES_SIMPLE_REQUEST,
-	RFUSE_PATH_LAT_READPAGE_WAIT_ASYNC_WRITE_RANGE,
-	RFUSE_PATH_LAT_READPAGE_GET_REQ,
-	RFUSE_PATH_LAT_READPAGE_WAIT_ON_PAGE_WRITEBACK,
-	RFUSE_PATH_LAT_READPAGE_READ_ARGS_FILL,
-	RFUSE_PATH_LAT_READPAGE_SIMPLE_REQUEST,
-	RFUSE_PATH_LAT_READPAGE_PUT_REQUEST,
-	RFUSE_PATH_LAT_WRITE_PAYLOAD_GET_REQ,
-	RFUSE_PATH_LAT_WRITE_PAYLOAD_RESERVE_PAYLOAD,
-	RFUSE_PATH_LAT_WRITE_PAYLOAD_COPY_FROM_ITER,
-	RFUSE_PATH_LAT_WRITE_PAYLOAD_COPY_PAGE_FROM_ITER_ATOMIC,
-	RFUSE_PATH_LAT_WRITE_PAYLOAD_SIMPLE_REQUEST,
-	RFUSE_PATH_LAT_WRITE_PAYLOAD_PUT_REQUEST,
-	RFUSE_PATH_LAT_WRITE_PAGES_ALLOC,
-	RFUSE_PATH_LAT_WRITE_PAGES_GET_REQ,
-	RFUSE_PATH_LAT_WRITE_PAGES_GRAB_CACHE_PAGE,
-	RFUSE_PATH_LAT_WRITE_PAGES_COPY_PAGE_FROM_ITER_ATOMIC,
-	RFUSE_PATH_LAT_WRITE_PAGES_FLUSH_DCACHE_PAGE,
-	RFUSE_PATH_LAT_WRITE_PAGES_PAGE_UPTODATE,
-	RFUSE_PATH_LAT_WRITE_PAGES_WRITE_ARGS_FILL,
-	RFUSE_PATH_LAT_WRITE_PAGES_COPY_FROM_PAGES,
-	RFUSE_PATH_LAT_WRITE_PAGES_SIMPLE_REQUEST,
-	RFUSE_PATH_LAT_WRITE_PAGES_PUT_REQUEST,
-	RFUSE_PATH_LAT_WRITE_UPDATE_SIZE,
-	RFUSE_PATH_LAT_WRITE_INVALIDATE_ATTR,
-	RFUSE_PATH_LAT_MAX,
-};
-
-struct rfuse_path_latency_stat {
-	u64 count;
-	u64 total_ns;
-	u64 min_ns;
-	u64 max_ns;
-};
-
-static DEFINE_SPINLOCK(rfuse_path_latency_lock);
-static struct rfuse_path_latency_stat rfuse_path_latency[RFUSE_PATH_LAT_MAX];
-
-static const char * const rfuse_path_latency_names[RFUSE_PATH_LAT_MAX] = {
-	[RFUSE_PATH_LAT_READPAGES_WAIT_ASYNC_WRITE_RANGE] =
-		"readpages.wait_async_write_range",
-	[RFUSE_PATH_LAT_READPAGES_GET_REQ] = "readpages.get_req",
-	[RFUSE_PATH_LAT_READPAGES_READ_ARGS_FILL] = "readpages.read_args_fill",
-	[RFUSE_PATH_LAT_READPAGES_SIMPLE_BACKGROUND] =
-		"readpages.simple_background",
-	[RFUSE_PATH_LAT_READPAGES_SIMPLE_REQUEST] = "readpages.simple_request",
-	[RFUSE_PATH_LAT_READPAGE_WAIT_ASYNC_WRITE_RANGE] =
-		"readpage.wait_async_write_range",
-	[RFUSE_PATH_LAT_READPAGE_GET_REQ] = "readpage.get_req",
-	[RFUSE_PATH_LAT_READPAGE_WAIT_ON_PAGE_WRITEBACK] =
-		"readpage.wait_on_page_writeback",
-	[RFUSE_PATH_LAT_READPAGE_READ_ARGS_FILL] = "readpage.read_args_fill",
-	[RFUSE_PATH_LAT_READPAGE_SIMPLE_REQUEST] = "readpage.simple_request",
-	[RFUSE_PATH_LAT_READPAGE_PUT_REQUEST] = "readpage.put_request",
-	[RFUSE_PATH_LAT_WRITE_PAYLOAD_GET_REQ] = "write_payload.get_req",
-	[RFUSE_PATH_LAT_WRITE_PAYLOAD_RESERVE_PAYLOAD] =
-		"write_payload.reserve_payload",
-	[RFUSE_PATH_LAT_WRITE_PAYLOAD_COPY_FROM_ITER] =
-		"write_payload.copy_from_iter",
-	[RFUSE_PATH_LAT_WRITE_PAYLOAD_COPY_PAGE_FROM_ITER_ATOMIC] =
-		"write_payload.copy_page_from_iter_atomic",
-	[RFUSE_PATH_LAT_WRITE_PAYLOAD_SIMPLE_REQUEST] =
-		"write_payload.simple_request",
-	[RFUSE_PATH_LAT_WRITE_PAYLOAD_PUT_REQUEST] =
-		"write_payload.put_request",
-	[RFUSE_PATH_LAT_WRITE_PAGES_ALLOC] = "write_pages.fuse_pages_alloc",
-	[RFUSE_PATH_LAT_WRITE_PAGES_GET_REQ] = "write_pages.get_req",
-	[RFUSE_PATH_LAT_WRITE_PAGES_GRAB_CACHE_PAGE] =
-		"write_pages.grab_cache_page_write_begin",
-	[RFUSE_PATH_LAT_WRITE_PAGES_COPY_PAGE_FROM_ITER_ATOMIC] =
-		"write_pages.copy_page_from_iter_atomic",
-	[RFUSE_PATH_LAT_WRITE_PAGES_FLUSH_DCACHE_PAGE] =
-		"write_pages.flush_dcache_page",
-	[RFUSE_PATH_LAT_WRITE_PAGES_PAGE_UPTODATE] =
-		"write_pages.PageUptodate",
-	[RFUSE_PATH_LAT_WRITE_PAGES_WRITE_ARGS_FILL] =
-		"write_pages.write_args_fill",
-	[RFUSE_PATH_LAT_WRITE_PAGES_COPY_FROM_PAGES] =
-		"write_pages.copy_from_pages",
-	[RFUSE_PATH_LAT_WRITE_PAGES_SIMPLE_REQUEST] =
-		"write_pages.simple_request",
-	[RFUSE_PATH_LAT_WRITE_PAGES_PUT_REQUEST] =
-		"write_pages.put_request",
-	[RFUSE_PATH_LAT_WRITE_UPDATE_SIZE] = "write.update_size",
-	[RFUSE_PATH_LAT_WRITE_INVALIDATE_ATTR] = "write.invalidate_attr",
-};
-
-static void rfuse_path_latency_record(enum rfuse_path_latency_metric metric,
-				      u64 delta_ns)
-{
-	struct rfuse_path_latency_stat *stat;
-	unsigned long flags;
-
-	if (WARN_ON_ONCE(metric >= RFUSE_PATH_LAT_MAX))
-		return;
-
-	stat = &rfuse_path_latency[metric];
-	spin_lock_irqsave(&rfuse_path_latency_lock, flags);
-	if (!stat->count || delta_ns < stat->min_ns)
-		stat->min_ns = delta_ns;
-	if (!stat->count || delta_ns > stat->max_ns)
-		stat->max_ns = delta_ns;
-	stat->count++;
-	stat->total_ns += delta_ns;
-	spin_unlock_irqrestore(&rfuse_path_latency_lock, flags);
-}
-
-void rfuse_path_latency_record_write_pages_copy_from_pages(u64 delta_ns)
-{
-	rfuse_path_latency_record(RFUSE_PATH_LAT_WRITE_PAGES_COPY_FROM_PAGES,
-				  delta_ns);
-}
-
-void rfuse_path_latency_record_write_payload_copy_page_from_iter_atomic(u64 delta_ns)
-{
-	rfuse_path_latency_record(
-		RFUSE_PATH_LAT_WRITE_PAYLOAD_COPY_PAGE_FROM_ITER_ATOMIC,
-		delta_ns);
-}
-
-void rfuse_path_latency_dump_reset(void)
-{
-	struct rfuse_path_latency_stat snapshot[RFUSE_PATH_LAT_MAX];
-	unsigned long flags;
-	int i;
-
-	spin_lock_irqsave(&rfuse_path_latency_lock, flags);
-	memcpy(snapshot, rfuse_path_latency, sizeof(snapshot));
-	memset(rfuse_path_latency, 0, sizeof(rfuse_path_latency));
-	spin_unlock_irqrestore(&rfuse_path_latency_lock, flags);
-
-	pr_info("rfuse_path_latency: dump and reset\n");
-	for (i = 0; i < RFUSE_PATH_LAT_MAX; i++) {
-		u64 avg_ns = 0;
-
-		if (snapshot[i].count)
-			avg_ns = div64_u64(snapshot[i].total_ns,
-					   snapshot[i].count);
-
-		pr_info("rfuse_path_latency: %-36s count=%llu total_ns=%llu avg_ns=%llu min_ns=%llu max_ns=%llu\n",
-			rfuse_path_latency_names[i],
-			snapshot[i].count,
-			snapshot[i].total_ns,
-			avg_ns,
-			snapshot[i].count ? snapshot[i].min_ns : 0,
-			snapshot[i].max_ns);
-	}
-}
-
 
 /************ 0. Copy of original fuse functions ************/
 
@@ -1256,7 +1100,6 @@ static ssize_t rfuse_fill_write_pages(struct rfuse_io_args *ria, struct address_
 	unsigned offset = pos & (PAGE_SIZE - 1);
 	size_t count = 0;
 	int err;
-	u64 start_ns;
 
 	ria->r_req->in_pages = true;
 	rp->descs[0].offset = offset;
@@ -1276,34 +1119,17 @@ static ssize_t rfuse_fill_write_pages(struct rfuse_io_args *ria, struct address_
 				break;
 
 		err = -ENOMEM;
-		start_ns = ktime_get_ns();
 		page = grab_cache_page_write_begin(mapping, index, 0);
-		rfuse_path_latency_record(
-			RFUSE_PATH_LAT_WRITE_PAGES_GRAB_CACHE_PAGE,
-			ktime_get_ns() - start_ns);
 		if (!page)
 			break;
 
 		rfuse_wait_on_page_writeback(mapping->host, index);
 
-		if (mapping_writably_mapped(mapping)) {
-			start_ns = ktime_get_ns();
+		if (mapping_writably_mapped(mapping))
 			flush_dcache_page(page);
-			rfuse_path_latency_record(
-				RFUSE_PATH_LAT_WRITE_PAGES_FLUSH_DCACHE_PAGE,
-				ktime_get_ns() - start_ns);
-		}
 
-		start_ns = ktime_get_ns();
 		tmp = copy_page_from_iter_atomic(page, offset, bytes, ii);
-		rfuse_path_latency_record(
-			RFUSE_PATH_LAT_WRITE_PAGES_COPY_PAGE_FROM_ITER_ATOMIC,
-			ktime_get_ns() - start_ns);
-		start_ns = ktime_get_ns();
 		flush_dcache_page(page);
-		rfuse_path_latency_record(
-			RFUSE_PATH_LAT_WRITE_PAGES_FLUSH_DCACHE_PAGE,
-			ktime_get_ns() - start_ns);
 
 		if (!tmp) {
 			unlock_page(page);
@@ -1326,16 +1152,9 @@ static ssize_t rfuse_fill_write_pages(struct rfuse_io_args *ria, struct address_
 		if (tmp == PAGE_SIZE)
 			SetPageUptodate(page);
 
-		start_ns = ktime_get_ns();
 		if (PageUptodate(page)) {
-			rfuse_path_latency_record(
-				RFUSE_PATH_LAT_WRITE_PAGES_PAGE_UPTODATE,
-				ktime_get_ns() - start_ns);
 			unlock_page(page);
 		} else {
-			rfuse_path_latency_record(
-				RFUSE_PATH_LAT_WRITE_PAGES_PAGE_UPTODATE,
-				ktime_get_ns() - start_ns);
 			ria->write.page_locked = true;
 			break;
 		}
@@ -1390,27 +1209,36 @@ static ssize_t rfuse_send_write_pages(struct rfuse_io_args *ria,
 	unsigned int offset, i;
 	bool short_write;
 	int err;
-	u64 start_ns;
 
 	ria->r_req->in_pages = true;
 
 	for (i = 0; i < rp->num_pages; i++)
 		rfuse_wait_on_page_writeback(inode, rp->pages[i]->index);
 
-	start_ns = ktime_get_ns();
-	rfuse_write_args_fill(ria, ff, pos, count);
-	rfuse_path_latency_record(RFUSE_PATH_LAT_WRITE_PAGES_WRITE_ARGS_FILL,
-				  ktime_get_ns() - start_ns);
+	if (ria->path_lat) {
+		u64 start_ns = ktime_get_ns();
+
+		rfuse_write_args_fill(ria, ff, pos, count);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_ARGS_FILL,
+				      ktime_get_ns() - start_ns);
+	} else {
+		rfuse_write_args_fill(ria, ff, pos, count);
+	}
 
 	in = (struct fuse_write_in *)&ria->r_req->args;
 	in->flags = rfuse_write_flags(iocb);
 	if (fm->fc->handle_killpriv_v2 && !capable(CAP_FSETID))
 		in->write_flags |= FUSE_WRITE_KILL_SUIDGID;
 
-	start_ns = ktime_get_ns();
-	err = rfuse_simple_request(ria->r_req);
-	rfuse_path_latency_record(RFUSE_PATH_LAT_WRITE_PAGES_SIMPLE_REQUEST,
-				  ktime_get_ns() - start_ns);
+	if (ria->path_lat) {
+		u64 start_ns = ktime_get_ns();
+
+		err = rfuse_simple_request(ria->r_req);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_SIMPLE_REQUEST,
+				      ktime_get_ns() - start_ns);
+	} else {
+		err = rfuse_simple_request(ria->r_req);
+	}
 	out = (struct fuse_write_out *)&ria->r_req->args;
 	if (!err && out->size > count)
 		err = -EIO;
@@ -1541,7 +1369,15 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 	ssize_t err;
 	ria->r_req->in_pages = true;
 
-	rfuse_write_args_fill(ria, ff, pos, count);
+	if (ria->path_lat) {
+		u64 start_ns = ktime_get_ns();
+
+		rfuse_write_args_fill(ria, ff, pos, count);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_ASYNC_WRITE_ARGS_FILL,
+				      ktime_get_ns() - start_ns);
+	} else {
+		rfuse_write_args_fill(ria, ff, pos, count);
+	}
 	idx_from = pos >> PAGE_SHIFT;
 	idx_to = (pos + count - 1) >> PAGE_SHIFT;
 
@@ -1590,7 +1426,15 @@ static ssize_t rfuse_bwrite_async_submit(struct rfuse_io_args *ria,
 	ria->async_wb_node = &range->node;
 	spin_unlock(&fi->lock);
 	ria->r_req->end = rfuse_bwrite_complete_req;
-	err = rfuse_simple_background(fm, ria->r_req);
+	if (ria->path_lat) {
+		u64 start_ns = ktime_get_ns();
+
+		err = rfuse_simple_background(fm, ria->r_req);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_ASYNC_SIMPLE_BACKGROUND,
+				      ktime_get_ns() - start_ns);
+	} else {
+		err = rfuse_simple_background(fm, ria->r_req);
+	}
 	if (err) {
 		/*
 		 * background queue에 들어가지 못한 request는 completion callback이
@@ -1640,8 +1484,7 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 	ssize_t res = 0;
 	bool async = rfuse_async_allowed(iocb, inode, pos, ii);
 	bool extending = inode_size < end_pos;
-	u64 start_ns;
-
+  // bool async = false;
 	if (async && extending)
 		set_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
 
@@ -1653,29 +1496,40 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 		struct rfuse_io_args ria = {};
 		struct rfuse_pages *rp = &ria.rp;
 		struct rfuse_req *r_req;
-		unsigned int nr_pages = rfuse_wr_pages(pos, iov_iter_count(ii), fc->max_pages);
+		unsigned int nr_pages;
+		u64 start_ns;
+
+		ria.path_lat = true;
+
+		start_ns = ktime_get_ns();
+		nr_pages = rfuse_wr_pages(pos, iov_iter_count(ii), fc->max_pages);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_WR_PAGES,
+				      ktime_get_ns() - start_ns);
 
 		start_ns = ktime_get_ns();
 		rp->pages = fuse_pages_alloc(nr_pages, GFP_KERNEL, &rp->descs);
-		rfuse_path_latency_record(RFUSE_PATH_LAT_WRITE_PAGES_ALLOC,
-					  ktime_get_ns() - start_ns);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_PAGES_ALLOC,
+				      ktime_get_ns() - start_ns);
 		if (!rp->pages) {
 			err = -ENOMEM;
 			break;
 		}
 
-			start_ns = ktime_get_ns();
-			r_req = rfuse_get_req(fm, false, false);
-			rfuse_path_latency_record(RFUSE_PATH_LAT_WRITE_PAGES_GET_REQ,
-						  ktime_get_ns() - start_ns);
-			if (IS_ERR(r_req)) {
-				err = PTR_ERR(r_req);
-				kfree(rp->pages);
-				break;
-			}
-			ria.r_req = r_req;
+		start_ns = ktime_get_ns();
+		r_req = rfuse_get_req(fm, false, false);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_GET_REQ,
+				      ktime_get_ns() - start_ns);
+		if (IS_ERR(r_req)) {
+			err = PTR_ERR(r_req);
+			kfree(rp->pages);
+			break;
+		}
+		ria.r_req = r_req;
 
+		start_ns = ktime_get_ns();
 		count = rfuse_fill_write_pages(&ria, mapping, ii, pos, nr_pages);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_FILL_WRITE_PAGES,
+				      ktime_get_ns() - start_ns);
 		if (count <= 0) {
 			err = count;
 		} else {
@@ -1692,25 +1546,15 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 					err = -EIO;
 			}
 		}
-		start_ns = ktime_get_ns();
 		rfuse_put_request(r_req);
-		rfuse_path_latency_record(RFUSE_PATH_LAT_WRITE_PAGES_PUT_REQUEST,
-					  ktime_get_ns() - start_ns);
 		kfree(rp->pages);
 	} while (!err && iov_iter_count(ii));
 
-	if (res > 0) {
-		start_ns = ktime_get_ns();
+	if (res > 0)
 		fuse_write_update_size(inode, pos);
-		rfuse_path_latency_record(RFUSE_PATH_LAT_WRITE_UPDATE_SIZE,
-					  ktime_get_ns() - start_ns);
-	}
 
 	clear_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
-	start_ns = ktime_get_ns();
 	fuse_invalidate_attr(inode);
-	rfuse_path_latency_record(RFUSE_PATH_LAT_WRITE_INVALIDATE_ATTR,
-				  ktime_get_ns() - start_ns);
 
 	return res > 0 ? res : err;
 
@@ -1731,46 +1575,52 @@ async:
 			struct rfuse_req *r_req;
 			unsigned int nr_pages;
 			ssize_t nbytes;
+			u64 start_ns;
 
+			start_ns = ktime_get_ns();
 			nr_pages = rfuse_wr_pages(pos, count, fc->max_pages);
+			rfuse_path_lat_record(RFUSE_PATH_LAT_ASYNC_WR_PAGES,
+					      ktime_get_ns() - start_ns);
+
 			start_ns = ktime_get_ns();
 			ria = rfuse_io_alloc(io, nr_pages);
-			rfuse_path_latency_record(RFUSE_PATH_LAT_WRITE_PAGES_ALLOC,
-						  ktime_get_ns() - start_ns);
+			rfuse_path_lat_record(RFUSE_PATH_LAT_ASYNC_IO_ALLOC,
+					      ktime_get_ns() - start_ns);
 			if (!ria) {
-        printk("RFUSE: rfuse_io_alloc failed\n");
+				printk("RFUSE: rfuse_io_alloc failed\n");
 				err = -ENOMEM;
 				break;
 			}
+			ria->path_lat = true;
 
 			start_ns = ktime_get_ns();
 			r_req = try_rfuse_wt_get_req(fm, true, false, NULL,
 						     fi->nodeid);
-			rfuse_path_latency_record(RFUSE_PATH_LAT_WRITE_PAGES_GET_REQ,
-						  ktime_get_ns() - start_ns);
+			rfuse_path_lat_record(RFUSE_PATH_LAT_ASYNC_WT_GET_REQ,
+					      ktime_get_ns() - start_ns);
 			if (IS_ERR(r_req)) {
-        printk("RFUSE: request allocation failed\n");
+				printk("RFUSE: request allocation failed\n");
 				err = PTR_ERR(r_req);
 				rfuse_io_free(ria);
 				break;
 			}
 			ria->r_req = r_req;
 
+			start_ns = ktime_get_ns();
 			nbytes = rfuse_fill_write_pages(ria, mapping, ii, pos, nr_pages);
+			rfuse_path_lat_record(RFUSE_PATH_LAT_ASYNC_FILL_WRITE_PAGES,
+					      ktime_get_ns() - start_ns);
 			if (nbytes <= 0) {
 				printk("RFUSE: rfuse_fill_write_pages failed\n");
 				err = nbytes;
-				start_ns = ktime_get_ns();
 				rfuse_put_request(r_req);
-				rfuse_path_latency_record(
-					RFUSE_PATH_LAT_WRITE_PAGES_PUT_REQUEST,
-					ktime_get_ns() - start_ns);
 				rfuse_io_free(ria);
 				break;
 			}
+
 			err = rfuse_bwrite_async_submit(ria, iocb, pos, nbytes);
 			if (err < 0) {
-        printk("RFUSE: async write submit failed\n");
+				printk("RFUSE: async write submit failed\n");
 				rfuse_io_free(ria);
 				break;
 			}
@@ -1780,18 +1630,11 @@ async:
 			pos += nbytes;
 		}
 
-		if (res > 0) {
-			start_ns = ktime_get_ns();
+		if (res > 0)
 			fuse_write_update_size(inode, pos);
-			rfuse_path_latency_record(RFUSE_PATH_LAT_WRITE_UPDATE_SIZE,
-						  ktime_get_ns() - start_ns);
-		}
 
 		clear_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
-		start_ns = ktime_get_ns();
 		fuse_invalidate_attr(inode);
-		rfuse_path_latency_record(RFUSE_PATH_LAT_WRITE_INVALIDATE_ATTR,
-					  ktime_get_ns() - start_ns);
 		rfuse_aio_complete(io, res > 0 ? 0 : err, -1);
 		return res > 0 ? res : err;
 	}
@@ -2648,17 +2491,9 @@ int rfuse_do_readpage(struct file *file, struct page *page){
 	struct rfuse_req *r_req;
 	ssize_t res;
 	u64 attr_ver;
-	u64 start_ns;
 
-	start_ns = ktime_get_ns();
 	rfuse_wait_async_write_range(inode, page->index, page->index);
-	rfuse_path_latency_record(
-		RFUSE_PATH_LAT_READPAGE_WAIT_ASYNC_WRITE_RANGE,
-		ktime_get_ns() - start_ns);
-	start_ns = ktime_get_ns();
 	r_req = rfuse_get_req(fm, false, false);
-	rfuse_path_latency_record(RFUSE_PATH_LAT_READPAGE_GET_REQ,
-				  ktime_get_ns() - start_ns);
 	if (IS_ERR(r_req))
 		return PTR_ERR(r_req);
 	ria.r_req = r_req;
@@ -2674,10 +2509,7 @@ int rfuse_do_readpage(struct file *file, struct page *page){
 	 * page-cache page, so make sure we read a properly synced
 	 * page.
 	 */
-	start_ns = ktime_get_ns();
 	rfuse_wait_on_page_writeback(inode, page->index);
-	rfuse_path_latency_record(RFUSE_PATH_LAT_READPAGE_WAIT_ON_PAGE_WRITEBACK,
-				  ktime_get_ns() - start_ns);
 
 	attr_ver = fuse_get_attr_version(fm->fc);
 
@@ -2685,18 +2517,9 @@ int rfuse_do_readpage(struct file *file, struct page *page){
 	if (pos + (desc.length - 1) == LLONG_MAX)
 		desc.length--;
 
-	start_ns = ktime_get_ns();
 	rfuse_read_args_fill(&ria, file, pos, desc.length, FUSE_READ);
-	rfuse_path_latency_record(RFUSE_PATH_LAT_READPAGE_READ_ARGS_FILL,
-				  ktime_get_ns() - start_ns);
-	start_ns = ktime_get_ns();
 	res = rfuse_simple_request(r_req);
-	rfuse_path_latency_record(RFUSE_PATH_LAT_READPAGE_SIMPLE_REQUEST,
-				  ktime_get_ns() - start_ns);
-	start_ns = ktime_get_ns();
 	rfuse_put_request(r_req);
-	rfuse_path_latency_record(RFUSE_PATH_LAT_READPAGE_PUT_REQUEST,
-				  ktime_get_ns() - start_ns);
 	if (res < 0)
 		return res;
 	/*
@@ -2790,27 +2613,27 @@ void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, int is_a
 	pgoff_t idx_to = rp->pages[rp->num_pages - 1]->index;
 	struct rfuse_req *r_req;
 	bool use_async = is_async && fm->fc->async_read;
+	u64 start_ns;
 
 	ssize_t res;
 	int err;
-	u64 start_ns;
 
 	start_ns = ktime_get_ns();
 	rfuse_wait_async_write_range(file_inode(file), idx_from, idx_to);
-	rfuse_path_latency_record(
-		RFUSE_PATH_LAT_READPAGES_WAIT_ASYNC_WRITE_RANGE,
-		ktime_get_ns() - start_ns);
+	rfuse_path_lat_record(RFUSE_PATH_LAT_READPAGES_WAIT_ASYNC_WRITE_RANGE,
+			      ktime_get_ns() - start_ns);
+
 	if (use_async) {
 		start_ns = ktime_get_ns();
 		r_req = try_rfuse_get_req(fm, true, false, NULL,
 					  get_fuse_inode(file_inode(file))->nodeid);
-		rfuse_path_latency_record(RFUSE_PATH_LAT_READPAGES_GET_REQ,
-					  ktime_get_ns() - start_ns);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_READPAGES_TRY_GET_REQ,
+				      ktime_get_ns() - start_ns);
 	} else {
 		start_ns = ktime_get_ns();
 		r_req = rfuse_get_req(fm, false, false);
-		rfuse_path_latency_record(RFUSE_PATH_LAT_READPAGES_GET_REQ,
-					  ktime_get_ns() - start_ns);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_READPAGES_GET_REQ,
+				      ktime_get_ns() - start_ns);
 	}
 
 	if (IS_ERR(r_req)) {
@@ -2841,25 +2664,22 @@ void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, int is_a
 	}
 	WARN_ON((loff_t) (pos + count) < 0);
 
-	start_ns = ktime_get_ns();
 	rfuse_read_args_fill(ria, file, pos, count, FUSE_READ);
-	rfuse_path_latency_record(RFUSE_PATH_LAT_READPAGES_READ_ARGS_FILL,
-				  ktime_get_ns() - start_ns);
 	ria->read.attr_ver = fuse_get_attr_version(fm->fc);
 	if (use_async) {
 		ria->ff = rfuse_file_get(ff);
 		r_req->end = rfuse_readpages_end;
 		start_ns = ktime_get_ns();
 		err = rfuse_simple_background(fm, r_req);
-		rfuse_path_latency_record(RFUSE_PATH_LAT_READPAGES_SIMPLE_BACKGROUND,
-					  ktime_get_ns() - start_ns);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_READPAGES_SIMPLE_BACKGROUND,
+				      ktime_get_ns() - start_ns);
 		if (!err)
 			return;
 	} else {
 		start_ns = ktime_get_ns();
 		res = rfuse_simple_request(r_req);
-		rfuse_path_latency_record(RFUSE_PATH_LAT_READPAGES_SIMPLE_REQUEST,
-					  ktime_get_ns() - start_ns);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_READPAGES_SIMPLE_REQUEST,
+				      ktime_get_ns() - start_ns);
 		err = res < 0 ? res : 0;
 		rfuse_readpages_end(fm, r_req, err);
 		rfuse_put_request(r_req);
@@ -2869,7 +2689,7 @@ void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, int is_a
 	rfuse_put_request(r_req);
 }
 
-
+/*
 void rfuse_readahead(struct readahead_control *rac)
 {
 	struct inode *inode = rac->mapping->host;
@@ -2925,8 +2745,8 @@ void rfuse_readahead(struct readahead_control *rac)
 		rfuse_send_readpages(ria, rac->file, is_async);
 	}
 }
+*/
 
-/*
 void rfuse_readahead(struct readahead_control *rac)
 {
 	struct inode *inode = rac->mapping->host;
@@ -2959,10 +2779,9 @@ void rfuse_readahead(struct readahead_control *rac)
 			rp->descs[i].length = PAGE_SIZE;
 		}
 		rp->num_pages = nr_pages;
-		rfuse_send_readpages(ria, rac->file, 0);
+		rfuse_send_readpages(ria, rac->file, 1);
 	}
 }
-*/
 
 static ssize_t rfuse_send_read(struct rfuse_io_args *ria, loff_t pos, size_t count, fl_owner_t owner)
 {

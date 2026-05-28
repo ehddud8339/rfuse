@@ -85,11 +85,9 @@ static void *rfuse_do_work(void *data)
 {
 	struct rfuse_worker *w = (struct rfuse_worker *) data;
 	struct rfuse_mt *mt = w->mt;
-	struct rfuse_iqueue *riq = mt->se->riq[mt->riq_id];
 	_Atomic int isforget = 0;
 	bool counted_general;
 	bool processed = false;
-	bool retry_pending;
 
 	while (!fuse_session_exited(mt->se)) {
 		/**
@@ -98,8 +96,6 @@ static void *rfuse_do_work(void *data)
 		 * isforget == 0 : handle general request
 		 * isforget == 1 : handle forget request
 		**/
-		retry_pending = false;
-retry_read_queue:
 		pthread_mutex_lock(&mt->lock);
 		if (mt->exit) {
 			pthread_mutex_unlock(&mt->lock);
@@ -109,7 +105,7 @@ retry_read_queue:
 		counted_general = !isforget;
 		if (counted_general)
 			mt->numavail--;
-		if (!retry_pending && mt->numavail == 0 && mt->numworker < RFUSE_WORKER_PER_RING)
+		if (mt->numavail == 0 && mt->numworker < RFUSE_WORKER_PER_RING)
 			rfuse_loop_start_thread(mt);
 		pthread_mutex_unlock(&mt->lock);
 
@@ -139,19 +135,11 @@ retry_read_queue:
 			free(w);
 			return NULL;
 		} else if (isforget == 0 && !processed) {
-			uint64_t pending_depth;
 			struct ioctl_args {
 				int riq_id;
 				int req_index;
 			} args = { .riq_id = mt->riq_id, .req_index = -1 };
 			int res;
-
-			pending_depth = rfuse_smp_load_acquire(&riq->pending.tail) - riq->pending.head;
-			if (pending_depth) {
-				retry_pending = true;
-				pthread_mutex_unlock(&mt->lock);
-				goto retry_read_queue;
-			}
 
 			pthread_mutex_unlock(&mt->lock);
 			res = ioctl(mt->se->fd, RFUSE_DAEMON_SLEEP, &args);
