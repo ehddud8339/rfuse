@@ -67,6 +67,17 @@ extern struct mutex fuse_mutex;
 extern unsigned max_user_bgreq;
 extern unsigned max_user_congthresh;
 
+enum rfuse_path_lat_point {
+	RFUSE_PATH_LAT_ASYNC_WAIT_REGISTER,
+	RFUSE_PATH_LAT_TRY_GET_REQ,
+	RFUSE_PATH_LAT_RESERVE_PAYLOAD,
+	RFUSE_PATH_LAT_COPY_FROM_ITER,
+	RFUSE_PATH_LAT_SIMPLE_BACKGROUND,
+	RFUSE_PATH_LAT_NR,
+};
+
+void rfuse_path_lat_record(enum rfuse_path_lat_point point, u64 nsec);
+
 /* One forget request */
 struct fuse_forget_link {
 	struct fuse_forget_one forget_one;

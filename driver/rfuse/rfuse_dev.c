@@ -52,7 +52,7 @@ static struct fuse_dev *fuse_get_dev(struct file *file)
 }
 
 #define RFUSE_PAYLOAD_UNIT_SIZE (FUSE_MAX_MAX_PAGES * PAGE_SIZE)
-#define RFUSE_PAYLOAD_POOL_SIZE (RFUSE_WORKER_PER_RING * RFUSE_PAYLOAD_UNIT_SIZE)
+#define RFUSE_PAYLOAD_POOL_SIZE (RFUSE_WORKER_PER_RING * RFUSE_PAYLOAD_UNIT_SIZE * 2)
 
 struct rfuse_payload_extent {
 	struct list_head list;
@@ -878,30 +878,31 @@ static int __maybe_unused select_payload_aware(struct fuse_conn *fc, size_t len)
 {
 	size_t need = PAGE_ALIGN(len);
 	int start = select_cpu_id();
+	int fallback;
 	int i;
 
 	if (!need || need > fc->riq[start]->payload.size)
 		return start;
 
-	for (;;) {
-		for (i = 0; i < RFUSE_NUM_IQUEUE; i++) {
-			int id = (start + i + 1) % RFUSE_NUM_IQUEUE;
-			struct rfuse_iqueue *riq = fc->riq[id];
-			u32 free_payload;
+	fallback = (start + 1) % RFUSE_NUM_IQUEUE;
 
-			if (id < 0 || id >= RFUSE_NUM_IQUEUE || id == start)
-				continue;
+	for (i = 0; i < RFUSE_NUM_IQUEUE; i++) {
+		int id = (start + i + 1) % RFUSE_NUM_IQUEUE;
+		struct rfuse_iqueue *riq = fc->riq[id];
+		u32 free_payload;
 
-			spin_lock(&riq->payload_lock);
-			free_payload = riq->payload.size - riq->payload.used;
-			spin_unlock(&riq->payload_lock);
+		if (id < 0 || id >= RFUSE_NUM_IQUEUE || id == start)
+			continue;
 
-			if (free_payload >= need)
-				return id;
-		}
+		spin_lock(&riq->payload_lock);
+		free_payload = riq->payload.size - riq->payload.used;
+		spin_unlock(&riq->payload_lock);
 
-		cond_resched();
+		if (free_payload >= need)
+			return id;
 	}
+
+	return fallback;
 }
 
 static unsigned int numa_group_next_rr_index(unsigned int group_id)
@@ -964,6 +965,7 @@ static int __maybe_unused select_payload_aware_v2(struct fuse_conn *fc, size_t l
 	size_t need = PAGE_ALIGN(len);
 	const int *group;
 	int start = select_cpu_id();
+	int fallback;
 	unsigned int start_idx;
 	unsigned int i;
 
@@ -981,30 +983,28 @@ static int __maybe_unused select_payload_aware_v2(struct fuse_conn *fc, size_t l
 	if (start_idx == nr_numa_nodes)
 		return start;
 
-	for (;;) {
-		for (i = 0; i < nr_numa_nodes; i++) {
-			int id = group[(start_idx + i + 1) % nr_numa_nodes];
-      // int id = group[i];
-			struct rfuse_iqueue *riq;
-			u32 free_payload;
+	// fallback = group[(start_idx + 1) % nr_numa_nodes];
 
-			if (id < 0 || id >= RFUSE_NUM_IQUEUE || id == start)
-				continue;
+  for (i = 1; i < nr_numa_nodes; i++) {
+	  int id = group[(start_idx + i) % nr_numa_nodes];
+  	// int id = group[i];
+		struct rfuse_iqueue *riq;
+	  u32 free_payload;
 
-			riq = fc->riq[id];
-			if (READ_ONCE(riq->num_sync_sleeping))
-				continue;
+  	if (id < 0 || id >= RFUSE_NUM_IQUEUE || id == start)
+			continue;
 
-			spin_lock(&riq->payload_lock);
-			free_payload = riq->payload_largest_free;
-			spin_unlock(&riq->payload_lock);
+		riq = fc->riq[id];
 
-			if (free_payload >= need)
-				return id;
-		}
+    spin_lock(&riq->payload_lock);
+    free_payload = riq->payload_largest_free;
+ 		spin_unlock(&riq->payload_lock);
 
-		cond_resched();
-	}
+	  if (free_payload >= need)
+  		return id;
+  }
+
+	return start;
 }
 
 static int select_payload_aware_v3(struct fuse_conn *fc, size_t len)
@@ -1015,6 +1015,7 @@ static int select_payload_aware_v3(struct fuse_conn *fc, size_t len)
 	unsigned int group_id;
 	unsigned int start_idx;
 	unsigned int i;
+	int fallback;
 
 	if (!need || need > fc->riq[start]->payload.size)
 		return start;
@@ -1022,67 +1023,69 @@ static int select_payload_aware_v3(struct fuse_conn *fc, size_t len)
 	if (check_numa_group_rr(start, &group, &group_id))
 		return start;
 
-	for (;;) {
-		start_idx = numa_group_next_rr_index(group_id);
+	start_idx = numa_group_next_rr_index(group_id);
+	fallback = group[start_idx];
 
-		for (i = 0; i < nr_numa_nodes; i++) {
-			int id = group[(start_idx + i) % nr_numa_nodes];
-			struct rfuse_iqueue *riq;
-			u32 free_payload;
+  for (;;) {
+  	for (i = 1; i < nr_numa_nodes; i++) {
+	  	int id = group[(start_idx + i) % nr_numa_nodes];
+  		struct rfuse_iqueue *riq;
+	  	u32 free_payload;
 
-			if (id < 0 || id >= RFUSE_NUM_IQUEUE || id == start)
-				continue;
+		  if (id < 0 || id >= RFUSE_NUM_IQUEUE || id == start)
+			  continue;
 
-			riq = fc->riq[id];
-			if (READ_ONCE(riq->num_sync_sleeping))
-				continue;
+  		riq = fc->riq[id];
 
-			spin_lock(&riq->payload_lock);
-			free_payload = riq->payload_largest_free;
-			spin_unlock(&riq->payload_lock);
+	  	spin_lock(&riq->payload_lock);
+		  free_payload = riq->payload_largest_free;
+  		spin_unlock(&riq->payload_lock);
 
-			if (free_payload >= need)
-				return id;
-		}
+	  	if (free_payload >= need)
+		  	return id;
+  	}
 
-		cond_resched();
-	}
+    cond_resched();
+  }
+
+	return fallback;
 }
 
 static int select_bg_aware(struct fuse_conn *fc) {
   const int *group;
   int start = select_cpu_id();
+  int fallback;
   unsigned int i;
 
   if (check_numa_group(start, &group))
     return start;
 
-  for (;;) {
-    for (i = 0; i < nr_numa_nodes; i++) {
-      int id = group[i];
-      struct rfuse_iqueue *riq;
-      bool available;
+  fallback = group[0];
 
-      if (id < 0 || id >= RFUSE_NUM_IQUEUE || id == start)
-        continue;
+  for (i = 0; i < nr_numa_nodes; i++) {
+    int id = group[i];
+    struct rfuse_iqueue *riq;
+    bool available;
 
-      riq = fc->riq[id];
-      if (READ_ONCE(riq->num_sync_sleeping))
-        continue;
+    if (id < 0 || id >= RFUSE_NUM_IQUEUE || id == start)
+      continue;
 
-      spin_lock(&riq->bg_lock);
-      available = riq->num_background < riq->max_background;
-      spin_unlock(&riq->bg_lock);
+    riq = fc->riq[id];
+    if (READ_ONCE(riq->num_sync_sleeping))
+      continue;
 
-      if (available)
-        return id;
-    }
+    spin_lock(&riq->bg_lock);
+    available = riq->num_background < riq->max_background;
+    spin_unlock(&riq->bg_lock);
 
-    cond_resched();
+    if (available)
+      return id;
   }
+
+  return fallback;
 }
 
-static int select_bg_aware_cpu(struct fuse_conn *fc)
+static int select_bg_aware_iter(struct fuse_conn *fc)
 {
 	const int *group;
 	int start = select_cpu_id();
@@ -1100,29 +1103,25 @@ static int select_bg_aware_cpu(struct fuse_conn *fc)
 	if (start_idx == nr_numa_nodes)
 		return start;
 
-	for (;;) {
-		for (i = 0; i < nr_numa_nodes; i++) {
-			int id = group[(start_idx + i) % nr_numa_nodes];
-			struct rfuse_iqueue *riq;
-			bool available;
+	for (i = 1; i < 4; i++) {
+		int id = group[(start_idx + i) % nr_numa_nodes];
+		struct rfuse_iqueue *riq;
+		bool available;
 
-			if (id < 0 || id >= RFUSE_NUM_IQUEUE || id == start)
-				continue;
+		if (id < 0 || id >= RFUSE_NUM_IQUEUE || id == start)
+			continue;
 
-			riq = fc->riq[id];
-			if (READ_ONCE(riq->num_sync_sleeping))
-				continue;
+		riq = fc->riq[id];
 
-			spin_lock(&riq->bg_lock);
-			available = riq->num_background < riq->max_background;
-			spin_unlock(&riq->bg_lock);
+		spin_lock(&riq->bg_lock);
+		available = riq->num_background < riq->max_background;
+		spin_unlock(&riq->bg_lock);
 
-			if (available)
-				return id;
-		}
-
-		cond_resched();
+		if (available)
+			return id;
 	}
+
+	return group[start_idx];
 }
 
 static int select_bg_aware_rr(struct fuse_conn *fc)
@@ -1132,35 +1131,35 @@ static int select_bg_aware_rr(struct fuse_conn *fc)
 	unsigned int group_id;
 	unsigned int start_idx;
 	unsigned int i;
+	int fallback;
 
 	if (check_numa_group_rr(start, &group, &group_id))
 		return start;
 
-	for (;;) {
-		start_idx = numa_group_next_rr_index(group_id);
+	start_idx = numa_group_next_rr_index(group_id);
+	fallback = group[start_idx];
 
-		for (i = 0; i < nr_numa_nodes; i++) {
-			int id = group[(start_idx + i) % nr_numa_nodes];
-			struct rfuse_iqueue *riq;
-      bool available;
+	for (i = 0; i < nr_numa_nodes; i++) {
+		int id = group[(start_idx + i) % nr_numa_nodes];
+		struct rfuse_iqueue *riq;
+		bool available;
 
-			//if (id < 0 || id >= RFUSE_NUM_IQUEUE || id == start)
-				//continue;
+		//if (id < 0 || id >= RFUSE_NUM_IQUEUE || id == start)
+			//continue;
 
-			riq = fc->riq[id];
-			if (READ_ONCE(riq->num_sync_sleeping))
-				continue;
+		riq = fc->riq[id];
+		if (READ_ONCE(riq->num_sync_sleeping))
+			continue;
 
-			spin_lock(&riq->payload_lock);
-      available = riq->num_background < riq->max_background;
-			spin_unlock(&riq->payload_lock);
+		spin_lock(&riq->payload_lock);
+		available = riq->num_background < riq->max_background;
+		spin_unlock(&riq->payload_lock);
 
-			if (available)
-				return id;
-		}
-
-		cond_resched();
+		if (available)
+			return id;
 	}
+
+	return fallback;
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc,
@@ -1175,6 +1174,7 @@ struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc,
   // id = select_bg_aware_cpu(fc);
   // id = select_cpu_id();
   // id = select_round_robin(fc);
+  //	id = select_bg_aware_iter(fc);
 	return fc->riq[id];
 }
 
@@ -1451,12 +1451,12 @@ void rfuse_put_request(struct rfuse_req *r_req){
 
 struct rfuse_req *rfuse_request_alloc(struct fuse_mount *fm, size_t payload_len){
 	struct fuse_conn *fc = fm->fc;
-  
+  /*
 	struct rfuse_iqueue *riq = payload_len ?
 		fc->riq[select_payload_aware_v3(fc, payload_len)] :
 		rfuse_get_iqueue(fc);
-  
-  //struct rfuse_iqueue *riq = rfuse_get_iqueue(fc);
+  */
+  struct rfuse_iqueue *riq = rfuse_get_iqueue(fc);
 	int riq_id = riq->riq_id;
 	struct rfuse_req *r_req = NULL;
 	uint32_t req_index;
