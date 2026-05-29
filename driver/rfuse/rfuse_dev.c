@@ -380,6 +380,18 @@ static int select_round_robin(struct fuse_conn *fc){
 	return ret;
 }
 
+static int select_thread_id(void){
+	int ret = current->pid;
+	
+	return (ret % RFUSE_NUM_IQUEUE);
+}
+
+static int select_cpu_id(void){
+	int ret = task_cpu(current);
+	
+	return (ret % RFUSE_NUM_IQUEUE);
+}
+
 static int find_numa_group(int id)
 {
 	int group;
@@ -398,11 +410,16 @@ static int find_numa_group(int id)
 static int __maybe_unused select_same_numa_rr(void)
 {
 	int numa_id;
+	int cur_id = select_cpu_id();
 	unsigned int cursor;
 
+next:
 	numa_id = find_numa_group(task_cpu(current));
 	cursor = (unsigned int)(atomic_inc_return(&rfuse_numa_cursor[numa_id]) - 1);
 	cursor %= RFUSE_NUMA_GROUP_SIZE;
+
+	if (cursor == cpu_id)
+		goto next;
 
 	return rfuse_numa_group[numa_id][cursor];
 }
@@ -418,18 +435,6 @@ static int __maybe_unused select_other_numa_rr(void)
 	cursor %= RFUSE_NUMA_GROUP_SIZE;
 
 	return rfuse_numa_group[numa_id][cursor];
-}
-
-static int select_thread_id(void){
-	int ret = current->pid;
-	
-	return (ret % RFUSE_NUM_IQUEUE);
-}
-
-static int select_cpu_id(void){
-	int ret = task_cpu(current);
-	
-	return (ret % RFUSE_NUM_IQUEUE);
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc){
