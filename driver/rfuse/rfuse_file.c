@@ -2112,6 +2112,43 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file,
 	}
 	rfuse_readpages_end(fm, r_req, err);
 }
+/*
+void rfuse_readahead(struct readahead_control *rac)
+{
+	struct inode *inode = rac->mapping->host;
+	struct fuse_conn *fc = get_fuse_conn(inode);
+	unsigned int i, max_pages, nr_pages = 0;
+
+	if (fuse_is_bad(inode))
+		return;
+
+	max_pages = min_t(unsigned int, fc->max_pages,
+			fc->max_read / PAGE_SIZE);
+
+	for (;;) {
+		struct rfuse_io_args *ria;
+		struct rfuse_pages *rp;
+
+		nr_pages = readahead_count(rac) - nr_pages;
+		if (nr_pages > max_pages)
+			nr_pages = max_pages;
+		if (nr_pages == 0)
+			break;
+		ria = rfuse_io_alloc(NULL, nr_pages);
+		if (!ria)
+			return;
+		rp = &ria->rp;
+		nr_pages = __readahead_batch(rac, rp->pages, nr_pages);
+		for (i = 0; i < nr_pages; i++) {
+			rfuse_wait_on_page_writeback(inode,
+						    readahead_index(rac) + i);
+			rp->descs[i].length = PAGE_SIZE;
+		}
+		rp->num_pages = nr_pages;
+		rfuse_send_readpages(ria, rac->file, 1);
+	}
+}
+*/
 
 void rfuse_readahead(struct readahead_control *rac)
 {

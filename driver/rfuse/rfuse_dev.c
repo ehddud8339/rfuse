@@ -407,19 +407,32 @@ static int find_numa_group(int id)
 	return 0;
 }
 
+static int find_numa_group_index(int id, int *cur_id)
+{
+	int group;
+	int index;
+
+	for (group = 0; group < RFUSE_NUM_NUMA_GROUPS; group++) {
+		for (index = 0; index < RFUSE_NUMA_GROUP_SIZE; index++) {
+			if (rfuse_numa_group[group][index] == id) {
+				*cur_id = index;
+				return group;
+			}
+		}
+	}
+
+	return 0;
+}
+
 static int __maybe_unused select_same_numa_rr(void)
 {
 	int numa_id;
 	int cur_id = select_cpu_id();
 	unsigned int cursor;
 
-next:
 	numa_id = find_numa_group(task_cpu(current));
 	cursor = (unsigned int)(atomic_inc_return(&rfuse_numa_cursor[numa_id]) - 1);
 	cursor %= RFUSE_NUMA_GROUP_SIZE;
-
-	if (cursor == cpu_id)
-		goto next;
 
 	return rfuse_numa_group[numa_id][cursor];
 }
@@ -437,13 +450,115 @@ static int __maybe_unused select_other_numa_rr(void)
 	return rfuse_numa_group[numa_id][cursor];
 }
 
+/* LDY: NUMA group을 0부터 N까지 순회하며 혼잡하지 않은 riq 탐색 */ 
+static int __maybe_unused select_same_numa_iter_from_0(struct fuse_conn *fc)
+{
+	int numa_id;
+	int i;	
+	int cur_id = select_cpu_id();
+
+	numa_id = find_numa_group(task_cpu(current));
+
+	for (i = 0; i < RFUSE_NUMA_GROUP_SIZE; i++) {
+		int riq_id = rfuse_numa_group[numa_id][i];
+		struct rfuse_iqueue *riq = fc->riq[riq_id];
+
+		if (READ_ONCE(riq->num_background) < READ_ONCE(riq->congestion_threshold))
+			return riq_id;
+	}
+
+	return cur_id;
+}
+
+/* LDY: NUMA group을 순회하며 혼잡하지 않은 riq 탐색 */ 
+static int __maybe_unused select_same_numa_iter_from_cursor(struct fuse_conn *fc)
+{
+	int numa_id;
+	int i;
+	int cur_id = select_cpu_id();
+  unsigned int cursor;
+
+	numa_id = find_numa_group(task_cpu(current));
+
+	for (i = 0; i < RFUSE_NUMA_GROUP_SIZE; i++) {
+		int riq_id;
+    struct rfuse_iqueue *riq;
+
+    cursor = (unsigned int)(atomic_read(&rfuse_numa_cursor[numa_id]));
+    riq_id = rfuse_numa_group[numa_id][(cursor % RFUSE_NUMA_GROUP_SIZE)];
+    riq = fc->riq[riq_id];
+
+		if (READ_ONCE(riq->num_background) < READ_ONCE(riq->congestion_threshold))
+			return riq_id;
+
+    atomic_inc(&rfuse_numa_cursor[numa_id]);
+  }
+
+	return cur_id;
+}
+
+/* LDY: NUMA group을 순회하며 혼잡하지 않은 riq 탐색 */ 
+static int __maybe_unused select_same_numa_iter_from_cursor_no_caller(struct fuse_conn *fc)
+{
+	int numa_id;
+	int i;	
+	int cur_id = select_cpu_id();
+  unsigned int cursor;
+
+	numa_id = find_numa_group(task_cpu(current));
+
+	for (i = 0; i < RFUSE_NUMA_GROUP_SIZE; i++) {
+		int riq_id;
+    struct rfuse_iqueue *riq;
+
+    cursor = (unsigned int)(atomic_read(&rfuse_numa_cursor[numa_id]));
+    riq_id = rfuse_numa_group[numa_id][(cursor % RFUSE_NUMA_GROUP_SIZE)];
+    riq = fc->riq[riq_id];
+
+		if (riq_id == cur_id)
+			continue;
+
+		if (READ_ONCE(riq->num_background) < READ_ONCE(riq->congestion_threshold))
+			return riq_id;
+
+    atomic_inc(&rfuse_numa_cursor[numa_id]);
+	}
+
+	return cur_id;
+}
+
+/* LDY: NUMA group을 현재 CPU의 riq부터 혼잡하지 않은 riq 탐색 */ 
+static int __maybe_unused select_same_numa_iter_from_cur_id(struct fuse_conn *fc)
+{
+	int numa_id;
+	int i;
+	int start_idx;
+	int cur_id = select_cpu_id();
+	
+	numa_id = find_numa_group_index(task_cpu(current), &start_idx);
+
+	for (i = 1; i < RFUSE_NUMA_GROUP_SIZE; i++) {
+		int riq_id = rfuse_numa_group[numa_id][(start_idx + i) % RFUSE_NUMA_GROUP_SIZE];
+		struct rfuse_iqueue *riq = fc->riq[riq_id];
+
+		if (READ_ONCE(riq->num_background) < READ_ONCE(riq->congestion_threshold))
+			return riq_id;
+	}
+
+	return cur_id;
+}
+
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc){
 	int id = 0;
 
-	id = select_round_robin(fc);
-  // id = select_cpu_id();
+	// id = select_round_robin(fc);
+	// id = select_cpu_id();
   // id = select_other_numa_rr();
   // id = select_same_numa_rr();
+	// id = select_same_numa_iter_from_0(fc);
+	// id = select_same_numa_iter_from_cursor(fc);
+	// id = select_same_numa_iter_from_cursor_no_caller(fc);
+	id = select_same_numa_iter_from_cur_id(fc);
 
 	return fc->riq[id];
 }
