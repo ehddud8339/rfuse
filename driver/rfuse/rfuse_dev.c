@@ -32,6 +32,21 @@
 #define RFUSE_SELECTION_ALGO 2
 atomic_t rr_id = ATOMIC_INIT(0);
 
+#define RFUSE_NUM_NUMA_GROUPS 2
+#define RFUSE_NUMA_GROUP_SIZE 20
+
+static const int rfuse_numa_group[RFUSE_NUM_NUMA_GROUPS][RFUSE_NUMA_GROUP_SIZE] = {
+	{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+	  20, 21, 22, 23, 24, 25, 26, 27, 28, 29 },
+	{ 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+	  30, 31, 32, 33, 34, 35, 36, 37, 38, 39 },
+};
+
+static atomic_t rfuse_numa_cursor[RFUSE_NUM_NUMA_GROUPS] = {
+	ATOMIC_INIT(0),
+	ATOMIC_INIT(0),
+};
+
 /* -1: (App) user syscall start 
    0: request opcode (exception, not timestamps) 
    1: enqueue complet, wait start
@@ -365,6 +380,46 @@ static int select_round_robin(struct fuse_conn *fc){
 	return ret;
 }
 
+static int find_numa_group(int id)
+{
+	int group;
+	int index;
+
+	for (group = 0; group < RFUSE_NUM_NUMA_GROUPS; group++) {
+		for (index = 0; index < RFUSE_NUMA_GROUP_SIZE; index++) {
+			if (rfuse_numa_group[group][index] == id)
+				return group;
+		}
+	}
+
+	return 0;
+}
+
+static int __maybe_unused select_same_numa_rr(void)
+{
+	int numa_id;
+	unsigned int cursor;
+
+	numa_id = find_numa_group(task_cpu(current));
+	cursor = (unsigned int)(atomic_inc_return(&rfuse_numa_cursor[numa_id]) - 1);
+	cursor %= RFUSE_NUMA_GROUP_SIZE;
+
+	return rfuse_numa_group[numa_id][cursor];
+}
+
+static int __maybe_unused select_other_numa_rr(void)
+{
+	int numa_id;
+	unsigned int cursor;
+
+	numa_id = find_numa_group(task_cpu(current));
+	numa_id = (numa_id + 1) % RFUSE_NUM_NUMA_GROUPS;
+	cursor = (unsigned int)(atomic_inc_return(&rfuse_numa_cursor[numa_id]) - 1);
+	cursor %= RFUSE_NUMA_GROUP_SIZE;
+
+	return rfuse_numa_group[numa_id][cursor];
+}
+
 static int select_thread_id(void){
 	int ret = current->pid;
 	
@@ -381,6 +436,9 @@ struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc){
 	int id = 0;
 
 	id = select_round_robin(fc);
+  // id = select_cpu_id();
+  // id = select_other_numa_rr();
+  // id = select_same_numa_rr();
 
 	return fc->riq[id];
 }
