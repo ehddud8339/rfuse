@@ -2064,7 +2064,9 @@ static void rfuse_readpages_end(struct fuse_mount *fm, struct rfuse_req *r_req, 
  * - This is used in the generic_file_read_iter
  **/
 
-static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, int is_async){
+static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file,
+				 bool is_async)
+{
 	struct fuse_file *ff = file->private_data;
 	struct fuse_mount *fm = ff->fm;
 	struct rfuse_pages *rp = &ria->rp;
@@ -2075,9 +2077,9 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, i
 	ssize_t res;
 	int err;
 
-	if(is_async)
+	if (is_async)
 		r_req = try_rfuse_get_req(fm, true, false, NULL);
-	else 
+	else
 		r_req = rfuse_get_req(fm, false, false);
 		
 	ria->r_req = r_req;
@@ -2116,18 +2118,30 @@ void rfuse_readahead(struct readahead_control *rac)
 	struct inode *inode = rac->mapping->host;
 	struct fuse_conn *fc = get_fuse_conn(inode);
 	unsigned int i, max_pages, nr_pages = 0;
+	unsigned int total_pages, async_pages, sync_pages;
 
 	if (fuse_is_bad(inode))
 		return;
 
 	max_pages = min_t(unsigned int, fc->max_pages,
 			fc->max_read / PAGE_SIZE);
+	total_pages = readahead_count(rac);
+	async_pages = min(rac->ra->async_size, total_pages);
+	sync_pages = total_pages - async_pages;
 
 	for (;;) {
 		struct rfuse_io_args *ria;
 		struct rfuse_pages *rp;
+		bool is_async = sync_pages == 0;
 
 		nr_pages = readahead_count(rac) - nr_pages;
+		if (is_async) {
+			if (nr_pages > async_pages)
+				nr_pages = async_pages;
+		} else {
+			if (nr_pages > sync_pages)
+				nr_pages = sync_pages;
+		}
 		if (nr_pages > max_pages)
 			nr_pages = max_pages;
 		if (nr_pages == 0)
@@ -2143,7 +2157,11 @@ void rfuse_readahead(struct readahead_control *rac)
 			rp->descs[i].length = PAGE_SIZE;
 		}
 		rp->num_pages = nr_pages;
-		rfuse_send_readpages(ria, rac->file, rac->ra->async_size);
+		if (is_async)
+			async_pages -= nr_pages;
+		else
+			sync_pages -= nr_pages;
+		rfuse_send_readpages(ria, rac->file, is_async);
 	}
 }
 
