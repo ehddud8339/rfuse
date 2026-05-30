@@ -159,7 +159,7 @@ static int rfuse_payload_alloc_locked(struct rfuse_req *r_req, size_t need,
 	return -EAGAIN;
 }
 
-static int rfuse_payload_alloc(struct rfuse_req *r_req, size_t need, bool may_wait)
+int rfuse_payload_alloc(struct rfuse_req *r_req, size_t need, bool may_wait)
 {
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(r_req->fm->fc, r_req->riq_id);
 	struct rfuse_payload_extent *active;
@@ -302,30 +302,6 @@ void rfuse_release_payload(struct rfuse_req *r_req)
 	r_req->payload_flags = 0;
 }
 
-static int rfuse_payload_copy_from_pages(struct rfuse_req *r_req, size_t len)
-{
-	struct rfuse_pages *rp = r_req->rp;
-	char *dst;
-	unsigned int i;
-	size_t remaining = len;
-
-	if (!rp || !len)
-		return 0;
-
-	dst = (char *)r_req->fm->fc->riq[r_req->riq_id]->payload.kaddr + r_req->payload_offset;
-	for (i = 0; i < rp->num_pages && remaining; i++) {
-		unsigned int offset = rp->descs[i].offset;
-		unsigned int count = min_t(size_t, remaining, rp->descs[i].length);
-		void *src = kmap_atomic(rp->pages[i]);
-
-		memcpy(dst, src + offset, count);
-		kunmap_atomic(src);
-		dst += count;
-		remaining -= count;
-	}
-
-	return remaining ? -EIO : 0;
-}
 
 static int rfuse_payload_pages_capacity(struct rfuse_pages *rp, size_t *capacity)
 {
@@ -507,7 +483,7 @@ ssize_t rfuse_payload_copy_from_iter(struct rfuse_req *r_req,
 	return copied;
 }
 
-int rfuse_prepare_payload(struct rfuse_req *r_req, bool may_wait)
+int rfuse_prepare_payload(struct rfuse_req *r_req, bool may_wait, struct iov_iter *ii, size_t len)
 {
 	size_t need = 0;
 	int ret;
@@ -534,8 +510,8 @@ int rfuse_prepare_payload(struct rfuse_req *r_req, bool may_wait)
 		return ret;
 
 	if (r_req->payload_flags & RFUSE_PAYLOAD_IN) {
-		ret = rfuse_payload_copy_from_pages(r_req, need);
-		if (ret) {
+		ret = rfuse_payload_copy_from_iter(r_req, ii, len);
+		if (ret < 0) {
 			rfuse_release_payload(r_req);
 			return ret;
 		}
@@ -1570,7 +1546,7 @@ ssize_t rfuse_simple_request(struct rfuse_req *r_req){
 	ssize_t ret=0;
 	int err;
 
-	err = rfuse_prepare_payload(r_req, true);
+	err = rfuse_prepare_payload(r_req, true, NULL, 0);
 	if (err)
 		return err;
 
@@ -1701,7 +1677,7 @@ void rfuse_request_end(struct rfuse_req *r_req){
 		spin_unlock(&riq->bg_lock);
 	}
 
-	if (test_bit(FR_ASYNC, &r_req->flags)) {
+	if (r_req->in.opcode == FUSE_READ) {
 		int err = rfuse_import_payload(r_req);
 		if (err && !r_req->out.error)
 			r_req->out.error = err;
