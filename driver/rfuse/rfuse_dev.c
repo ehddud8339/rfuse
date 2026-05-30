@@ -33,54 +33,21 @@
 #define RFUSE_SELECTION_ALGO 2
 atomic_t rr_id = ATOMIC_INIT(0);
 
-#define RFUSE_NUMA_GROUPS 2
-#define RFUSE_CPUS_PER_NUMA_GROUP 20
+#define RFUSE_NUM_NUMA_GROUPS 2
+#define RFUSE_NUMA_GROUP_SIZE 20
 #define RFUSE_BG_AWARE_PTC_TRIES 1
 
-int numa_group[RFUSE_NUMA_GROUPS][RFUSE_CPUS_PER_NUMA_GROUP] = {
+int numa_group[RFUSE_NUM_NUMA_GROUPS][RFUSE_NUMA_GROUP_SIZE] = {
 	{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
 	  20, 21, 22, 23, 24, 25, 26, 27, 28, 29 },
 	{ 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
 	  30, 31, 32, 33, 34, 35, 36, 37, 38, 39 },
 };
 
-atomic_t numa_group_cursor[RFUSE_NUMA_GROUPS] = {
+atomic_t numa_group_cursor[RFUSE_NUM_NUMA_GROUPS] = {
 	ATOMIC_INIT(0),
 	ATOMIC_INIT(0),
 };
-
-bool check_numa_group(int cpu, int **group)
-{
-	int i;
-	int j;
-
-	if (!group)
-		return false;
-
-	for (i = 0; i < RFUSE_NUMA_GROUPS; i++) {
-		for (j = 0; j < RFUSE_CPUS_PER_NUMA_GROUP; j++) {
-			if (numa_group[i][j] == cpu) {
-				*group = numa_group[i];
-				return true;
-			}
-		}
-	}
-
-	*group = NULL;
-	return false;
-}
-
-static int get_numa_group_id(int *group)
-{
-	int i;
-
-	for (i = 0; i < RFUSE_NUMA_GROUPS; i++) {
-		if (numa_group[i] == group)
-			return i;
-	}
-
-	return -1;
-}
 
 /*
 * Duplicated function from dev.c
@@ -365,174 +332,50 @@ static int select_cpu_id(void){
 	return (ret % RFUSE_NUM_IQUEUE);
 }
 
-static bool rfuse_riq_can_submit_bg(struct rfuse_iqueue *riq)
+static int find_numa_group_index(int id, int *start_idx) 
 {
-	bool available;
+	int group;
+	int index;
 
-	spin_lock(&riq->bg_lock);
-	available = riq->connected &&
-		    riq->num_background < riq->max_background;
-	spin_unlock(&riq->bg_lock);
-
-	return available;
+	for (group = 0; group < RFUSE_NUM_NUMA_GROUPS; group++) {
+		for (index = 0; index < RFUSE_NUMA_GROUP_SIZE; index++) {
+      if (numa_group[group][index] == id) {
+        *start_idx = index;
+        return group;
+      }
+    }
+	}
+	
+	return 0;
 }
 
-static int select_bg_aware(struct fuse_conn *fc)
+static int select_numa_aware_from_cur_cpu(struct fuse_conn *fc)
 {
-	int cpu = task_cpu(current);
-	int *group;
-	int group_id;
-	int start;
+	int numa_id;
+	int start_idx;
 	int i;
+	int cpu_id = select_cpu_id();
 
-	if (!check_numa_group(cpu, &group))
-		return select_cpu_id();
-
-	group_id = get_numa_group_id(group);
-	if (group_id < 0)
-		return select_cpu_id();
-
-	start = atomic_inc_return(&numa_group_cursor[group_id]) - 1;
-	start %= RFUSE_CPUS_PER_NUMA_GROUP;
-	if (start < 0)
-		start += RFUSE_CPUS_PER_NUMA_GROUP;
-
-	for (i = 0; i < RFUSE_CPUS_PER_NUMA_GROUP; i++) {
-		int cursor;
-		int riq_id;
-		struct rfuse_iqueue *riq;
-		bool available;
-
-		cursor = start + i;
-		cursor %= RFUSE_CPUS_PER_NUMA_GROUP;
-		riq_id = group[cursor];
-
-		if (riq_id == cpu)
-			continue;
-
-		riq = fc->riq[riq_id];
-		available = rfuse_riq_can_submit_bg(riq);
-
-		if (available)
-			return riq_id;
-	}
-
-	return select_cpu_id();
-}
-
-static int select_bg_aware_cpu_id(struct fuse_conn *fc)
-{
-	int cpu = task_cpu(current);
-	int *group;
-	int cpu_idx = -1;
-	int riq_id;
-	int i;
-
-	if (!check_numa_group(cpu, &group))
-		return select_cpu_id();
-
-	for (i = 0; i < RFUSE_CPUS_PER_NUMA_GROUP; i++) {
-		if (group[i] == cpu) {
-			cpu_idx = i;
-			break;
-		}
-	}
-
-	if (cpu_idx < 0)
-		return select_cpu_id();
-
-	riq_id = group[cpu_idx];
-
-	if (rfuse_riq_can_submit_bg(fc->riq[riq_id]))
-		return riq_id;
-
-	return select_cpu_id();
-}
-
-static int select_bg_aware_no_iter(struct fuse_conn *fc)
-{
-	int cpu = task_cpu(current);
-	int *group;
-	int cpu_idx = -1;
-	int i;
-
-	if (!check_numa_group(cpu, &group))
-		return select_cpu_id();
-
-	for (i = 0; i < RFUSE_CPUS_PER_NUMA_GROUP; i++) {
-		if (group[i] == cpu) {
-			cpu_idx = i;
-			break;
-		}
-	}
-
-	if (cpu_idx < 0)
-		return select_cpu_id();
+	numa_id = find_numa_group_index(cpu_id, &start_idx);
 
 	for (i = 1; i < 4; i++) {
-		int idx = (cpu_idx + i) % RFUSE_CPUS_PER_NUMA_GROUP;
-		int riq_id = group[idx];
-		struct rfuse_iqueue *riq;
-		bool available;
+		int riq_id = numa_group[numa_id][(start_idx + i) % RFUSE_NUMA_GROUP_SIZE];
+		struct rfuse_iqueue *riq = fc->riq[riq_id];
 
-		if (riq_id == cpu)
-			continue;
-
-		riq = fc->riq[riq_id];
-		available = rfuse_riq_can_submit_bg(riq);
-
-		if (available)
+		if (READ_ONCE(riq->num_background) < READ_ONCE(riq->congestion_threshold))
 			return riq_id;
 	}
 
-	return select_cpu_id();
+	return cpu_id;
 }
 
-static int __maybe_unused select_bg_aware_iter(struct fuse_conn *fc)
-{
-	int cpu = task_cpu(current);
-	int *group;
-	int cpu_idx = -1;
-	int i;
-
-	if (!check_numa_group(cpu, &group))
-		return select_cpu_id();
-
-	for (i = 0; i < RFUSE_CPUS_PER_NUMA_GROUP; i++) {
-		if (group[i] == cpu) {
-			cpu_idx = i;
-			break;
-		}
-	}
-
-	if (cpu_idx < 0)
-		return select_cpu_id();
-
-	for (i = 1; i < RFUSE_CPUS_PER_NUMA_GROUP; i++) {
-		int idx = (cpu_idx + i) % RFUSE_CPUS_PER_NUMA_GROUP;
-		int riq_id = group[idx];
-		struct rfuse_iqueue *riq;
-		bool available;
-
-		if (riq_id == cpu)
-			continue;
-
-		riq = fc->riq[riq_id];
-		available = rfuse_riq_can_submit_bg(riq);
-
-		if (available)
-			return riq_id;
-	}
-
-	return select_cpu_id();
-}
 
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc, u64 inode){
 	int id = 0;
 
 	// id = select_round_robin(fc);
 	// id = select_cpu_id();
-	id = select_bg_aware_no_iter(fc);
+	id = select_numa_aware_from_cur_cpu(fc);
 
 	return fc->riq[id];
 }
@@ -541,8 +384,8 @@ struct rfuse_iqueue *rfuse_get_iqueue_for_wt_async(struct fuse_conn *fc, u64 ino
 	int id = 0;
 
 	// id = select_round_robin(fc);
-	id = select_bg_aware_no_iter(fc);
-	// id = select_cpu_id();
+  // id = select_cpu_id();
+	id = select_numa_aware_from_cur_cpu(fc);
 
 	return fc->riq[id];
 }
@@ -560,15 +403,6 @@ struct rfuse_iqueue *rfuse_get_iqueue(struct fuse_conn *fc){
 			break;
 		case 2:
 			id = select_cpu_id();
-			break;
-		case 3:
-			id = select_bg_aware(fc);
-			break;
-		case 4:
-			id = select_bg_aware_cpu_id(fc);
-			break;
-		case 5:
-			id = select_bg_aware_no_iter(fc);
 			break;
 		default:
 			/* default is use only first rfuse_iqueue */

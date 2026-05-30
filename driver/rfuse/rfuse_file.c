@@ -2689,7 +2689,7 @@ void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, int is_a
 	rfuse_put_request(r_req);
 }
 
-/*
+
 void rfuse_readahead(struct readahead_control *rac)
 {
 	struct inode *inode = rac->mapping->host;
@@ -2745,8 +2745,8 @@ void rfuse_readahead(struct readahead_control *rac)
 		rfuse_send_readpages(ria, rac->file, is_async);
 	}
 }
-*/
 
+/*
 void rfuse_readahead(struct readahead_control *rac)
 {
 	struct inode *inode = rac->mapping->host;
@@ -2782,6 +2782,7 @@ void rfuse_readahead(struct readahead_control *rac)
 		rfuse_send_readpages(ria, rac->file, 1);
 	}
 }
+*/
 
 static ssize_t rfuse_send_read(struct rfuse_io_args *ria, loff_t pos, size_t count, fl_owner_t owner)
 {
