@@ -31,6 +31,16 @@
 #define RFUSE_SELECTION_ALGO 2
 atomic_t rr_id = ATOMIC_INIT(0);
 
+#define RFUSE_NUM_NUMA_GROUPS 2
+#define RFUSE_NUMA_GROUP_SIZE 20
+
+static const int numa_group[RFUSE_NUM_NUMA_GROUPS][RFUSE_NUMA_GROUP_SIZE] = {
+  { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+    20, 21, 22, 23, 24, 25, 26, 27, 28, 29 },
+  { 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+    30, 31, 32, 33, 34, 35, 36, 37, 38, 39 },
+};
+
 static void rfuse_latency_min_update(u64 *value, u64 sample)
 {
 	u64 old;
@@ -924,42 +934,48 @@ static int select_cpu_id(void){
 	return (ret % RFUSE_NUM_IQUEUE);
 }
 
-static struct rfuse_iqueue *rfuse_get_iqueue_with_payload_space(struct fuse_conn *fc,
-								size_t len)
+static int find_numa_and_index(int id, int *start_idx)
 {
-	size_t need = PAGE_ALIGN(len);
-	int start = select_cpu_id();
-	int i;
+  int group;
+  int index;
 
-  
-	if (!need || need > fc->riq[start]->payload.size)
-		return fc->riq[start];
+  for (group = 0; group < RFUSE_NUM_NUMA_GROUPS; group++) {
+    for (index = 0; index < RFUSE_NUMA_GROUP_SIZE; index++) {
+      if (numa_group[group][index] == id) {
+        *start_idx = index;
+        return group;
+      }
+    }
+  }
 
-	for (;;) {
-		for (i = 0; i < RFUSE_NUM_IQUEUE; i++) {
-			int id = (start + i) % RFUSE_NUM_IQUEUE;
-			struct rfuse_iqueue *riq = fc->riq[id];
-			u32 free_payload;
+  return 0;
+}
 
-			spin_lock(&riq->payload_lock);
-			free_payload = riq->payload.size - riq->payload.used;
-			spin_unlock(&riq->payload_lock);
+static int select_numa_aware(struct fuse_conn *fc)
+{
+  int numa_id;
+  int start_idx;
+  int i;
+  int cpu_id = select_cpu_id();
 
-			if (free_payload >= need)
-				return riq;
-		}
+  numa_id = find_numa_and_index(cpu_id, &start_idx);
 
-		cond_resched();
-	}
-  
+  for (i = 1; i < RFUSE_NUMA_GROUP_SIZE; i++) {
+    int riq_id = numa_group[numa_id][(start_idx + i) % RFUSE_NUMA_GROUP_SIZE];
+    struct rfuse_iqueue *riq = fc->riq[riq_id];
 
-  return fc->riq[start];
+    if (READ_ONCE(riq->num_background) < READ_ONCE(riq->congestion_threshold))
+      return riq_id;
+  }
+
+  return cpu_id;
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc){
 	int id = 0;
 
-	id = select_round_robin(fc);
+	// id = select_round_robin(fc);
+  id = select_numa_aware(fc);
 
 	return fc->riq[id];
 }
