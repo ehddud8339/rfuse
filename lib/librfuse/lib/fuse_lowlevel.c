@@ -3161,6 +3161,14 @@ int fuse_session_mount(struct fuse_session *se, const char *mountpoint)
 			goto error_out;
 		}
 
+		riq[i]->enq_to_deq_lat.uaddr = mmap(0, riq[i]->enq_to_deq_lat.size,
+				PROT_READ | PROT_WRITE, MAP_SHARED,
+				fd, RFUSE_ENQ_TO_DEQ_LAT | riq_id);
+		if (riq[i]->enq_to_deq_lat.uaddr == MAP_FAILED) {
+			fuse_log(FUSE_LOG_ERR, "rfuse: failed to mmap enque-to-deque latency buffer, errno: %d\n", errno);
+			goto error_out;
+		}
+
 		printf("Complete mmap riq, mapped riq_id: %d\n", riq[i]->riq_id);
 	}
 
@@ -3200,6 +3208,7 @@ void fuse_session_unmount(struct fuse_session *se)
 				munmap(se->riq[i]->uarg,2*sizeof(struct rfuse_arg)*RFUSE_MAX_QUEUE_SIZE);
 				munmap(se->riq[i]->ureq,2*sizeof(struct rfuse_req)*RFUSE_MAX_QUEUE_SIZE);
 				munmap(se->riq[i]->payload.uaddr, se->riq[i]->payload.size);
+				munmap(se->riq[i]->enq_to_deq_lat.uaddr, se->riq[i]->enq_to_deq_lat.size);
 			}
 		//munmap(se->riq, sizeof(struct rfuse_iqueue) * RFUSE_NUM_IQUEUE);	
 		free(se->riq);

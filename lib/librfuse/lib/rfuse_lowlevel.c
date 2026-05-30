@@ -35,6 +35,156 @@
 
 #define RFUSE_SPLICE_READ_NO_DATA 0x1000
 
+static uint64_t rfuse_monotonic_ns(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static void rfuse_latency_min_update(uint64_t *value, uint64_t sample)
+{
+	uint64_t old;
+
+	old = __atomic_load_n(value, __ATOMIC_RELAXED);
+	while ((!old || sample < old) &&
+	       !__atomic_compare_exchange_n(value, &old, sample, 0,
+					    __ATOMIC_RELAXED,
+					    __ATOMIC_RELAXED)) {
+	}
+}
+
+static void rfuse_latency_max_update(uint64_t *value, uint64_t sample)
+{
+	uint64_t old;
+
+	old = __atomic_load_n(value, __ATOMIC_RELAXED);
+	while (sample > old &&
+	       !__atomic_compare_exchange_n(value, &old, sample, 0,
+					    __ATOMIC_RELAXED,
+					    __ATOMIC_RELAXED)) {
+	}
+}
+
+static void rfuse_latency_stat_record(struct rfuse_latency_stat *stat,
+				      uint64_t latency_ns)
+{
+	if (!stat)
+		return;
+
+	__atomic_add_fetch(&stat->count, 1, __ATOMIC_RELAXED);
+	__atomic_add_fetch(&stat->total_ns, latency_ns, __ATOMIC_RELAXED);
+	rfuse_latency_min_update(&stat->min_ns, latency_ns);
+	rfuse_latency_max_update(&stat->max_ns, latency_ns);
+}
+
+static void rfuse_enq_to_deq_latency_record(struct rfuse_iqueue *riq,
+					    struct rfuse_req *r_req)
+{
+	struct rfuse_enq_to_deq_latency *lat = riq->enq_to_deq_lat.uaddr;
+	uint64_t enqueue_ns;
+	uint64_t now_ns;
+
+	if (!lat || r_req->index >= RFUSE_MAX_QUEUE_SIZE * 2)
+		return;
+
+	enqueue_ns = __atomic_exchange_n(&lat->enqueue_ns[r_req->index], 0,
+					 __ATOMIC_ACQ_REL);
+	if (!enqueue_ns)
+		return;
+
+	now_ns = rfuse_monotonic_ns();
+	if (now_ns < enqueue_ns)
+		return;
+
+	rfuse_latency_stat_record(&lat->stat, now_ns - enqueue_ns);
+}
+
+static void rfuse_backend_write_start(fuse_req_t u_req)
+{
+	struct rfuse_enq_to_deq_latency *lat;
+
+	if (!u_req || !u_req->riq ||
+	    u_req->index >= RFUSE_MAX_QUEUE_SIZE * 2)
+		return;
+
+	lat = u_req->riq->enq_to_deq_lat.uaddr;
+	if (!lat)
+		return;
+
+	__atomic_store_n(&lat->backend_write_start_ns[u_req->index],
+			 rfuse_monotonic_ns(), __ATOMIC_RELEASE);
+}
+
+static void rfuse_backend_write_finish(fuse_req_t u_req)
+{
+	struct rfuse_enq_to_deq_latency *lat;
+	uint64_t start_ns;
+	uint64_t now_ns;
+
+	if (!u_req || !u_req->riq ||
+	    u_req->index >= RFUSE_MAX_QUEUE_SIZE * 2)
+		return;
+
+	lat = u_req->riq->enq_to_deq_lat.uaddr;
+	if (!lat)
+		return;
+
+	start_ns = __atomic_exchange_n(&lat->backend_write_start_ns[u_req->index],
+				       0, __ATOMIC_ACQ_REL);
+	if (!start_ns)
+		return;
+
+	now_ns = rfuse_monotonic_ns();
+	if (now_ns < start_ns)
+		return;
+
+	rfuse_latency_stat_record(&lat->backend_write_stat, now_ns - start_ns);
+}
+
+static void rfuse_backend_read_start(fuse_req_t u_req)
+{
+	struct rfuse_enq_to_deq_latency *lat;
+
+	if (!u_req || !u_req->riq ||
+	    u_req->index >= RFUSE_MAX_QUEUE_SIZE * 2)
+		return;
+
+	lat = u_req->riq->enq_to_deq_lat.uaddr;
+	if (!lat)
+		return;
+
+	__atomic_store_n(&lat->backend_read_start_ns[u_req->index],
+			 rfuse_monotonic_ns(), __ATOMIC_RELEASE);
+}
+
+static void rfuse_backend_read_finish(fuse_req_t u_req)
+{
+	struct rfuse_enq_to_deq_latency *lat;
+	uint64_t start_ns;
+	uint64_t now_ns;
+
+	if (!u_req || !u_req->riq ||
+	    u_req->index >= RFUSE_MAX_QUEUE_SIZE * 2)
+		return;
+
+	lat = u_req->riq->enq_to_deq_lat.uaddr;
+	if (!lat)
+		return;
+
+	start_ns = __atomic_exchange_n(&lat->backend_read_start_ns[u_req->index],
+				       0, __ATOMIC_ACQ_REL);
+	if (!start_ns)
+		return;
+
+	now_ns = rfuse_monotonic_ns();
+	if (now_ns < start_ns)
+		return;
+
+	rfuse_latency_stat_record(&lat->backend_read_stat, now_ns - start_ns);
+}
+
 /*
 static unsigned long long rfuse_pread_count;
 static unsigned long long rfuse_pwrite_count;
@@ -395,9 +545,9 @@ static int rfuse_send_reply_iov_nofree(fuse_req_t u_req, int error){
 
 static int rfuse_send_reply_iov(fuse_req_t u_req, int error){
 	int res;
-	struct rfuse_req *r_req = &u_req->riq->ureq[u_req->index];
 
 	GET_TIMESTAMPS(4)
+	rfuse_backend_write_finish(u_req);
 	res = rfuse_send_reply_iov_nofree(u_req,error);
 	rfuse_free_req(u_req);
 	return res;
@@ -475,6 +625,11 @@ int fuse_reply_buf(fuse_req_t u_req, const char *buf, size_t size){
 	int riq_id = u_req->riq->riq_id;
 	long long int pp_req_index = ((long long int)req_index << 32) & RFUSE_REQ_IDX_MASK;
 	int pp_riq_id = (riq_id << 16) & RFUSE_RIQ_ID_MASK;
+	uint64_t start_ns;
+	ssize_t res;
+	int err;
+
+	rfuse_backend_read_finish(u_req);
 
 	if (rfuse_req_payload_buffer(u_req, &payload) == 0 &&
 	    (payload.flags & RFUSE_PAYLOAD_OUT)) {
@@ -487,9 +642,16 @@ int fuse_reply_buf(fuse_req_t u_req, const char *buf, size_t size){
 		return rfuse_send_reply_ok(u_req);
 	}
 
-	ssize_t res = pwrite(ch ? ch->fd : se->fd, buf, size, (long long int)pp_riq_id | pp_req_index);
+	start_ns = rfuse_monotonic_ns();
+	res = pwrite(ch ? ch->fd : se->fd, buf, size,
+		     (long long int)pp_riq_id | pp_req_index);
+	err = errno;
+	if (riq->enq_to_deq_lat.uaddr)
+		rfuse_latency_stat_record(
+			&((struct rfuse_enq_to_deq_latency *)
+				riq->enq_to_deq_lat.uaddr)->dev_fuse_pwrite_stat,
+			rfuse_monotonic_ns() - start_ns);
 	//rfuse_count_pwrite();
-	int err = errno;
 	if(res == -1){
 		if(!fuse_session_exited(se) && err != ENOENT)
 			perror("RFUSE ERROR: writing to the device failed!!");
@@ -1185,6 +1347,8 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 	int riq_id = u_req->riq->riq_id;
 	long long int pp_req_index = ((long long int)req_index << 32) & RFUSE_REQ_IDX_MASK;
 	int pp_riq_id = (riq_id << 16) & RFUSE_RIQ_ID_MASK;
+	struct rfuse_enq_to_deq_latency *lat = riq->enq_to_deq_lat.uaddr;
+	uint64_t start_ns;
 	
 	if (rfuse_req_payload_buffer(u_req, &payload) == 0 &&
 	    (payload.flags & RFUSE_PAYLOAD_IN)) {
@@ -1193,6 +1357,7 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 		goto do_write;
 	}
 
+  start_ns = rfuse_monotonic_ns();
 	if(!u_req->w->fbuf.mem) {
 		u_req->w->fbuf.mem = malloc(FUSE_MAX_MAX_PAGES * getpagesize());
 		if(!u_req->w->fbuf.mem) {
@@ -1201,13 +1366,19 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 		}
 		u_req->w->fbuf.size = FUSE_MAX_MAX_PAGES * getpagesize();
 	}
-
+  rfuse_latency_stat_record(&lat->alloc_temp_buf_stat,
+                            rfuse_monotonic_ns() - start_ns);
 	// 1.Call a system call to receive the data from the kernel page
+	start_ns = rfuse_monotonic_ns();
 	res = pread(ch ? ch->fd : se->fd, u_req->w->fbuf.mem, u_req->w->fbuf.size, (long long int)pp_riq_id | pp_req_index);
+	if (lat)
+		rfuse_latency_stat_record(&lat->dev_fuse_pread_stat,
+					  rfuse_monotonic_ns() - start_ns);
 	//rfuse_count_pread();
 	if(res == -1) {
 		printf("Error : pread for write I/O failed\n");
 		fuse_reply_err(u_req, EIO);
+		return;
 	}
 
 	// 2. Call "u_req->se->op.write" to process write
@@ -1221,11 +1392,13 @@ do_write:
 		fi.flags = arg->flags;
 	}
 
-	if (u_req->se->op.write)
+	if (u_req->se->op.write) {
+		rfuse_backend_write_start(u_req);
 		u_req->se->op.write(u_req, nodeid, param, res,
 				arg->offset, &fi);
-	else
+	} else {
 		fuse_reply_err(u_req, ENOSYS);
+	}
 	
 }
 
@@ -1601,6 +1774,7 @@ static void rfuse_do_read(fuse_req_t u_req, fuse_ino_t nodeid){
 			fi.flags = arg->flags;
 		}
 
+		rfuse_backend_read_start(u_req);
 		u_req->se->op.read(u_req, nodeid, arg->size, arg->offset, &fi);
 	} else
 		fuse_reply_err(u_req, ENOSYS);
@@ -1892,6 +2066,10 @@ bool rfuse_read_queue(struct rfuse_worker *w, struct rfuse_mt *mt, struct fuse_c
 	err = ENOSYS;
 	if (r_req->in.opcode >= FUSE_MAXOP || !rfuse_ll_ops[r_req->in.opcode].func)
 		goto reply_err;
+
+	if (r_req->in.opcode == FUSE_READ || r_req->in.opcode == FUSE_WRITE)
+		rfuse_enq_to_deq_latency_record(riq, r_req);
+  // LDY: enque to deque
 
 	GET_TIMESTAMPS(3)
 	if (r_req->in.opcode == FUSE_WRITE && rfuse_req_has_input_payload(u_req)) {

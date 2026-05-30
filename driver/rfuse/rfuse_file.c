@@ -10,11 +10,223 @@
 #include <linux/falloc.h>
 #include <linux/uio.h>
 #include <linux/fs.h>
+#include <linux/atomic.h>
+#include <linux/ktime.h>
+#include <linux/math64.h>
+#include <linux/moduleparam.h>
 
 
 #define READ_USE_PAYLOAD 1
 #define WRITE_USE_PAYLOAD 1
 
+enum rfuse_path_lat_stage {
+	RFUSE_PATH_LAT_GET_REQUEST,
+	RFUSE_PATH_LAT_ALLOC_PAYLOAD,
+	RFUSE_PATH_LAT_COPY_TO_PAYLOAD,
+	RFUSE_PATH_LAT_ALLOC_PAGE_DESC,
+	RFUSE_PATH_LAT_ALLOC_PAGE_CACHE,
+	RFUSE_PATH_LAT_SUBMIT_ASYNC_REQ,
+	RFUSE_PATH_LAT_QUEUE_TO_COMPLETE,
+	RFUSE_PATH_LAT_NR,
+};
+
+struct rfuse_path_lat_stat {
+	u64 count;
+	u64 total_ns;
+	u64 min_ns;
+	u64 max_ns;
+};
+
+static const char * const rfuse_path_lat_names[RFUSE_PATH_LAT_NR] = {
+	[RFUSE_PATH_LAT_GET_REQUEST] = "get request",
+	[RFUSE_PATH_LAT_ALLOC_PAYLOAD] = "alloc payload",
+	[RFUSE_PATH_LAT_COPY_TO_PAYLOAD] = "copy to payload",
+	[RFUSE_PATH_LAT_ALLOC_PAGE_DESC] = "alloc page desc",
+	[RFUSE_PATH_LAT_ALLOC_PAGE_CACHE] = "alloc page cache",
+	[RFUSE_PATH_LAT_SUBMIT_ASYNC_REQ] = "submit async req",
+	[RFUSE_PATH_LAT_QUEUE_TO_COMPLETE] = "queue to complete",
+};
+
+static DEFINE_RAW_SPINLOCK(rfuse_path_lat_lock);
+static struct rfuse_path_lat_stat rfuse_path_lat_stats[RFUSE_PATH_LAT_NR];
+static int path_lat_dump;
+
+static void rfuse_path_lat_record(enum rfuse_path_lat_stage stage, u64 latency_ns)
+{
+	struct rfuse_path_lat_stat *stat;
+	unsigned long flags;
+
+	if (stage >= RFUSE_PATH_LAT_NR)
+		return;
+
+	raw_spin_lock_irqsave(&rfuse_path_lat_lock, flags);
+	stat = &rfuse_path_lat_stats[stage];
+	if (!stat->count || latency_ns < stat->min_ns)
+		stat->min_ns = latency_ns;
+	if (!stat->count || latency_ns > stat->max_ns)
+		stat->max_ns = latency_ns;
+	stat->count++;
+	stat->total_ns += latency_ns;
+	raw_spin_unlock_irqrestore(&rfuse_path_lat_lock, flags);
+}
+
+enum rfuse_shared_lat_stage {
+	RFUSE_SHARED_LAT_ENQ_TO_DEQ,
+	RFUSE_SHARED_LAT_ALLOC_TEMP_BUF,
+	RFUSE_SHARED_LAT_DEV_FUSE_PREAD,
+	RFUSE_SHARED_LAT_DEV_FUSE_PWRITE,
+	RFUSE_SHARED_LAT_BACKEND_WRITE,
+	RFUSE_SHARED_LAT_BACKEND_READ,
+	RFUSE_SHARED_LAT_COPY_TO_PAGE,
+	RFUSE_SHARED_LAT_FREE_REQUEST,
+	RFUSE_SHARED_LAT_NR,
+};
+
+static const char * const rfuse_shared_lat_names[RFUSE_SHARED_LAT_NR] = {
+	[RFUSE_SHARED_LAT_ENQ_TO_DEQ] = "enque to deque",
+	[RFUSE_SHARED_LAT_ALLOC_TEMP_BUF] = "alloc temp buf",
+	[RFUSE_SHARED_LAT_DEV_FUSE_PREAD] = "/dev/fuse pread",
+	[RFUSE_SHARED_LAT_DEV_FUSE_PWRITE] = "/dev/fuse/ pwrite",
+	[RFUSE_SHARED_LAT_BACKEND_WRITE] = "backend write",
+	[RFUSE_SHARED_LAT_BACKEND_READ] = "backend read",
+	[RFUSE_SHARED_LAT_COPY_TO_PAGE] = "copy_to_page",
+	[RFUSE_SHARED_LAT_FREE_REQUEST] = "free request",
+};
+
+static void rfuse_shared_lat_add_snapshot(struct rfuse_latency_stat *snapshot,
+					  struct rfuse_latency_stat *stat)
+{
+	u64 count;
+	u64 total_ns;
+	u64 min_ns;
+	u64 max_ns;
+
+	count = atomic64_xchg((atomic64_t *)&stat->count, 0);
+	total_ns = atomic64_xchg((atomic64_t *)&stat->total_ns, 0);
+	min_ns = atomic64_xchg((atomic64_t *)&stat->min_ns, 0);
+	max_ns = atomic64_xchg((atomic64_t *)&stat->max_ns, 0);
+	if (!count)
+		return;
+
+	snapshot->count += count;
+	snapshot->total_ns += total_ns;
+	if (!snapshot->min_ns || min_ns < snapshot->min_ns)
+		snapshot->min_ns = min_ns;
+	if (max_ns > snapshot->max_ns)
+		snapshot->max_ns = max_ns;
+}
+
+static void rfuse_shared_lat_snapshot_and_reset(
+	struct rfuse_latency_stat snapshot[RFUSE_SHARED_LAT_NR])
+{
+	struct fuse_conn *fc;
+	int i;
+
+	memset(snapshot, 0, sizeof(struct rfuse_latency_stat) * RFUSE_SHARED_LAT_NR);
+
+	mutex_lock(&fuse_mutex);
+	list_for_each_entry(fc, &fuse_conn_list, entry) {
+		if (!fc->riq)
+			continue;
+
+		for (i = 0; i < RFUSE_NUM_IQUEUE; i++) {
+			struct rfuse_enq_to_deq_latency *lat;
+
+			if (!fc->riq[i])
+				continue;
+
+			lat = fc->riq[i]->enq_to_deq_lat.kaddr;
+			if (!lat)
+				continue;
+
+			rfuse_shared_lat_add_snapshot(
+				&snapshot[RFUSE_SHARED_LAT_ENQ_TO_DEQ],
+				&lat->stat);
+			rfuse_shared_lat_add_snapshot(
+				&snapshot[RFUSE_SHARED_LAT_ALLOC_TEMP_BUF],
+				&lat->alloc_temp_buf_stat);
+			rfuse_shared_lat_add_snapshot(
+				&snapshot[RFUSE_SHARED_LAT_DEV_FUSE_PREAD],
+				&lat->dev_fuse_pread_stat);
+			rfuse_shared_lat_add_snapshot(
+				&snapshot[RFUSE_SHARED_LAT_DEV_FUSE_PWRITE],
+				&lat->dev_fuse_pwrite_stat);
+			rfuse_shared_lat_add_snapshot(
+				&snapshot[RFUSE_SHARED_LAT_BACKEND_WRITE],
+				&lat->backend_write_stat);
+			rfuse_shared_lat_add_snapshot(
+				&snapshot[RFUSE_SHARED_LAT_BACKEND_READ],
+				&lat->backend_read_stat);
+			rfuse_shared_lat_add_snapshot(
+				&snapshot[RFUSE_SHARED_LAT_COPY_TO_PAGE],
+				&lat->copy_to_page_stat);
+			rfuse_shared_lat_add_snapshot(
+				&snapshot[RFUSE_SHARED_LAT_FREE_REQUEST],
+				&lat->free_request_stat);
+		}
+	}
+	mutex_unlock(&fuse_mutex);
+}
+
+static int rfuse_path_lat_dump_get(char *buffer, const struct kernel_param *kp)
+{
+	struct rfuse_path_lat_stat snapshot[RFUSE_PATH_LAT_NR];
+	struct rfuse_latency_stat shared_snapshot[RFUSE_SHARED_LAT_NR];
+	unsigned long flags;
+	int len = 0;
+	int i;
+
+	raw_spin_lock_irqsave(&rfuse_path_lat_lock, flags);
+	memcpy(snapshot, rfuse_path_lat_stats, sizeof(snapshot));
+	memset(rfuse_path_lat_stats, 0, sizeof(rfuse_path_lat_stats));
+	raw_spin_unlock_irqrestore(&rfuse_path_lat_lock, flags);
+	rfuse_shared_lat_snapshot_and_reset(shared_snapshot);
+
+	for (i = 0; i < RFUSE_PATH_LAT_NR; i++) {
+		struct rfuse_path_lat_stat *stat = &snapshot[i];
+		u64 avg_ns = 0;
+		u64 min_ns = 0;
+		u64 max_ns = 0;
+
+		if (stat->count) {
+			avg_ns = div64_u64(stat->total_ns, stat->count);
+			min_ns = stat->min_ns;
+			max_ns = stat->max_ns;
+		}
+
+		len += scnprintf(buffer + len, PAGE_SIZE - len,
+				 "%s: count=%llu avg=%llu ns min=%llu ns max=%llu ns\n",
+				 rfuse_path_lat_names[i],
+				 (unsigned long long)stat->count,
+				 (unsigned long long)avg_ns,
+				 (unsigned long long)min_ns,
+				 (unsigned long long)max_ns);
+	}
+	for (i = 0; i < RFUSE_SHARED_LAT_NR; i++) {
+		struct rfuse_latency_stat *stat = &shared_snapshot[i];
+
+		len += scnprintf(buffer + len, PAGE_SIZE - len,
+				 "%s: count=%llu avg=%llu ns min=%llu ns max=%llu ns\n",
+				 rfuse_shared_lat_names[i],
+				 (unsigned long long)stat->count,
+				 (unsigned long long)(stat->count ?
+						      div64_u64(stat->total_ns,
+								stat->count) : 0),
+				 (unsigned long long)stat->min_ns,
+				 (unsigned long long)stat->max_ns);
+	}
+
+	return len;
+}
+
+static const struct kernel_param_ops rfuse_path_lat_dump_ops = {
+	.set = param_set_int,
+	.get = rfuse_path_lat_dump_get,
+};
+
+module_param_cb(path_lat_dump, &rfuse_path_lat_dump_ops, &path_lat_dump, 0644);
+MODULE_PARM_DESC(path_lat_dump,
+		 "Dump and reset RFUSE write path latency stats");
 
 struct rfuse_release_in {
 	struct fuse_release_in inarg;
@@ -1074,6 +1286,7 @@ static ssize_t rfuse_send_write_pages(struct rfuse_io_args *ria,
 	struct fuse_write_out *out;
 	unsigned int offset, i;
 	bool short_write;
+	u64 start_ns;
 	int err;
 
 	ria->r_req->in_pages = true;
@@ -1088,7 +1301,10 @@ static ssize_t rfuse_send_write_pages(struct rfuse_io_args *ria,
 	if (fm->fc->handle_killpriv_v2 && !capable(CAP_FSETID))
 		in->write_flags |= FUSE_WRITE_KILL_SUIDGID;
 
+	start_ns = ktime_get_ns();
 	err = rfuse_simple_request(ria->r_req);
+	rfuse_path_lat_record(RFUSE_PATH_LAT_QUEUE_TO_COMPLETE,
+			      ktime_get_ns() - start_ns);
 	out = (struct fuse_write_out *)&ria->r_req->args;
 	if (!err && out->size > count)
 		err = -EIO;
@@ -1149,10 +1365,14 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 		struct fuse_write_in *inarg;
 		struct fuse_write_out *out;
 		struct fuse_file *ff = iocb->ki_filp->private_data;
+		u64 start_ns;
 
 		count = min_t(size_t, iov_iter_count(ii), fc->max_write);
 
+		start_ns = ktime_get_ns();
 		r_req = rfuse_get_req(fm, false, false, count);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_GET_REQUEST,
+				      ktime_get_ns() - start_ns);
 		if (IS_ERR(r_req)) {
 			err = PTR_ERR(r_req);
 			break;
@@ -1160,13 +1380,19 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 		ria.r_req = r_req;
 
 		r_req->payload_flags = RFUSE_PAYLOAD_IN;
+		start_ns = ktime_get_ns();
 		err = rfuse_payload_alloc(r_req, count, true);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_ALLOC_PAYLOAD,
+				      ktime_get_ns() - start_ns);
 		if (err) {
 			rfuse_put_request(r_req);
 			break;
 		}
 
+		start_ns = ktime_get_ns();
 		count = rfuse_payload_copy_from_iter(r_req, ii, count);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_COPY_TO_PAYLOAD,
+				      ktime_get_ns() - start_ns);
 		if (count < 0) {
 			err = count;
 			rfuse_put_request(r_req);
@@ -1180,7 +1406,10 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 		if (fm->fc->handle_killpriv_v2 && !capable(CAP_FSETID))
 			inarg->write_flags |= FUSE_WRITE_KILL_SUIDGID;
 
+		start_ns = ktime_get_ns();
 		err = rfuse_simple_request(r_req);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_QUEUE_TO_COMPLETE,
+				      ktime_get_ns() - start_ns);
 		out = (struct fuse_write_out *)&r_req->args;
 		if (!err && out->size > count)
 			err = -EIO;
@@ -1203,25 +1432,36 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 		struct rfuse_io_args ria = {};
 		struct rfuse_pages *rp = &ria.rp;
 		struct rfuse_req *r_req;
-		unsigned int nr_pages = rfuse_wr_pages(pos, iov_iter_count(ii), fc->max_pages);
+		unsigned int nr_pages;
+		u64 start_ns;
 
+		start_ns = ktime_get_ns();
+		nr_pages = rfuse_wr_pages(pos, iov_iter_count(ii), fc->max_pages);
 		rp->pages = fuse_pages_alloc(nr_pages, GFP_KERNEL, &rp->descs);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_ALLOC_PAGE_DESC,
+				      ktime_get_ns() - start_ns);
 		if (!rp->pages) {
 			err = -ENOMEM;
 			break;
 		}
 
-			r_req = rfuse_get_req(fm, false, false,
-					      min_t(size_t, iov_iter_count(ii),
-						    fc->max_write));
-			if (IS_ERR(r_req)) {
-				err = PTR_ERR(r_req);
-				kfree(rp->pages);
-				break;
-			}
-			ria.r_req = r_req;
+		start_ns = ktime_get_ns();
+		r_req = rfuse_get_req(fm, false, false,
+				      min_t(size_t, iov_iter_count(ii),
+					    fc->max_write));
+		rfuse_path_lat_record(RFUSE_PATH_LAT_GET_REQUEST,
+				      ktime_get_ns() - start_ns);
+		if (IS_ERR(r_req)) {
+			err = PTR_ERR(r_req);
+			kfree(rp->pages);
+			break;
+		}
+		ria.r_req = r_req;
 
+		start_ns = ktime_get_ns();
 		count = rfuse_fill_write_pages(&ria, mapping, ii, pos, nr_pages);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_ALLOC_PAGE_CACHE,
+				      ktime_get_ns() - start_ns);
 		if (count <= 0) {
 			err = count;
 		} else {
@@ -2200,14 +2440,18 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, i
 	struct rfuse_req *r_req;
 
 	ssize_t res;
+	u64 start_ns;
 	int err;
-  bool use_async = is_async && fm->fc->async_read;
+	bool use_async = is_async && fm->fc->async_read;
 
 	// if (fm->fc->async_read)
-  if (use_async)
+	start_ns = ktime_get_ns();
+	if (use_async)
 		r_req = try_rfuse_get_req(fm, true, false, count, NULL);
 	else
 		r_req = rfuse_get_req(fm, false, false, count);
+	rfuse_path_lat_record(RFUSE_PATH_LAT_GET_REQUEST,
+			      ktime_get_ns() - start_ns);
 	if (IS_ERR(r_req)) {
 		int i;
 
@@ -2242,7 +2486,10 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, i
   // LDY: payload path
 #if READ_USE_PAYLOAD == 1
 	r_req->payload_flags = RFUSE_PAYLOAD_OUT;
+	start_ns = ktime_get_ns();
 	err = rfuse_payload_alloc(r_req, count, true);
+	rfuse_path_lat_record(RFUSE_PATH_LAT_ALLOC_PAYLOAD,
+			      ktime_get_ns() - start_ns);
 	if (err) {
 		rfuse_readpages_end(fm, r_req, err);
 		rfuse_put_request(r_req);
@@ -2251,16 +2498,22 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file, i
 #endif
 
 	// if (fm->fc->async_read) {
-  if (use_async) {
+	if (use_async) {
 		ria->ff = rfuse_file_get(ff);
 		r_req->end = rfuse_readpages_end;
 
+		start_ns = ktime_get_ns();
 		err = rfuse_simple_background(fm, r_req);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_SUBMIT_ASYNC_REQ,
+				      ktime_get_ns() - start_ns);
 		if (!err)
 			return;
 	} else {
 
+		start_ns = ktime_get_ns();
 		res = rfuse_simple_request(r_req);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_QUEUE_TO_COMPLETE,
+				      ktime_get_ns() - start_ns);
 		err = res < 0 ? res : 0;
 		rfuse_readpages_end(fm, r_req, err);
 		rfuse_put_request(r_req);

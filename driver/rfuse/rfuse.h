@@ -29,6 +29,7 @@
 #define RFUSE_READ	     0x40000000ULL
 #define RFUSE_WRITE	     0x48000000ULL
 #define RFUSE_PAYLOAD       0x50000000ULL
+#define RFUSE_ENQ_TO_DEQ_LAT 0x58000000ULL
 
 #define RFUSE_PAYLOAD_IN        (1U << 0)
 #define RFUSE_PAYLOAD_OUT       (1U << 1)
@@ -158,6 +159,33 @@ struct rfuse_payload_map {
 	uint32_t used;
 };
 
+struct rfuse_latency_stat {
+	uint64_t count;
+	uint64_t total_ns;
+	uint64_t min_ns;
+	uint64_t max_ns;
+};
+
+struct rfuse_enq_to_deq_latency {
+	uint64_t enqueue_ns[RFUSE_MAX_QUEUE_SIZE * 2];
+	uint64_t backend_write_start_ns[RFUSE_MAX_QUEUE_SIZE * 2];
+	uint64_t backend_read_start_ns[RFUSE_MAX_QUEUE_SIZE * 2];
+	struct rfuse_latency_stat stat;
+	struct rfuse_latency_stat alloc_temp_buf_stat;
+	struct rfuse_latency_stat dev_fuse_pread_stat;
+	struct rfuse_latency_stat dev_fuse_pwrite_stat;
+	struct rfuse_latency_stat backend_write_stat;
+	struct rfuse_latency_stat backend_read_stat;
+	struct rfuse_latency_stat copy_to_page_stat;
+	struct rfuse_latency_stat free_request_stat;
+};
+
+struct rfuse_latency_map {
+	void *uaddr;
+	void *kaddr;
+	uint32_t size;
+};
+
 /**
   mmap the total rfuse_iqueue to fuse daemon
  **/ 
@@ -182,6 +210,9 @@ struct rfuse_iqueue{
 
 	/** Shared payload buffer **/
 	struct rfuse_payload_map payload;
+
+	/** enqueue-to-dequeue latency side table **/
+	struct rfuse_latency_map enq_to_deq_lat;
 
 	/** Connection established **/
 	unsigned connected;

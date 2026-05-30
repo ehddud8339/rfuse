@@ -31,6 +31,38 @@
 #define RFUSE_SELECTION_ALGO 2
 atomic_t rr_id = ATOMIC_INIT(0);
 
+static void rfuse_latency_min_update(u64 *value, u64 sample)
+{
+	u64 old;
+
+	old = atomic64_read((atomic64_t *)value);
+	while ((!old || sample < old) &&
+	       atomic64_cmpxchg((atomic64_t *)value, old, sample) != old)
+		old = atomic64_read((atomic64_t *)value);
+}
+
+static void rfuse_latency_max_update(u64 *value, u64 sample)
+{
+	u64 old;
+
+	old = atomic64_read((atomic64_t *)value);
+	while (sample > old &&
+	       atomic64_cmpxchg((atomic64_t *)value, old, sample) != old)
+		old = atomic64_read((atomic64_t *)value);
+}
+
+static void rfuse_latency_stat_record(struct rfuse_latency_stat *stat,
+				      u64 latency_ns)
+{
+	if (!stat)
+		return;
+
+	atomic64_inc((atomic64_t *)&stat->count);
+	atomic64_add(latency_ns, (atomic64_t *)&stat->total_ns);
+	rfuse_latency_min_update(&stat->min_ns, latency_ns);
+	rfuse_latency_max_update(&stat->max_ns, latency_ns);
+}
+
 /* -1: (App) user syscall start 
    0: request opcode (exception, not timestamps) 
    1: enqueue complet, wait start
@@ -382,25 +414,68 @@ int rfuse_import_payload(struct rfuse_req *r_req)
 	size_t remaining;
 	int err;
 
-	if (!rp || !r_req->payload_capacity ||
-	    (r_req->payload_flags & RFUSE_PAYLOAD_FALLBACK))
+	if (!rp) {
+		pr_info("RFUSE_IMPORT_PAYLOAD skip reason=no_pages riq=%u req=%u opcode=%u flags=0x%x capacity=%u len=%u out_arglen=%u out_error=%d\n",
+			r_req->riq_id, r_req->index, r_req->in.opcode,
+			r_req->payload_flags, r_req->payload_capacity,
+			r_req->payload_len, r_req->out.arglen,
+			r_req->out.error);
 		return 0;
-	if (!(r_req->payload_flags & RFUSE_PAYLOAD_OUT))
+	}
+	if (!r_req->payload_capacity) {
+		pr_info("RFUSE_IMPORT_PAYLOAD skip reason=no_payload_capacity riq=%u req=%u opcode=%u flags=0x%x pages=%u len=%u out_arglen=%u out_error=%d\n",
+			r_req->riq_id, r_req->index, r_req->in.opcode,
+			r_req->payload_flags, rp->num_pages,
+			r_req->payload_len, r_req->out.arglen,
+			r_req->out.error);
 		return 0;
-	if (r_req->out.error)
+	}
+	if (r_req->payload_flags & RFUSE_PAYLOAD_FALLBACK) {
+		pr_info("RFUSE_IMPORT_PAYLOAD skip reason=fallback riq=%u req=%u opcode=%u flags=0x%x capacity=%u pages=%u len=%u out_arglen=%u out_error=%d\n",
+			r_req->riq_id, r_req->index, r_req->in.opcode,
+			r_req->payload_flags, r_req->payload_capacity,
+			rp->num_pages, r_req->payload_len,
+			r_req->out.arglen, r_req->out.error);
 		return 0;
+	}
+	if (!(r_req->payload_flags & RFUSE_PAYLOAD_OUT)) {
+		pr_info("RFUSE_IMPORT_PAYLOAD skip reason=not_payload_out riq=%u req=%u opcode=%u flags=0x%x capacity=%u pages=%u len=%u out_arglen=%u out_error=%d\n",
+			r_req->riq_id, r_req->index, r_req->in.opcode,
+			r_req->payload_flags, r_req->payload_capacity,
+			rp->num_pages, r_req->payload_len,
+			r_req->out.arglen, r_req->out.error);
+		return 0;
+	}
+	if (r_req->out.error) {
+		pr_info("RFUSE_IMPORT_PAYLOAD skip reason=out_error riq=%u req=%u opcode=%u flags=0x%x capacity=%u pages=%u len=%u out_arglen=%u out_error=%d\n",
+			r_req->riq_id, r_req->index, r_req->in.opcode,
+			r_req->payload_flags, r_req->payload_capacity,
+			rp->num_pages, r_req->payload_len,
+			r_req->out.arglen, r_req->out.error);
+		return 0;
+	}
 
 	actual = r_req->out.arglen;
 	requested = rfuse_requested_out_payload_len(r_req);
 	err = rfuse_payload_pages_capacity(rp, &page_capacity);
-	if (err)
+	if (err) {
+		pr_info("RFUSE_IMPORT_PAYLOAD error reason=bad_pages riq=%u req=%u opcode=%u flags=0x%x capacity=%u actual=%zu requested=%zu pages=%u err=%d\n",
+			r_req->riq_id, r_req->index, r_req->in.opcode,
+			r_req->payload_flags, r_req->payload_capacity,
+			actual, requested, rp->num_pages, err);
 		return err;
+	}
 	if (requested > r_req->payload_capacity ||
 	    requested > page_capacity ||
 	    actual > r_req->payload_capacity ||
 	    actual > requested ||
-	    actual > page_capacity)
+	    actual > page_capacity) {
+		pr_info("RFUSE_IMPORT_PAYLOAD error reason=size_mismatch riq=%u req=%u opcode=%u flags=0x%x capacity=%u actual=%zu requested=%zu page_capacity=%zu pages=%u\n",
+			r_req->riq_id, r_req->index, r_req->in.opcode,
+			r_req->payload_flags, r_req->payload_capacity,
+			actual, requested, page_capacity, rp->num_pages);
 		return -EIO;
+	}
 
 	remaining = actual;
 	riq = rfuse_get_specific_iqueue(r_req->fm->fc, r_req->riq_id);
@@ -688,6 +763,9 @@ void rfuse_iqueue_init(struct fuse_conn *fc, void *priv){
 		riq[i]->completes.kaddr = kmalloc_node(sizeof(struct rfuse_address_entry) * RFUSE_MAX_QUEUE_SIZE, GFP_KERNEL, node_id);
 		riq[i]->karg = kmalloc_node(sizeof(struct rfuse_arg)*RFUSE_MAX_QUEUE_SIZE * 2, GFP_KERNEL, node_id);
 		riq[i]->kreq = kmalloc_node(sizeof(struct rfuse_req)*RFUSE_MAX_QUEUE_SIZE * 2, GFP_KERNEL, node_id);
+		riq[i]->enq_to_deq_lat.size = sizeof(struct rfuse_enq_to_deq_latency);
+		riq[i]->enq_to_deq_lat.kaddr = kzalloc_node(riq[i]->enq_to_deq_lat.size,
+							     GFP_KERNEL, node_id);
 		if (rfuse_payload_pool_init(riq[i])) {
 			pr_err("RFUSE: failed to initialize payload pool for riq %d\n", i);
 		}
@@ -727,6 +805,7 @@ void rfuse_iqueue_release(struct fuse_conn *fc){
 		kfree(riq[i]->completes.kaddr);
 		kfree(riq[i]->karg);
 		kfree(riq[i]->kreq);
+		kfree(riq[i]->enq_to_deq_lat.kaddr);
 		rfuse_payload_pool_destroy(riq[i]);
 	
 		kfree(riq[i]->argbm.bitmap);
@@ -799,6 +878,9 @@ void *rfuse_validate_mmap_request(struct fuse_dev *fud, loff_t pgoff, size_t siz
 			break;
 		case RFUSE_PAYLOAD:
 			ptr = fud->fc->riq[riq_id]->payload.kaddr;
+			break;
+		case RFUSE_ENQ_TO_DEQ_LAT:
+			ptr = fud->fc->riq[riq_id]->enq_to_deq_lat.kaddr;
 			break;
 		default:
 			printk("Invalid map_queue argument\n");
@@ -1533,6 +1615,13 @@ static void rfuse_queue_request(struct rfuse_req *r_req){
 	entry->request = r_req->index;				// fill entry
 	if(!test_bit(FR_BACKGROUND, &r_req->flags)) // only increase the reference count for synchronous requests
 		__rfuse_get_request(r_req);
+	if ((r_req->in.opcode == FUSE_READ || r_req->in.opcode == FUSE_WRITE) &&
+	    riq->enq_to_deq_lat.kaddr &&
+	    r_req->index < RFUSE_MAX_QUEUE_SIZE * 2) {
+		struct rfuse_enq_to_deq_latency *lat = riq->enq_to_deq_lat.kaddr;
+
+		WRITE_ONCE(lat->enqueue_ns[r_req->index], ktime_get_ns());
+	}
 	rfuse_submit_pending_tail(riq);				// Commit entry
 	spin_unlock(&riq->lock);					// unlock
 	if(waitqueue_active(&riq->idle_user_waitq)){
@@ -1544,19 +1633,10 @@ static void rfuse_queue_request(struct rfuse_req *r_req){
 // PENDING QUEUE INSERT
 ssize_t rfuse_simple_request(struct rfuse_req *r_req){
 	ssize_t ret=0;
-	int err;
-
-	err = rfuse_prepare_payload(r_req, true, NULL, 0);
-	if (err)
-		return err;
 
 	rfuse_queue_request(r_req);
 	rfuse_request_wait_answer(r_req);
 	smp_rmb();
-
-	err = rfuse_import_payload(r_req);
-	if (err)
-		return err;
 
 	ret = r_req->out.error;
 	if (!ret && r_req->out_argvar) {
@@ -1616,16 +1696,6 @@ static bool rfuse_request_queue_background(struct rfuse_req *r_req)
 			set_bdi_congested(fm->sb->s_bdi, BLK_RW_SYNC);
 			set_bdi_congested(fm->sb->s_bdi, BLK_RW_ASYNC);
 		}
-    /* LDY: Async request merge */
-    /* Sync 요청는 merge 할 수 있는 요청이라고 하더라도, 애초에 이전 요청이 완료되야 다음 요청이 submit 된다.
-     * 하지만, async 요청은 이전 요청이 완료되지 않더라도 submit 할 수 있다.
-     * 그러므로 background queue에서 write 요청이 들어오면, 이전 tail entry를 꺼내서 offset을 확인
-     * 마지막 offset과 1이 차이가 난다면 바로 다음 chunk 이므로 요청을 하나로 합친다.
-     * 대신 최대로 늘릴 수 있는 건 1MiB, 왜냐하면 이건 제약이니까.
-     * 바로 구현하기 전에 helper 함수를 하나 추가해서, if 문으로 write 요청인지 확인, offset을 확인, 1이 차이가 나는지 확인 후
-     * merge가 가능하면, matach log 출력, 불가능하면 mismatch log 출력한다.
-     * 이게 가능하려면, 현재 async scheduling 기법인 round robin을 CPU id 기반으로 돌려야 한다.
-     */
 		list_add_tail(&bg_entry->list, &riq->bg_queue); // Add it to background queue
 		rfuse_flush_bg_queue(fc, r_req->riq_id);
 		queued = true;
@@ -1648,6 +1718,9 @@ void rfuse_request_end(struct rfuse_req *r_req){
 	struct fuse_mount *fm = r_req->fm;
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
+	u64 start_ns;
+	u64 copy_start_ns;
+	int err;
 
 	GET_TIMESTAMPS(6)
 	if(test_bit(FR_BACKGROUND, &r_req->flags)){
@@ -1677,8 +1750,16 @@ void rfuse_request_end(struct rfuse_req *r_req){
 		spin_unlock(&riq->bg_lock);
 	}
 
-	if (r_req->in.opcode == FUSE_READ) {
-		int err = rfuse_import_payload(r_req);
+	if (r_req->in.opcode == FUSE_READ && r_req->payload_capacity) {
+		copy_start_ns = ktime_get_ns();
+		err = rfuse_import_payload(r_req);
+		if (riq->enq_to_deq_lat.kaddr) {
+			struct rfuse_enq_to_deq_latency *lat;
+
+			lat = riq->enq_to_deq_lat.kaddr;
+			rfuse_latency_stat_record(&lat->copy_to_page_stat,
+						  ktime_get_ns() - copy_start_ns);
+		}
 		if (err && !r_req->out.error)
 			r_req->out.error = err;
 	}
@@ -1686,7 +1767,14 @@ void rfuse_request_end(struct rfuse_req *r_req){
 	if (test_bit(FR_ASYNC, &r_req->flags))
 		r_req->end(r_req->fm, r_req, r_req->out.error);
 
+	start_ns = ktime_get_ns();
 	rfuse_put_request(r_req);
+	if (riq->enq_to_deq_lat.kaddr) {
+		struct rfuse_enq_to_deq_latency *lat = riq->enq_to_deq_lat.kaddr;
+
+		rfuse_latency_stat_record(&lat->free_request_stat,
+					  ktime_get_ns() - start_ns);
+	}
 }
 
 
