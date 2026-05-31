@@ -122,6 +122,11 @@ struct fuse_inode {
 
 			/* List of writepage requestst (pending or sent) */
 			struct rb_root writepages;
+
+			struct rb_root_cached async_wrt_range;
+			bool rfuse_async_write_pending;
+			loff_t rfuse_async_write_start;
+			loff_t rfuse_async_write_end;
 		};
 
 		/* readdir cache (directory only) */
@@ -310,6 +315,7 @@ struct rfuse_io_args {
 	struct rfuse_pages rp;
 	struct fuse_io_priv *io;
 	struct fuse_file *ff;
+	void *end_args;
 };
 
 #define FUSE_ARGS(args) struct fuse_args args = {}

@@ -210,6 +210,7 @@ struct rfuse_iqueue{
 
 	/** Shared payload buffer **/
 	struct rfuse_payload_map payload;
+	uint32_t largest_free;
 
 	/** enqueue-to-dequeue latency side table **/
 	struct rfuse_latency_map enq_to_deq_lat;

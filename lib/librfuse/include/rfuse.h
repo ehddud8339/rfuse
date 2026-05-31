@@ -314,6 +314,7 @@ struct rfuse_iqueue{
 	struct rfuse_req *ureq;
 	struct rfuse_req *kreq;
 	struct rfuse_payload_map payload;
+	uint32_t largest_free;
 	struct rfuse_latency_map enq_to_deq_lat;
 	
 	/** unused **/

@@ -31,14 +31,21 @@
 #define RFUSE_SELECTION_ALGO 2
 atomic_t rr_id = ATOMIC_INIT(0);
 
-#define RFUSE_NUM_NUMA_GROUPS 2
-#define RFUSE_NUMA_GROUP_SIZE 20
-
+#define RFUSE_NUM_NUMA_GROUPS 1
+#define RFUSE_NUMA_GROUP_SIZE 32
+/*
 static const int numa_group[RFUSE_NUM_NUMA_GROUPS][RFUSE_NUMA_GROUP_SIZE] = {
   { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
     20, 21, 22, 23, 24, 25, 26, 27, 28, 29 },
   { 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
     30, 31, 32, 33, 34, 35, 36, 37, 38, 39 },
+};
+*/
+static const int numa_group[RFUSE_NUM_NUMA_GROUPS][RFUSE_NUMA_GROUP_SIZE] = {
+  { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+    10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+    20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
+    30, 31 },
 };
 
 static void rfuse_latency_min_update(u64 *value, u64 sample)
@@ -127,6 +134,19 @@ static bool rfuse_payload_find_extent(struct rfuse_iqueue *riq, size_t need)
 	return false;
 }
 
+static void rfuse_payload_update_largest_free_locked(struct rfuse_iqueue *riq)
+{
+	struct rfuse_payload_extent *extent;
+	u32 largest = 0;
+
+	list_for_each_entry(extent, &riq->payload_free, list) {
+		if (extent->len > largest)
+			largest = extent->len;
+	}
+
+	riq->largest_free = largest;
+}
+
 static void rfuse_payload_merge_free(struct rfuse_iqueue *riq)
 {
 	struct rfuse_payload_extent *cur;
@@ -149,6 +169,8 @@ static void rfuse_payload_merge_free(struct rfuse_iqueue *riq)
 next_extent:
 		cur = next;
 	}
+
+	rfuse_payload_update_largest_free_locked(riq);
 }
 
 static void rfuse_payload_insert_free_extent(struct rfuse_iqueue *riq,
@@ -192,6 +214,7 @@ static int rfuse_payload_alloc_locked(struct rfuse_req *r_req, size_t need,
 		}
 
 		riq->payload.used += need;
+		rfuse_payload_update_largest_free_locked(riq);
 		r_req->payload_offset = active->offset;
 		r_req->payload_capacity = need;
 		r_req->payload_generation = active->generation;
@@ -617,6 +640,7 @@ static int rfuse_payload_pool_init(struct rfuse_iqueue *riq)
 	riq->payload.uaddr = NULL;
 	riq->payload.size = RFUSE_PAYLOAD_POOL_SIZE;
 	riq->payload.used = 0;
+	riq->largest_free = 0;
 	spin_lock_init(&riq->payload_lock);
 	init_waitqueue_head(&riq->payload_waitq);
 	INIT_LIST_HEAD(&riq->payload_free);
@@ -636,6 +660,7 @@ static int rfuse_payload_pool_init(struct rfuse_iqueue *riq)
 	extent->generation = 0;
 	INIT_LIST_HEAD(&extent->list);
 	list_add_tail(&extent->list, &riq->payload_free);
+	riq->largest_free = extent->len;
 
 	return 0;
 }
@@ -971,11 +996,31 @@ static int select_numa_aware(struct fuse_conn *fc)
   return cpu_id;
 }
 
-struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc){
+static int select_numa_aware_payload_version(struct fuse_conn *fc, size_t need_len)
+{
+  int numa_id;
+  int start_idx;
+  int i;
+  int cpu_id = select_cpu_id();
+
+  numa_id = find_numa_and_index(cpu_id, &start_idx);
+
+  for (i = 1; i < RFUSE_NUMA_GROUP_SIZE; i++) {
+    int riq_id = numa_group[numa_id][(start_idx + i) % RFUSE_NUMA_GROUP_SIZE];
+    struct rfuse_iqueue *riq = fc->riq[riq_id];
+
+    if (need_len < READ_ONCE(riq->largest_free))
+      return riq_id;
+  }
+
+  return cpu_id;
+}
+
+struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc, size_t need_len){
 	int id = 0;
 
 	// id = select_round_robin(fc);
-  id = select_numa_aware(fc);
+  id = need_len ? select_numa_aware_payload_version(fc, need_len) : select_numa_aware(fc);
 
 	return fc->riq[id];
 }
@@ -1363,15 +1408,15 @@ static uint32_t try_rfuse_get_request_buffer(struct fuse_mount *fm, int riq_id){
 }
 
 static struct rfuse_req *try_rfuse_request_alloc(struct fuse_mount *fm,
-						 size_t payload_len,
+						 size_t need_len,
 						 spinlock_t *file_lock){
 	struct fuse_conn *fc = fm->fc;
   /*
-	struct rfuse_iqueue *riq = payload_len ?
-		rfuse_get_iqueue_with_payload_space(fc, payload_len) :
-		rfuse_get_iqueue_for_async(fc);
+	struct rfuse_iqueue *riq = need_len ?
+		rfuse_get_iqueue_with_payload_space(fc, need_len) :
+		rfuse_get_iqueue_for_async(fc, need_len);
   */
-  struct rfuse_iqueue *riq = rfuse_get_iqueue_for_async(fc);
+  struct rfuse_iqueue *riq = rfuse_get_iqueue_for_async(fc, need_len);
 	int riq_id = riq->riq_id;
 	struct rfuse_req *r_req = NULL;
 	uint32_t req_index;
