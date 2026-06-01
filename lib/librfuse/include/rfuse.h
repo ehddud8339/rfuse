@@ -24,6 +24,7 @@
 #include <atomic>
 using namespace std;
 #else
+#include <stdbool.h>
 #include <stdatomic.h>
 #endif
 
@@ -147,6 +148,9 @@ extern "C" {
 #define RFUSE_PAYLOAD_OUT       (1U << 1)
 #define RFUSE_PAYLOAD_FALLBACK  (1U << 2)
 
+struct rfuse_pages;
+struct fuse_mount;
+
 struct rfuse_req{
 	/** Request input header **/
 	struct{
@@ -188,23 +192,40 @@ struct rfuse_req{
 		uint8_t argument_space[112];
 	}args; // 112
 
+	uint32_t payload_page_index;
+	uint32_t payload_page_count;
 	uint32_t payload_offset;
 	uint32_t payload_len;
 	uint32_t payload_capacity;
-	uint32_t payload_generation;
 	uint32_t payload_flags;
-	
-	uint64_t padding[2];
+
+	bool force:1;
+	bool noreply:1;
+	bool nocreds:1;
+	bool in_pages:1;
+	bool out_pages:1;
+	bool out_argvar:1;
+	bool page_zeroing:1;
+	bool page_replace:1;
+	bool may_block:1;
+	bool payload_reserved:1;
+
+	struct rfuse_pages *rp;
+	void (*end)(struct fuse_mount *fm, struct rfuse_req *r_req, int error);
 };
 
 #ifdef __cplusplus
-static_assert(sizeof(struct rfuse_req) == 272, "rfuse_req ABI drift");
-static_assert(offsetof(struct rfuse_req, riq_id) == 68, "rfuse_req riq_id offset drift");
-static_assert(offsetof(struct rfuse_req, payload_offset) == 232, "rfuse_req payload offset drift");
+	static_assert(sizeof(struct rfuse_req) == 280, "rfuse_req ABI drift");
+	static_assert(offsetof(struct rfuse_req, riq_id) == 68, "rfuse_req riq_id offset drift");
+	static_assert(offsetof(struct rfuse_req, payload_page_index) == 232, "rfuse_req payload page index offset drift");
+	static_assert(offsetof(struct rfuse_req, payload_offset) == 240, "rfuse_req payload offset drift");
+	static_assert(offsetof(struct rfuse_req, rp) == 264, "rfuse_req rp offset drift");
 #else
-_Static_assert(sizeof(struct rfuse_req) == 272, "rfuse_req ABI drift");
-_Static_assert(offsetof(struct rfuse_req, riq_id) == 68, "rfuse_req riq_id offset drift");
-_Static_assert(offsetof(struct rfuse_req, payload_offset) == 232, "rfuse_req payload offset drift");
+	_Static_assert(sizeof(struct rfuse_req) == 280, "rfuse_req ABI drift");
+	_Static_assert(offsetof(struct rfuse_req, riq_id) == 68, "rfuse_req riq_id offset drift");
+	_Static_assert(offsetof(struct rfuse_req, payload_page_index) == 232, "rfuse_req payload page index offset drift");
+	_Static_assert(offsetof(struct rfuse_req, payload_offset) == 240, "rfuse_req payload offset drift");
+	_Static_assert(offsetof(struct rfuse_req, rp) == 264, "rfuse_req rp offset drift");
 #endif
 
 struct rfuse_interrupt_entry{
@@ -271,6 +292,7 @@ struct rfuse_payload_map {
  **/
 struct rfuse_iqueue{
 	int riq_id;
+	uint32_t no_touch_padding_0;
 	/** Pending queue **/
 	struct ring_buffer_1 pending;
 	/** Interrupt queue **/
@@ -286,21 +308,56 @@ struct rfuse_iqueue{
 	struct rfuse_req *ureq;
 	struct rfuse_req *kreq;
 	struct rfuse_payload_map payload;
-	
-	/** unused **/
-	const unsigned connected;
-	const int garbage;
-	const uint64_t reqctr;
+
+	unsigned connected;
+	char no_touch_waitq[24];
+	uint32_t no_touch_lock;
+	uint32_t no_touch_padding_1;
+	uint64_t reqctr;
 	const void *priv;
-	const struct{
+	struct{
 		unsigned long bitmap_size;
+		unsigned full;
+		uint32_t no_touch_padding_2;
 		unsigned long *bitmap;
 	}argbm;
-	const struct{
+	struct{
 		unsigned long bitmap_size;
+		unsigned full;
+		uint32_t no_touch_padding_3;
 		unsigned long *bitmap;
 	}reqbm;
+	char no_touch_idle_user_waitq[24];
+	int num_sync_sleeping;
+	uint32_t no_touch_padding_4;
+	char no_touch_bg_queue[16];
+	uint32_t no_touch_bg_lock;
+	unsigned max_background;
+	unsigned congestion_threshold;
+	unsigned num_background;
+	unsigned active_background;
+	int blocked;
+	char no_touch_blocked_waitq[24];
+	uint32_t no_touch_payload_lock;
+	uint32_t no_touch_padding_5;
+	char no_touch_payload_waitq[24];
+	unsigned long *payload_bitmap;
+	uint32_t payload_page_count;
+	uint32_t payload_free_pages;
+	uint32_t payload_search_hint;
 };
+
+#ifdef __cplusplus
+static_assert(sizeof(struct rfuse_iqueue) == 448, "rfuse_iqueue ABI drift");
+static_assert(offsetof(struct rfuse_iqueue, connected) == 192, "rfuse_iqueue connected offset drift");
+static_assert(offsetof(struct rfuse_iqueue, payload_bitmap) == 424, "rfuse_iqueue payload bitmap offset drift");
+static_assert(offsetof(struct rfuse_iqueue, payload_page_count) == 432, "rfuse_iqueue payload page count offset drift");
+#else
+_Static_assert(sizeof(struct rfuse_iqueue) == 448, "rfuse_iqueue ABI drift");
+_Static_assert(offsetof(struct rfuse_iqueue, connected) == 192, "rfuse_iqueue connected offset drift");
+_Static_assert(offsetof(struct rfuse_iqueue, payload_bitmap) == 424, "rfuse_iqueue payload bitmap offset drift");
+_Static_assert(offsetof(struct rfuse_iqueue, payload_page_count) == 432, "rfuse_iqueue payload page count offset drift");
+#endif
 
 struct rfuse_loop_args{
 	struct fuse_session *se;

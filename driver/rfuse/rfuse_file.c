@@ -1212,6 +1212,57 @@ out_put_pages:
 
 	return err;
 }
+
+static int rfuse_write_pages_chunk(struct kiocb *iocb,
+				   struct address_space *mapping,
+				   struct iov_iter *ii, loff_t pos,
+				   size_t *written)
+{
+	struct inode *inode = mapping->host;
+	struct fuse_conn *fc = get_fuse_conn(inode);
+	struct fuse_mount *fm = get_fuse_mount(inode);
+	struct rfuse_io_args ria = {};
+	struct rfuse_pages *rp = &ria.rp;
+	struct rfuse_req *r_req;
+	struct fuse_write_out *out;
+	unsigned int nr_pages;
+	ssize_t count;
+	int err = 0;
+
+	*written = 0;
+
+	nr_pages = rfuse_wr_pages(pos, iov_iter_count(ii), fc->max_pages);
+	rp->pages = fuse_pages_alloc(nr_pages, GFP_KERNEL, &rp->descs);
+	if (!rp->pages)
+		return -ENOMEM;
+
+	r_req = rfuse_get_req(fm, false, false, 0);
+	if (IS_ERR(r_req)) {
+		kfree(rp->pages);
+		return PTR_ERR(r_req);
+	}
+	ria.r_req = r_req;
+
+	count = rfuse_fill_write_pages(&ria, mapping, ii, pos, nr_pages);
+	if (count <= 0) {
+		err = count;
+		goto out_put_req;
+	}
+
+	err = rfuse_send_write_pages(&ria, iocb, inode, pos, count);
+	if (err)
+		goto out_put_req;
+
+	out = (struct fuse_write_out *)&ria.r_req->args;
+	*written = out->size;
+	if (*written != count)
+		err = -EIO;
+
+out_put_req:
+	rfuse_put_request(r_req);
+	kfree(rp->pages);
+	return err;
+}
 #endif
 
 #if LDY_NO_PAGE_CACHE
@@ -1255,76 +1306,6 @@ static void rfuse_payload_async_wait_and_register(struct rfuse_payload_write_ctx
 static void rfuse_payload_async_unregister(struct rfuse_payload_write_ctx *ctx,
 					   bool update_size_unstable,
 					   bool *clear_unstable);
-
-static ssize_t rfuse_send_write_payload_sync(struct kiocb *iocb,
-					     struct rfuse_req *r_req,
-					     struct iov_iter *ii, loff_t pos,
-					     size_t count)
-{
-	struct file *file = iocb->ki_filp;
-	struct inode *inode = file->f_mapping->host;
-	struct fuse_inode *fi = get_fuse_inode(inode);
-	struct fuse_file *ff = file->private_data;
-	struct fuse_mount *fm = ff->fm;
-	struct rfuse_payload_write_ctx ctx = {
-		.inode = inode,
-	};
-	struct fuse_write_in *in;
-	struct fuse_write_out *out;
-	ssize_t copied = 0;
-	bool clear_unstable;
-	int err;
-
-	ctx.range.start = pos;
-	ctx.range.last = rfuse_async_range_end(pos, count);
-	rfuse_payload_async_wait_and_register(&ctx);
-
-	err = rfuse_reserve_payload(r_req, count, RFUSE_PAYLOAD_IN, true);
-	if (err)
-		goto out_put_req;
-
-	copied = rfuse_payload_copy_from_iter(r_req, ii, count);
-	if (copied < 0) {
-		err = copied;
-		goto out_put_req;
-	}
-	if (!copied) {
-		err = -EFAULT;
-		goto out_put_req;
-	}
-
-	in = (struct fuse_write_in *)&r_req->args;
-	in->fh = ff->fh;
-	in->offset = pos;
-	in->size = copied;
-	in->flags = rfuse_write_flags(iocb);
-	if (fm->fc->handle_killpriv_v2 && !capable(CAP_FSETID))
-		in->write_flags |= FUSE_WRITE_KILL_SUIDGID;
-
-	r_req->in.opcode = FUSE_WRITE;
-	r_req->in.nodeid = ff->nodeid;
-	r_req->in.arglen[0] = copied;
-
-	err = rfuse_simple_request(r_req);
-	out = (struct fuse_write_out *)&r_req->args;
-	if (!err && out->size > copied)
-		err = -EIO;
-	if (!err) {
-		int invalidate_err;
-
-		invalidate_err = rfuse_invalidate_written_cache(file->f_mapping,
-								pos, out->size);
-		if (invalidate_err)
-			mapping_set_error(file->f_mapping, invalidate_err);
-		copied = out->size;
-	}
-
-out_put_req:
-	rfuse_put_request(r_req);
-	rfuse_payload_async_unregister(&ctx, false, &clear_unstable);
-	wake_up(&fi->page_waitq);
-	return err ?: copied;
-}
 
 static void rfuse_payload_async_wait_and_register(struct rfuse_payload_write_ctx *ctx)
 {
@@ -1418,10 +1399,10 @@ static void rfuse_payload_write_complete_req(struct fuse_mount *fm,
 	rfuse_payload_write_ctx_free(ctx);
 }
 
-static ssize_t rfuse_send_write_payload_async(struct kiocb *iocb,
-					      struct rfuse_req *r_req,
-					      struct iov_iter *ii, loff_t pos,
-					      size_t count)
+static ssize_t rfuse_send_write_payload(struct kiocb *iocb,
+					struct rfuse_req *r_req,
+					struct iov_iter *ii, loff_t pos,
+					size_t count)
 {
 	struct file *file = iocb->ki_filp;
 	struct inode *inode = file->f_mapping->host;
@@ -1435,7 +1416,10 @@ static ssize_t rfuse_send_write_payload_async(struct kiocb *iocb,
 	u64 path_lat_start;
 	int err;
 
+	path_lat_start = ktime_get_ns();
 	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_CTX_KZALLOC,
+			      ktime_get_ns() - path_lat_start);
 	if (!ctx) {
 		err = -ENOMEM;
 		goto out_put_req;
@@ -1454,6 +1438,16 @@ static ssize_t rfuse_send_write_payload_async(struct kiocb *iocb,
 	rfuse_payload_async_wait_and_register(ctx);
 	rfuse_path_lat_record(RFUSE_PATH_LAT_ASYNC_WAIT_REGISTER,
 			      ktime_get_ns() - path_lat_start);
+
+	in = (struct fuse_write_in *)&r_req->args;
+	in->fh = ff->fh;
+	in->offset = pos;
+	in->flags = rfuse_write_flags(iocb);
+	if (fm->fc->handle_killpriv_v2 && !capable(CAP_FSETID))
+		in->write_flags |= FUSE_WRITE_KILL_SUIDGID;
+
+	r_req->in.opcode = FUSE_WRITE;
+	r_req->in.nodeid = ff->nodeid;
 
 	path_lat_start = ktime_get_ns();
 	err = rfuse_reserve_payload(r_req, count, RFUSE_PAYLOAD_IN, true);
@@ -1477,16 +1471,7 @@ static ssize_t rfuse_send_write_payload_async(struct kiocb *iocb,
 
 	ctx->count = copied;
 
-	in = (struct fuse_write_in *)&r_req->args;
-	in->fh = ff->fh;
-	in->offset = pos;
 	in->size = copied;
-	in->flags = rfuse_write_flags(iocb);
-	if (fm->fc->handle_killpriv_v2 && !capable(CAP_FSETID))
-		in->write_flags |= FUSE_WRITE_KILL_SUIDGID;
-
-	r_req->in.opcode = FUSE_WRITE;
-	r_req->in.nodeid = ff->nodeid;
 	r_req->in.arglen[0] = copied;
 	r_req->rp = &ctx->rp;
 	r_req->end = rfuse_payload_write_complete_req;
@@ -1517,50 +1502,16 @@ out_put_req:
 	return err;
 }
 
-static void rfuse_wait_before_payload_sync_write(struct kiocb *iocb,
-						struct inode *inode,
-						loff_t pos, size_t count)
-{
-	unsigned int flags = rfuse_write_flags(iocb);
-
-	if (!count)
-		return;
-
-	if ((iocb->ki_flags & IOCB_APPEND) || (flags & O_APPEND)) {
-		rfuse_wait_async_writes(inode);
-		return;
-	}
-
-	rfuse_wait_async_write(inode, pos, count);
-}
-
-static struct rfuse_req *rfuse_get_payload_write_req(struct fuse_mount *fm,
-						     bool async_allowed,
-						     size_t count)
-{
-	if (async_allowed)
-		return try_rfuse_wt_get_req(fm, true, false, count, NULL);
-
-	return rfuse_get_req(fm, false, false, count);
-}
-
-static int rfuse_current_cpu_riq_id(void)
-{
-	return task_cpu(current) % RFUSE_NUM_IQUEUE;
-}
-
-static ssize_t rfuse_perform_payload_write_async(struct kiocb *iocb,
-						 struct address_space *mapping,
-						 struct iov_iter *ii, loff_t pos)
+static ssize_t rfuse_perform_write_async(struct kiocb *iocb,
+					 struct address_space *mapping,
+					 struct iov_iter *ii, loff_t pos)
 {
 	struct inode *inode = mapping->host;
 	struct fuse_conn *fc = get_fuse_conn(inode);
 	struct fuse_mount *fm = get_fuse_mount(inode);
 	struct fuse_inode *fi = get_fuse_inode(inode);
 	size_t write_count = iov_iter_count(ii);
-	bool async_allowed = rfuse_async_allowed(iocb);
 	bool async_used = false;
-	bool sync_waited = false;
 	int err = 0;
 	ssize_t res = 0;
 
@@ -1568,14 +1519,16 @@ static ssize_t rfuse_perform_payload_write_async(struct kiocb *iocb,
 		set_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
 
 	do {
+		struct rfuse_iqueue *payload_riq;
 		struct rfuse_req *r_req;
-		bool async;
 		ssize_t count;
 		u64 path_lat_start;
 		size_t bytes = min_t(size_t, iov_iter_count(ii), fc->max_write);
 
+		payload_riq = rfuse_get_iqueue_for_async(fc, bytes);
 		path_lat_start = ktime_get_ns();
-		r_req = rfuse_get_payload_write_req(fm, async_allowed, bytes);
+		r_req = try_rfuse_get_req_on_riq(fm, true, false,
+						 payload_riq->riq_id, NULL);
 		rfuse_path_lat_record(RFUSE_PATH_LAT_TRY_GET_REQ,
 				      ktime_get_ns() - path_lat_start);
 		if (IS_ERR(r_req)) {
@@ -1583,26 +1536,11 @@ static ssize_t rfuse_perform_payload_write_async(struct kiocb *iocb,
 			break;
 		}
 
-		async = async_allowed &&
-			r_req->riq_id != rfuse_current_cpu_riq_id();
-		if (async) {
-			async_used = true;
-			count = rfuse_send_write_payload_async(iocb, r_req, ii,
-							       pos, bytes);
-		} else {
-			clear_bit(FR_BACKGROUND, &r_req->flags);
-			if (!sync_waited) {
-				rfuse_wait_before_payload_sync_write(iocb, inode,
-								     pos,
-								     write_count);
-				sync_waited = true;
-			}
-			count = rfuse_send_write_payload_sync(iocb, r_req, ii,
-							      pos, bytes);
-		}
+		count = rfuse_send_write_payload(iocb, r_req, ii, pos, bytes);
 		if (count <= 0) {
 			err = count;
 		} else {
+			async_used = true;
 			res += count;
 			pos += count;
 
@@ -1624,11 +1562,9 @@ static ssize_t rfuse_perform_payload_write_async(struct kiocb *iocb,
 
 ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, struct iov_iter *ii, loff_t pos){
 #if LDY_NO_PAGE_CACHE
-	return rfuse_perform_payload_write_async(iocb, mapping, ii, pos);
+	return rfuse_perform_write_async(iocb, mapping, ii, pos);
 #else
 	struct inode *inode = mapping->host;
-	struct fuse_conn *fc = get_fuse_conn(inode);
-	struct fuse_mount *fm = get_fuse_mount(inode);
 	struct fuse_inode *fi = get_fuse_inode(inode);
 	int err = 0;
 	ssize_t res = 0;
@@ -1637,45 +1573,13 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 		set_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
 
 	do {
-		ssize_t count;
-		struct rfuse_io_args ria = {};
-		struct rfuse_pages *rp = &ria.rp;
-		struct rfuse_req *r_req;
-		unsigned int nr_pages = rfuse_wr_pages(pos, iov_iter_count(ii), fc->max_pages);
+		size_t written = 0;
 
-		rp->pages = fuse_pages_alloc(nr_pages, GFP_KERNEL, &rp->descs);
-		if (!rp->pages) {
-			err = -ENOMEM;
-			break;
+		err = rfuse_write_pages_chunk(iocb, mapping, ii, pos, &written);
+		if (written) {
+			res += written;
+			pos += written;
 		}
-
-		r_req = rfuse_get_req(fm, false, false, 0);
-		if (IS_ERR(r_req)) {
-			err = PTR_ERR(r_req);
-			kfree(rp->pages);
-			break;
-		}
-		ria.r_req = r_req;
-
-		count = rfuse_fill_write_pages(&ria, mapping, ii, pos, nr_pages);
-		if (count <= 0) {
-			err = count;
-		} else {
-			err = rfuse_send_write_pages(&ria, iocb, inode, pos, count);
-			if (!err) {
-				struct fuse_write_out *out = (struct fuse_write_out *)&ria.r_req->args;
-				size_t num_written = out->size;
-
-				res += num_written;
-				pos += num_written;
-
-				/* break out of the loop on short write */
-				if (num_written != count)
-					err = -EIO;
-			}
-		}
-		rfuse_put_request(r_req); 
-		kfree(rp->pages);
 	} while (!err && iov_iter_count(ii));
 
 	if (res > 0)
@@ -2650,8 +2554,8 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file,
 
 	rfuse_wait_async_write(file_inode(file), pos, count);
 
-	if (fm->fc->async_read)
-  //if (is_async)
+	//if (fm->fc->async_read)
+  if (is_async)
 		r_req = try_rfuse_get_req(fm, true, false, count, NULL);
 	else
 		r_req = rfuse_get_req(fm, false, false, count);
@@ -2683,20 +2587,21 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file,
 	}
 	WARN_ON((loff_t) (pos + count) < 0);
 
+#if !LDY_NO_PAYLOAD
+	err = rfuse_prepare_payload(r_req, true);
+	if (err) {
+		rfuse_readpages_end(fm, r_req, err);
+		rfuse_put_request(r_req);
+		return;
+	}
+#endif
+
 	rfuse_read_args_fill(ria, file, pos, count, FUSE_READ);
 	ria->read.attr_ver = fuse_get_attr_version(fm->fc);
-	//if (is_async) {
-	if (fm->fc->async_read) {
+	if (is_async) {
+	// if (fm->fc->async_read) {
 		ria->ff = rfuse_file_get(ff);
 		r_req->end = rfuse_readpages_end;
-#if !LDY_NO_PAYLOAD
-		err = rfuse_prepare_payload(r_req, true);
-		if (err) {
-			rfuse_readpages_end(fm, r_req, err);
-			rfuse_put_request(r_req);
-			return;
-		}
-#endif
 		err = rfuse_simple_background(fm, r_req);
 		if (!err)
 			return;
@@ -2710,7 +2615,7 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file,
 	rfuse_readpages_end(fm, r_req, err);
 	rfuse_put_request(r_req);
 }
-/*
+
 void rfuse_readahead(struct readahead_control *rac)
 {
 	struct inode *inode = rac->mapping->host;
@@ -2766,8 +2671,8 @@ void rfuse_readahead(struct readahead_control *rac)
 		rfuse_send_readpages(ria, rac->file, is_async);
 	}
 }
-*/
 
+/*
 void rfuse_readahead(struct readahead_control *rac)
 {
 	struct inode *inode = rac->mapping->host;
@@ -2804,7 +2709,7 @@ void rfuse_readahead(struct readahead_control *rac)
 		rfuse_send_readpages(ria, rac->file, 1);
 	}
 }
-
+*/
 
 static ssize_t rfuse_send_read(struct rfuse_io_args *ria, loff_t pos, size_t count, fl_owner_t owner)
 {

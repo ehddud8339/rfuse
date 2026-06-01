@@ -18,6 +18,7 @@
 #include <sys/ioctl.h>
 #include <assert.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <sched.h>
 
 /* Environment var controlling the thread stack size */
@@ -425,7 +426,7 @@ void *rfuse_session_loop_mt_mriq(void *data)
 	if(se->error != 0)
 		err = se->error;
 
-	return (void *)err;
+	return (void *)(intptr_t)err;
 }
 
 int fuse_session_loop_mt_32(struct fuse_session *se, struct fuse_loop_config *config)
@@ -448,9 +449,12 @@ int fuse_session_loop_mt_32(struct fuse_session *se, struct fuse_loop_config *co
 
 	if(res) {
 		// pthread_create is failed at some point
+		void *thread_ret;
+
 		stop_point = i;
 		for(i = 0; i < stop_point; i++) {
-			pthread_join(mw[i].main_thread_id, (void **)&err);
+			pthread_join(mw[i].main_thread_id, &thread_ret);
+			err = (int)(intptr_t)thread_ret;
 		}
 	} else {
 		// All pthread_create() succeeds

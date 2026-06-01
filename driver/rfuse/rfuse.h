@@ -42,7 +42,6 @@ enum rfuse_sched_mode {
 
 #define RFUSE_PAYLOAD_IN        (1U << 0)
 #define RFUSE_PAYLOAD_OUT       (1U << 1)
-#define RFUSE_PAYLOAD_FALLBACK  (1U << 2)
 
 struct rfuse_req{
 	/** Request input header **/
@@ -82,10 +81,11 @@ struct rfuse_req{
 		uint8_t argument_space[112];
 	}args; // 112
 
+	uint32_t payload_page_index;
+	uint32_t payload_page_count;
 	uint32_t payload_offset;
 	uint32_t payload_len;
 	uint32_t payload_capacity;
-	uint32_t payload_generation;
 	uint32_t payload_flags;
 
 	bool force:1;
@@ -97,6 +97,7 @@ struct rfuse_req{
 	bool page_zeroing:1;
 	bool page_replace:1;
 	bool may_block:1;
+	bool payload_reserved:1;
 
 	struct rfuse_pages *rp;
 	void (*end)(struct fuse_mount *fm, struct rfuse_req *r_req, int error);
@@ -238,13 +239,18 @@ struct rfuse_iqueue{
 	/** waitq for congested asynchronous requests*/
 	wait_queue_head_t blocked_waitq;
 
-	/** dynamic payload extent allocator */
+	/*
+	 * Shared payload allocator state, protected by payload_lock.
+	 * payload_bitmap is the allocator source of truth.
+	 * payload_free_pages is a cached aggregate counter for fast
+	 * rejection/debugging only, and payload_search_hint is advisory only.
+	 */
 	spinlock_t payload_lock;
 	wait_queue_head_t payload_waitq;
-	struct list_head payload_free;
-	struct list_head payload_active;
-	uint32_t payload_next_generation;
-	uint32_t payload_largest_free;
+	unsigned long *payload_bitmap;
+	uint32_t payload_page_count;
+	uint32_t payload_free_pages;
+	uint32_t payload_search_hint;
 };
 
 #endif

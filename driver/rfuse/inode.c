@@ -61,10 +61,16 @@ struct rfuse_path_lat_stat {
 static struct rfuse_path_lat_stat rfuse_path_lat_stats[RFUSE_PATH_LAT_NR];
 
 static const char * const rfuse_path_lat_names[RFUSE_PATH_LAT_NR] = {
+	[RFUSE_PATH_LAT_WRITE_CTX_KZALLOC] =
+		"rfuse_payload_write_ctx_kzalloc",
 	[RFUSE_PATH_LAT_ASYNC_WAIT_REGISTER] =
 		"rfuse_payload_async_wait_and_register",
-	[RFUSE_PATH_LAT_TRY_GET_REQ] = "try_rfuse_wt_get_req",
+	[RFUSE_PATH_LAT_TRY_GET_REQ] = "try_rfuse_get_req",
 	[RFUSE_PATH_LAT_RESERVE_PAYLOAD] = "rfuse_reserve_payload",
+	[RFUSE_PATH_LAT_PAYLOAD_RESERVE_LOCKED] =
+		"rfuse_payload_reserve_locked",
+	[RFUSE_PATH_LAT_PAYLOAD_WAIT_INTERRUPTIBLE] =
+		"rfuse_payload_wait_event_interruptible",
 	[RFUSE_PATH_LAT_COPY_FROM_ITER] = "rfuse_payload_copy_from_iter",
 	[RFUSE_PATH_LAT_SIMPLE_BACKGROUND] = "rfuse_simple_background",
 };

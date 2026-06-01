@@ -68,9 +68,12 @@ extern unsigned max_user_bgreq;
 extern unsigned max_user_congthresh;
 
 enum rfuse_path_lat_point {
+	RFUSE_PATH_LAT_WRITE_CTX_KZALLOC,
 	RFUSE_PATH_LAT_ASYNC_WAIT_REGISTER,
 	RFUSE_PATH_LAT_TRY_GET_REQ,
 	RFUSE_PATH_LAT_RESERVE_PAYLOAD,
+	RFUSE_PATH_LAT_PAYLOAD_RESERVE_LOCKED,
+	RFUSE_PATH_LAT_PAYLOAD_WAIT_INTERRUPTIBLE,
 	RFUSE_PATH_LAT_COPY_FROM_ITER,
 	RFUSE_PATH_LAT_SIMPLE_BACKGROUND,
 	RFUSE_PATH_LAT_NR,
@@ -1445,6 +1448,8 @@ void rfuse_extract_complete_head(struct rfuse_iqueue *riq);
 
 // ALLOCATE NEW REQUEST AND ARGUMENTS
 void rfuse_put_request(struct rfuse_req *req);
+struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc,
+						size_t payload_len);
 struct rfuse_req *rfuse_get_req(struct fuse_mount *fm, bool for_background,
 				bool force, size_t payload_len);
 uint32_t rfuse_get_request_buffer(struct fuse_mount *fm, int riq_id);
@@ -1455,10 +1460,9 @@ void rfuse_put_argument_buffer(struct fuse_mount *fm, uint32_t arg_index, int ri
 struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm,
 				    bool for_background, bool force,
 				    size_t payload_len, spinlock_t *file_lock);
-struct rfuse_req *try_rfuse_wt_get_req(struct fuse_mount *fm,
-				       bool for_background, bool force,
-				       size_t payload_len,
-				       spinlock_t *file_lock);
+struct rfuse_req *try_rfuse_get_req_on_riq(struct fuse_mount *fm,
+					   bool for_background, bool force,
+					   int riq_id, spinlock_t *file_lock);
 
 // SUBMIT A REQUEST TO PENDING/BACKGROUND
 ssize_t rfuse_simple_request(struct rfuse_req *r_req);
