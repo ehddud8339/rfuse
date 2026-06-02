@@ -57,6 +57,17 @@ static uint64_t rfuse_elapsed_ns(uint64_t start_ns)
 	return now > start_ns ? now - start_ns : 0;
 }
 
+static inline int rfuse_opcode_is_read(uint32_t opcode)
+{
+	return opcode == FUSE_READ;
+}
+
+/* LDY: dequeue latency는 READ/WRITE data path만 분리해서 계측한다. */
+static inline bool rfuse_opcode_is_read_write(uint32_t opcode)
+{
+	return opcode == FUSE_READ || opcode == FUSE_WRITE;
+}
+
 /*
 static unsigned long long rfuse_pread_count;
 static unsigned long long rfuse_pwrite_count;
@@ -430,7 +441,9 @@ static int rfuse_send_reply_iov(fuse_req_t u_req, int error){
 		    now > r_req->ldy_ts_backend_write_start_ns)
 			r_req->ldy_lat_backend_write_ns =
 				now - r_req->ldy_ts_backend_write_start_ns;
-		r_req->ldy_ts_reply_comp_start_ns = now;
+		if (r_req->in.opcode == FUSE_WRITE ||
+		    !r_req->ldy_ts_reply_comp_start_ns)
+			r_req->ldy_ts_reply_comp_start_ns = now;
 	}
 	GET_TIMESTAMPS(4)
 	res = rfuse_send_reply_iov_nofree(u_req,error);
@@ -460,13 +473,27 @@ void *rfuse_req_payload_addr(fuse_req_t req)
 	struct rfuse_req *r_req;
 	size_t len;
 	void *addr;
+	uint64_t start_ns = 0;
 
 	if (!req || !req->riq)
 		return 0;
 
 	r_req = &req->riq->ureq[req->index];
+	/* LDY: request payload address 또는 fallback buffer address를 결정하는
+	 * 비용을 alloc_payload_or_buf로 계측한다. 동작은 변경하지 않는다.
+	 */
+	if (rfuse_opcode_is_read(r_req->in.opcode))
+		start_ns = rfuse_now_ns();
 	if (rfuse_has_payload(req)) {
 		addr = (char *)req->riq->payload.uaddr + r_req->payload_offset;
+		if (start_ns) {
+			uint64_t elapsed_ns = rfuse_elapsed_ns(start_ns);
+
+			r_req->usr_write_tempbuf_cnt = 1;
+			r_req->usr_write_tempbuf_ns = elapsed_ns;
+			r_req->usr_write_fbuf_if_min_ns = elapsed_ns;
+			r_req->usr_write_fbuf_if_max_ns = elapsed_ns;
+		}
 		return addr;
 	}
 
@@ -490,6 +517,14 @@ void *rfuse_req_payload_addr(fuse_req_t req)
 	}
 
 	addr = malloc(len ? len : 1);
+	if (start_ns) {
+		uint64_t elapsed_ns = rfuse_elapsed_ns(start_ns);
+
+		r_req->usr_write_tempbuf_cnt = 1;
+		r_req->usr_write_tempbuf_ns = elapsed_ns;
+		r_req->usr_write_fbuf_if_min_ns = elapsed_ns;
+		r_req->usr_write_fbuf_if_max_ns = elapsed_ns;
+	}
 
 	return addr;
 }
@@ -548,6 +583,22 @@ int fuse_reply_buf(fuse_req_t u_req, const char *buf, size_t size){
 	int riq_id = u_req->riq->riq_id;
 	long long int pp_req_index = ((long long int)req_index << 32) & RFUSE_REQ_IDX_MASK;
 	int pp_riq_id = (riq_id << 16) & RFUSE_RIQ_ID_MASK;
+	uint64_t now = 0;
+	uint64_t pwrite_start_ns = 0;
+
+	/* LDY: READ reply가 librfuse의 fuse_reply_buf()에서 kernel completion으로
+	 * 이어지는 비용을 reply_comp에 포함한다. WRITE와 동일한 연결 방식을 사용한다.
+	 */
+	if (rfuse_opcode_is_read(r_req->in.opcode) &&
+	    r_req->ldy_ts_prepare_submit_start_ns) {
+		now = rfuse_now_ns();
+		if (r_req->ldy_ts_backend_write_start_ns &&
+		    !r_req->ldy_lat_backend_write_ns &&
+		    now > r_req->ldy_ts_backend_write_start_ns)
+			r_req->ldy_lat_backend_write_ns =
+				now - r_req->ldy_ts_backend_write_start_ns;
+		r_req->ldy_ts_reply_comp_start_ns = now;
+	}
 
 	if (rfuse_req_payload_buffer(u_req, &payload) == 0) {
 		if (size > payload.capacity)
@@ -560,9 +611,22 @@ int fuse_reply_buf(fuse_req_t u_req, const char *buf, size_t size){
 		return rfuse_send_reply_ok(u_req);
 	}
 
+	/* LDY: READ reply가 legacy /dev/fuse pwrite()를 실제로 사용하는 경우에만
+	 * 해당 syscall 비용을 계측한다. shared-buffer READ에서는 0일 수 있다.
+	 */
+	if (rfuse_opcode_is_read(r_req->in.opcode))
+		pwrite_start_ns = rfuse_now_ns();
 	ssize_t res = pwrite(ch ? ch->fd : se->fd, buf, size, (long long int)pp_riq_id | pp_req_index);
 	//rfuse_count_pwrite();
 	int err = errno;
+	if (pwrite_start_ns) {
+		r_req->usr_write_pread_cnt = 1;
+		r_req->usr_write_pread_ns = rfuse_elapsed_ns(pwrite_start_ns);
+		if (res > 0)
+			r_req->usr_write_pread_bytes = res;
+		if (res == -1)
+			r_req->usr_write_pread_err_cnt = 1;
+	}
 	if(res == -1){
 		if(!fuse_session_exited(se) && err != ENOENT)
 			perror("RFUSE ERROR: writing to the device failed!!");
@@ -1244,6 +1308,40 @@ static void rfuse_do_forget(fuse_req_t u_req, fuse_ino_t nodeid)
 		fuse_reply_none(u_req);
 }
 
+/* LDY: write_enque_to_deque가 기록된 WRITE 요청이 실제 librfuse write handler,
+ * backend write, reply, kernel completion 계측까지 이어지도록 request-local
+ * timestamp/context를 연결한다. ABI는 변경하지 않는다.
+ */
+static void rfuse_write_metrics_reset(struct rfuse_req *r_req)
+{
+	r_req->usr_write_tempbuf_cnt = 0;
+	r_req->usr_write_tempbuf_ns = 0;
+	r_req->usr_write_fbuf_if_min_ns = 0;
+	r_req->usr_write_fbuf_if_max_ns = 0;
+	r_req->usr_write_pread_cnt = 0;
+	r_req->usr_write_pread_ns = 0;
+	r_req->usr_write_pread_bytes = 0;
+	r_req->usr_write_pread_err_cnt = 0;
+	r_req->ldy_ts_backend_write_start_ns = 0;
+	r_req->ldy_ts_reply_comp_start_ns = 0;
+	r_req->ldy_lat_backend_write_ns = 0;
+}
+
+static void rfuse_read_metrics_reset(struct rfuse_req *r_req)
+{
+	r_req->usr_write_tempbuf_cnt = 0;
+	r_req->usr_write_tempbuf_ns = 0;
+	r_req->usr_write_fbuf_if_min_ns = 0;
+	r_req->usr_write_fbuf_if_max_ns = 0;
+	r_req->usr_write_pread_cnt = 0;
+	r_req->usr_write_pread_ns = 0;
+	r_req->usr_write_pread_bytes = 0;
+	r_req->usr_write_pread_err_cnt = 0;
+	r_req->ldy_ts_backend_write_start_ns = 0;
+	r_req->ldy_ts_reply_comp_start_ns = 0;
+	r_req->ldy_lat_backend_write_ns = 0;
+}
+
 static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 	int res = 0;
 	uint64_t start_ns;
@@ -1261,14 +1359,7 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 	long long int pp_req_index = ((long long int)req_index << 32) & RFUSE_REQ_IDX_MASK;
 	int pp_riq_id = (riq_id << 16) & RFUSE_RIQ_ID_MASK;
 
-	r_req->usr_write_tempbuf_cnt = 0;
-	r_req->usr_write_tempbuf_ns = 0;
-	r_req->usr_write_fbuf_if_min_ns = 0;
-	r_req->usr_write_fbuf_if_max_ns = 0;
-	r_req->usr_write_pread_cnt = 0;
-	r_req->usr_write_pread_ns = 0;
-	r_req->usr_write_pread_bytes = 0;
-	r_req->usr_write_pread_err_cnt = 0;
+	rfuse_write_metrics_reset(r_req);
 	
 	if (rfuse_req_payload_buffer(u_req, &payload) == 0 &&
 	    (payload.flags & RFUSE_PAYLOAD_IN)) {
@@ -1293,7 +1384,9 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 		r_req->usr_write_fbuf_if_min_ns = fbuf_if_ns;
 		r_req->usr_write_fbuf_if_max_ns = fbuf_if_ns;
 	}
-	// 1.Call a system call to receive the data from the kernel page
+	/* LDY: shared-buffer payload WRITE는 /dev/fuse pread()를 사용하지 않으므로
+	 * 실제 pread 호출이 있는 legacy 경로에서만 pread latency를 기록한다.
+	 */
 	start_ns = rfuse_now_ns();
 	res = pread(ch ? ch->fd : se->fd, u_req->w->fbuf.mem, u_req->w->fbuf.size, (long long int)pp_riq_id | pp_req_index);
 	r_req->usr_write_pread_cnt = 1;
@@ -1320,7 +1413,8 @@ do_write:
 
 	if (u_req->se->op.write) {
 		r_req->ldy_ts_backend_write_start_ns =
-			r_req->ldy_ts_prepare_submit_start_ns ? rfuse_now_ns() : 0;
+			r_req->ldy_ts_prepare_submit_start_ns ?
+			rfuse_now_ns() : 0;
 		u_req->se->op.write(u_req, nodeid, param, res,
 				arg->offset, &fi);
 	} else {
@@ -1607,13 +1701,17 @@ int fuse_reply_data(fuse_req_t u_req, struct fuse_bufvec *bufv,
 static int rfuse_prep_write_buf(fuse_req_t u_req, struct fuse_session *se, struct fuse_buf *buf,
 				 struct fuse_chan *ch) {
 	int err;
+	int ret;
 	ssize_t res;
 	size_t bufsize = se->bufsize;
 	struct fuse_ll_pipe *llp;
 	struct fuse_buf tmpbuf;
+	struct rfuse_req *r_req = &u_req->riq->ureq[u_req->index];
 	long long int pp_req_index = ((long long int)u_req->index << 32) & RFUSE_REQ_IDX_MASK;
 	int pp_riq_id = (u_req->riq->riq_id << 16) & RFUSE_RIQ_ID_MASK;
 	off64_t off_in = (off64_t)pp_riq_id | pp_req_index;
+	uint64_t prep_start_ns = rfuse_now_ns();
+	uint64_t prep_ns;
 
 	llp = fuse_ll_get_pipe(se);
 	if (llp == NULL)
@@ -1627,31 +1725,38 @@ static int rfuse_prep_write_buf(fuse_req_t u_req, struct fuse_session *se, struc
 				res = grow_pipe_to_max(llp->pipe[0]);
 				if (res > 0)
 					llp->size = res;
-				return -EIO; /* fallback to normal write */
+				ret = -EIO; /* fallback to normal write */
+				goto record_prep;
 			}
 			llp->size = res;
 		}
-		if (llp->size < bufsize)
-			return -EIO;
+		if (llp->size < bufsize) {
+			ret = -EIO;
+			goto record_prep;
+		}
 	}
 
 	/* Use off_in as indicate riq_id and req_index*/
 	res = splice(ch ? ch->fd : se->fd, &off_in, llp->pipe[1], NULL, bufsize, 0);
 	err = errno;
 
-	if (fuse_session_exited(se))
-		return 0;
+	if (fuse_session_exited(se)) {
+		ret = 0;
+		goto record_prep;
+	}
 
 	if (res == -1) {
 		if (err == ENODEV) {
 			/* Filesystem was unmounted, or connection was aborted
 			   via /sys/fs/fuse/connections */
 			fuse_session_exit(se);
-			return 0;
+			ret = 0;
+			goto record_prep;
 		}
 		if (err != EINTR && err != EAGAIN)
 			perror("fuse: splice from device");
-		return -err;
+		ret = -err;
+		goto record_prep;
 	}
 
 	tmpbuf = (struct fuse_buf) {
@@ -1664,7 +1769,16 @@ static int rfuse_prep_write_buf(fuse_req_t u_req, struct fuse_session *se, struc
 	buf->flags = tmpbuf.flags;
 	buf->size = tmpbuf.size;
 
-	return res;
+	ret = res;
+
+record_prep:
+	prep_ns = rfuse_now_ns() - prep_start_ns;
+	r_req->usr_write_tempbuf_cnt = 1;
+	r_req->usr_write_tempbuf_ns = prep_ns;
+	r_req->usr_write_fbuf_if_min_ns = prep_ns;
+	r_req->usr_write_fbuf_if_max_ns = prep_ns;
+
+	return ret;
 }
 
 static void rfuse_do_write_buf(fuse_req_t u_req, fuse_ino_t nodeid,
@@ -1695,6 +1809,8 @@ static void rfuse_do_write_buf(fuse_req_t u_req, fuse_ino_t nodeid,
 	}
 	bufv.buf[0].size = arg->size;
 
+	r_req->ldy_ts_backend_write_start_ns =
+		r_req->ldy_ts_prepare_submit_start_ns ? rfuse_now_ns() : 0;
 	se->op.write_buf(u_req, nodeid, &bufv, arg->offset, &fi);
 
 out:
@@ -1710,6 +1826,7 @@ static void rfuse_do_read(fuse_req_t u_req, fuse_ino_t nodeid){
 	struct fuse_file_info fi;
 
 	if (u_req->se->op.read) {
+		rfuse_read_metrics_reset(r_req);
 		memset(&fi, 0, sizeof(fi));
 		fi.fh = arg->fh;
 		if (u_req->se->conn.proto_minor >= 9) {
@@ -1717,6 +1834,12 @@ static void rfuse_do_read(fuse_req_t u_req, fuse_ino_t nodeid){
 			fi.flags = arg->flags;
 		}
 
+		/* LDY: read_enque_to_deque 이후 동일 READ 요청이 backend read callback과
+		 * fuse_reply_buf()에 도달하는 구간을 backend_read로 계측한다.
+		 */
+		r_req->ldy_ts_backend_write_start_ns =
+			r_req->ldy_ts_prepare_submit_start_ns ?
+			rfuse_now_ns() : 0;
 		u_req->se->op.read(u_req, nodeid, arg->size, arg->offset, &fi);
 	} else
 		fuse_reply_err(u_req, ENOSYS);
@@ -2009,13 +2132,21 @@ bool rfuse_read_queue(struct rfuse_worker *w, struct rfuse_mt *mt, struct fuse_c
 	if (r_req->in.opcode >= FUSE_MAXOP || !rfuse_ll_ops[r_req->in.opcode].func)
 		goto reply_err;
 
-	if (r_req->ldy_ts_enqueue_ns)
+	/* LDY: pending queue 삽입 후 librfuse worker가 dequeue하기까지의 latency를
+	 * READ/WRITE opcode 기준으로 분리한다. 기존 enque_to_deque 경계는 유지하고,
+	 * rfuse_read_queue()에서 opcode를 확인해 read/write path로 나눠 기록한다.
+	 */
+	if (rfuse_opcode_is_read_write(r_req->in.opcode) &&
+	    r_req->ldy_ts_enqueue_ns)
 		r_req->ldy_lat_enqueue_to_dequeue_ns =
 			rfuse_elapsed_ns(r_req->ldy_ts_enqueue_ns);
+	else
+		r_req->ldy_lat_enqueue_to_dequeue_ns = 0;
 	GET_TIMESTAMPS(3)
 	if (r_req->in.opcode == FUSE_WRITE && rfuse_req_has_input_payload(u_req)) {
 		rfuse_ll_ops[r_req->in.opcode].func(u_req, r_req->in.nodeid);
 	} else if (r_req->in.opcode == FUSE_WRITE && se->op.write_buf) {
+		rfuse_write_metrics_reset(r_req);
 		err = rfuse_prep_write_buf(u_req, se, &w->fbuf, w->ch);
 		if(err < 0)
 			goto reply_err;

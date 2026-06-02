@@ -45,8 +45,6 @@
 /** Bias for fi->writectr, meaning new writepages must not be sent */
 #define FUSE_NOWRITE INT_MIN
 
-#define RFUSE_PAYLOAD_FALLBACK_ERR (-EAGAIN)
-
 /** It could be as large as PATH_MAX, but would that have any uses? */
 #define FUSE_NAME_MAX 1024
 
@@ -71,27 +69,23 @@ extern unsigned max_user_congthresh;
 
 enum rfuse_path_lat_point {
 	RFUSE_PATH_LAT_WRITE_CTX_INIT,
-	RFUSE_PATH_LAT_WRITE_ASYNC_WAIT_REGISTER,
-	RFUSE_PATH_LAT_WRITE_ASYNC_OVERLAPS_LOCKED,
-	RFUSE_PATH_LAT_WRITE_ASYNC_WAIT_EVENT,
 	RFUSE_PATH_LAT_WRITE_ASYNC_RANGE_INSERT,
 	RFUSE_PATH_LAT_WRITE_GET_REQ,
 	RFUSE_PATH_LAT_WRITE_RESERVE_PAYLOAD,
 	RFUSE_PATH_LAT_PAYLOAD_RESERVE_LOCKED,
 	RFUSE_PATH_LAT_PAYLOAD_WAIT_INTERRUPTIBLE,
 	RFUSE_PATH_LAT_WRITE_COPY_FROM_ITER,
-	RFUSE_PATH_LAT_WRITE_SIMPLE_BACKGROUND,
+	RFUSE_PATH_LAT_WRITE_PREPARE_ASYNC_SUBMIT,
 	/* LDY: rfuse_perform_write() sync/page-cache write path의 단계별
 	 * latency를 path_lat_dump에 포함하기 위한 계측 counter.
 	 */
 	RFUSE_PATH_LAT_WRITE_ALLOC_PAGE_DESC,
 	RFUSE_PATH_LAT_WRITE_ALLOC_PAGE_COPY,
-	RFUSE_PATH_LAT_WRITE_SIMPLE_REQUEST,
+	RFUSE_PATH_LAT_WRITE_PREPARE_SYNC_SUBMIT,
 	/* LDY: sync/page-cache write request가 submit, dequeue, backend write,
 	 * reply, completion으로 진행되는 각 구간 latency를 path_lat_dump에
 	 * 포함하기 위한 계측 counter.
 	 */
-	RFUSE_PATH_LAT_WRITE_PREPARE_SUBMIT,
 	RFUSE_PATH_LAT_WRITE_ENQUE_TO_DEQUE,
 	RFUSE_PATH_LAT_WRITE_BACKEND_WRITE,
 	RFUSE_PATH_LAT_WRITE_REPLY_COMP,
@@ -103,8 +97,13 @@ enum rfuse_path_lat_point {
 	RFUSE_PATH_LAT_READ_WAIT_ASYNC_WRITE,
 	RFUSE_PATH_LAT_READ_GET_REQ,
 	RFUSE_PATH_LAT_READ_RESERVE_PAYLOAD,
-	RFUSE_PATH_LAT_READ_SIMPLE_BACKGROUND,
-	RFUSE_PATH_LAT_READ_SIMPLE_REQUEST,
+	RFUSE_PATH_LAT_READ_ENQUE_TO_DEQUE,
+	RFUSE_PATH_LAT_READ_BACKEND_READ,
+	RFUSE_PATH_LAT_READ_REPLY_COMP,
+	RFUSE_PATH_LAT_READ_DEV_FUSE_PWRITE,
+	RFUSE_PATH_LAT_READ_COPY_TO_PAGE,
+	RFUSE_PATH_LAT_READ_COMPLETE_REQ,
+	RFUSE_PATH_LAT_READ_ALLOC_PAYLOAD_OR_BUF,
 	/* LDY: dev_do_read의 copy pages 구간 latency를 path_lat_dump에
 	 * 포함하기 위한 kernel-side 계측 counter.
 	 */
@@ -115,8 +114,9 @@ enum rfuse_path_lat_point {
 };
 
 void rfuse_path_lat_record(enum rfuse_path_lat_point point, u64 nsec);
+void rfuse_path_lat_record_usr_read(struct rfuse_req *r_req);
 void rfuse_path_lat_record_usr_write(struct rfuse_req *r_req);
-void rfuse_path_lat_record_write_e2e(struct rfuse_req *r_req);
+void rfuse_path_lat_record_rw_e2e(struct rfuse_req *r_req);
 
 /* One forget request */
 struct fuse_forget_link {

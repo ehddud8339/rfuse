@@ -118,12 +118,6 @@ static void rfuse_usr_write_record_max(atomic64_t *stat, u64 nsec)
 static const struct rfuse_path_lat_desc rfuse_path_lat_descs[RFUSE_PATH_LAT_NR] = {
 	[RFUSE_PATH_LAT_WRITE_CTX_INIT] =
 		{ "write_ctx_init", RFUSE_PATH_LAT_GROUP_WRITE },
-	[RFUSE_PATH_LAT_WRITE_ASYNC_WAIT_REGISTER] =
-		{ "write_async_wait_register", RFUSE_PATH_LAT_GROUP_WRITE },
-	[RFUSE_PATH_LAT_WRITE_ASYNC_OVERLAPS_LOCKED] =
-		{ "  overlaps_locked", RFUSE_PATH_LAT_GROUP_WRITE },
-	[RFUSE_PATH_LAT_WRITE_ASYNC_WAIT_EVENT] =
-		{ "  wait_event", RFUSE_PATH_LAT_GROUP_WRITE },
 	[RFUSE_PATH_LAT_WRITE_ASYNC_RANGE_INSERT] =
 		{ "  async_range_insert", RFUSE_PATH_LAT_GROUP_WRITE },
 	[RFUSE_PATH_LAT_WRITE_GET_REQ] =
@@ -136,8 +130,8 @@ static const struct rfuse_path_lat_desc rfuse_path_lat_descs[RFUSE_PATH_LAT_NR] 
 		{ "payload_wait_interruptible", RFUSE_PATH_LAT_GROUP_INTERNAL },
 	[RFUSE_PATH_LAT_WRITE_COPY_FROM_ITER] =
 		{ "copy_from_iter", RFUSE_PATH_LAT_GROUP_WRITE },
-	[RFUSE_PATH_LAT_WRITE_SIMPLE_BACKGROUND] =
-		{ "simple_background", RFUSE_PATH_LAT_GROUP_WRITE },
+	[RFUSE_PATH_LAT_WRITE_PREPARE_ASYNC_SUBMIT] =
+		{ "prepare_async_submit", RFUSE_PATH_LAT_GROUP_WRITE },
 	/* LDY: rfuse_perform_write() sync/page-cache write path의 단계별
 	 * latency를 path_lat_dump에 포함하기 위한 계측 counter.
 	 */
@@ -145,16 +139,14 @@ static const struct rfuse_path_lat_desc rfuse_path_lat_descs[RFUSE_PATH_LAT_NR] 
 		{ "alloc_page_desc", RFUSE_PATH_LAT_GROUP_WRITE },
 	[RFUSE_PATH_LAT_WRITE_ALLOC_PAGE_COPY] =
 		{ "alloc_page_copy", RFUSE_PATH_LAT_GROUP_WRITE },
-	[RFUSE_PATH_LAT_WRITE_SIMPLE_REQUEST] =
-		{ "simple_request", RFUSE_PATH_LAT_GROUP_WRITE },
+	[RFUSE_PATH_LAT_WRITE_PREPARE_SYNC_SUBMIT] =
+		{ "prepare_sync_submit", RFUSE_PATH_LAT_GROUP_WRITE },
 	/* LDY: sync/page-cache write request가 submit, dequeue, backend write,
 	 * reply, completion으로 진행되는 각 구간 latency를 path_lat_dump에
 	 * 포함하기 위한 계측 counter.
 	 */
-	[RFUSE_PATH_LAT_WRITE_PREPARE_SUBMIT] =
-		{ "prepare_submit", RFUSE_PATH_LAT_GROUP_WRITE },
 	[RFUSE_PATH_LAT_WRITE_ENQUE_TO_DEQUE] =
-		{ "enque_to_deque", RFUSE_PATH_LAT_GROUP_WRITE },
+		{ "write_enque_to_deque", RFUSE_PATH_LAT_GROUP_WRITE },
 	[RFUSE_PATH_LAT_WRITE_BACKEND_WRITE] =
 		{ "backend_write", RFUSE_PATH_LAT_GROUP_WRITE },
 	[RFUSE_PATH_LAT_WRITE_REPLY_COMP] =
@@ -172,10 +164,20 @@ static const struct rfuse_path_lat_desc rfuse_path_lat_descs[RFUSE_PATH_LAT_NR] 
 		{ "get_req", RFUSE_PATH_LAT_GROUP_READ },
 	[RFUSE_PATH_LAT_READ_RESERVE_PAYLOAD] =
 		{ "reserve_payload", RFUSE_PATH_LAT_GROUP_READ },
-	[RFUSE_PATH_LAT_READ_SIMPLE_BACKGROUND] =
-		{ "simple_background", RFUSE_PATH_LAT_GROUP_READ },
-	[RFUSE_PATH_LAT_READ_SIMPLE_REQUEST] =
-		{ "simple_request", RFUSE_PATH_LAT_GROUP_READ },
+	[RFUSE_PATH_LAT_READ_ENQUE_TO_DEQUE] =
+		{ "read_enque_to_deque", RFUSE_PATH_LAT_GROUP_READ },
+	[RFUSE_PATH_LAT_READ_BACKEND_READ] =
+		{ "backend_read", RFUSE_PATH_LAT_GROUP_READ },
+	[RFUSE_PATH_LAT_READ_REPLY_COMP] =
+		{ "reply_comp", RFUSE_PATH_LAT_GROUP_READ },
+	[RFUSE_PATH_LAT_READ_DEV_FUSE_PWRITE] =
+		{ "dev_fuse_pwrite", RFUSE_PATH_LAT_GROUP_READ },
+	[RFUSE_PATH_LAT_READ_COPY_TO_PAGE] =
+		{ "copy_to_page", RFUSE_PATH_LAT_GROUP_READ },
+	[RFUSE_PATH_LAT_READ_COMPLETE_REQ] =
+		{ "complete_req", RFUSE_PATH_LAT_GROUP_READ },
+	[RFUSE_PATH_LAT_READ_ALLOC_PAYLOAD_OR_BUF] =
+		{ "alloc_payload_or_buf", RFUSE_PATH_LAT_GROUP_READ },
 	/* LDY: dev_do_read의 copy pages 구간 latency를 path_lat_dump에
 	 * 포함하기 위한 kernel-side 계측 counter.
 	 */
@@ -283,10 +285,11 @@ void rfuse_path_lat_record_usr_write(struct rfuse_req *r_req)
 	}
 }
 
-/* LDY: userspace가 shared request에 기록한 sync/page-cache write path
- * delta를 kernel path_lat_dump counter로 집계한다.
+/* LDY: pending queue 삽입 후 librfuse worker가 dequeue하기까지의 latency를
+ * READ/WRITE opcode 기준으로 분리한다. userspace가 shared request에
+ * 기록한 dequeue delta를 kernel path_lat_dump counter로 집계한다.
  */
-void rfuse_path_lat_record_write_e2e(struct rfuse_req *r_req)
+void rfuse_path_lat_record_rw_e2e(struct rfuse_req *r_req)
 {
 	u64 val;
 
@@ -295,15 +298,57 @@ void rfuse_path_lat_record_write_e2e(struct rfuse_req *r_req)
 
 	val = READ_ONCE(r_req->ldy_lat_enqueue_to_dequeue_ns);
 	if (val) {
-		rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_ENQUE_TO_DEQUE, val);
+		if (r_req->in.opcode == FUSE_READ)
+			rfuse_path_lat_record(RFUSE_PATH_LAT_READ_ENQUE_TO_DEQUE,
+					      val);
+		else if (r_req->in.opcode == FUSE_WRITE)
+			rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_ENQUE_TO_DEQUE,
+					      val);
 		WRITE_ONCE(r_req->ldy_lat_enqueue_to_dequeue_ns, 0);
 	}
 
 	val = READ_ONCE(r_req->ldy_lat_backend_write_ns);
 	if (val) {
-		rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_BACKEND_WRITE, val);
+		if (r_req->in.opcode == FUSE_READ)
+			rfuse_path_lat_record(RFUSE_PATH_LAT_READ_BACKEND_READ,
+					      val);
+		else if (r_req->in.opcode == FUSE_WRITE)
+			rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_BACKEND_WRITE,
+					      val);
 		WRITE_ONCE(r_req->ldy_lat_backend_write_ns, 0);
 	}
+}
+
+/* LDY: READ 경로는 ABI를 늘리지 않고 기존 instrumentation-only request
+ * slot을 재사용해 payload/buffer 선택과 legacy /dev/fuse pwrite()
+ * 비용을 kernel path_lat_dump counter로 접는다.
+ */
+void rfuse_path_lat_record_usr_read(struct rfuse_req *r_req)
+{
+	u64 count;
+	u64 val;
+
+	if (!r_req || r_req->in.opcode != FUSE_READ)
+		return;
+
+	count = READ_ONCE(r_req->usr_write_tempbuf_cnt);
+	val = READ_ONCE(r_req->usr_write_tempbuf_ns);
+	if (count && val)
+		rfuse_path_lat_record(RFUSE_PATH_LAT_READ_ALLOC_PAYLOAD_OR_BUF,
+				      val);
+	WRITE_ONCE(r_req->usr_write_tempbuf_cnt, 0);
+	WRITE_ONCE(r_req->usr_write_tempbuf_ns, 0);
+	WRITE_ONCE(r_req->usr_write_fbuf_if_min_ns, 0);
+	WRITE_ONCE(r_req->usr_write_fbuf_if_max_ns, 0);
+
+	count = READ_ONCE(r_req->usr_write_pread_cnt);
+	val = READ_ONCE(r_req->usr_write_pread_ns);
+	if (count && val)
+		rfuse_path_lat_record(RFUSE_PATH_LAT_READ_DEV_FUSE_PWRITE, val);
+	WRITE_ONCE(r_req->usr_write_pread_cnt, 0);
+	WRITE_ONCE(r_req->usr_write_pread_ns, 0);
+	WRITE_ONCE(r_req->usr_write_pread_bytes, 0);
+	WRITE_ONCE(r_req->usr_write_pread_err_cnt, 0);
 }
 
 static void rfuse_path_lat_reset(void)
@@ -406,7 +451,7 @@ static size_t rfuse_usr_write_dump(char *buffer, size_t len)
 	if (len < PAGE_SIZE)
 		len += scnprintf(buffer + len, PAGE_SIZE - len,
 				 "%-28s %12llu %16llu %16llu %16llu %16llu\n",
-				 "user_write_fbuf_if_block",
+				 "fbuf_if_block",
 				 (unsigned long long)tempbuf_cnt,
 				 (unsigned long long)tempbuf_ns,
 				 (unsigned long long)(tempbuf_cnt ?
@@ -416,7 +461,7 @@ static size_t rfuse_usr_write_dump(char *buffer, size_t len)
 	if (len < PAGE_SIZE)
 		len += scnprintf(buffer + len, PAGE_SIZE - len,
 				 "%-28s %12llu %16llu %16llu %16llu %16llu\n\n",
-				 "user_write_pread",
+				 "pread",
 				 (unsigned long long)pread_cnt,
 				 (unsigned long long)pread_ns,
 				 (unsigned long long)(pread_cnt ?

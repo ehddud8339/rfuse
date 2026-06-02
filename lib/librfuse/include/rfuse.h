@@ -247,9 +247,9 @@ struct rfuse_req{
 	uint64_t usr_write_pread_bytes;
 	uint64_t usr_write_pread_err_cnt;
 
-	/* LDY: kernel/user 경계를 넘는 sync/page-cache write path 단계별
-	 * latency 측정을 위한 timestamp/delta 전달용 필드. request
-	 * semantics에는 영향을 주지 않는다.
+	/* LDY: kernel/user 경계를 넘는 READ/WRITE dequeue 및 write path
+	 * 단계별 latency 측정을 위한 timestamp/delta 전달용 필드.
+	 * request semantics에는 영향을 주지 않는다.
 	 */
 	uint64_t ldy_ts_prepare_submit_start_ns;
 	uint64_t ldy_ts_enqueue_ns;

@@ -604,7 +604,6 @@ int rfuse_import_payload(struct rfuse_req *r_req)
 int rfuse_reserve_payload(struct rfuse_req *r_req, size_t len,
 			  unsigned int payload_flags, bool may_wait)
 {
-	bool allow_fallback;
 	int ret;
 
 	if (!r_req)
@@ -620,19 +619,14 @@ int rfuse_reserve_payload(struct rfuse_req *r_req, size_t len,
 		return len <= r_req->payload_capacity ? 0 : -EINVAL;
 
 	rfuse_payload_set_transport_flags(r_req, payload_flags);
-	allow_fallback =
-		(r_req->in.opcode == FUSE_WRITE &&
-		 payload_flags == RFUSE_PAYLOAD_IN) ||
-		(r_req->in.opcode == FUSE_READ &&
-		 payload_flags == RFUSE_PAYLOAD_OUT);
 
-	ret = rfuse_payload_alloc(r_req, len,
-				  allow_fallback ? false : may_wait);
+	/* LDY: READ/WRITE payload 부족은 legacy fallback으로 우회하지 않고,
+	 * payload 반환을 기다린 뒤 동일한 shared-buffer data path로 재시도한다.
+	 * ABI나 request semantics는 변경하지 않는다.
+	 */
+	ret = rfuse_payload_alloc(r_req, len, may_wait);
 	if (ret) {
 		rfuse_payload_clear_transport_flags(r_req);
-		if (allow_fallback &&
-		    (ret == -EAGAIN || ret == -E2BIG))
-			return RFUSE_PAYLOAD_FALLBACK_ERR;
 		return ret;
 	}
 
@@ -1794,11 +1788,38 @@ static void rfuse_request_wait_answer(struct rfuse_req *r_req){
 	wait_event(r_req->waitq, test_bit(FR_FINISHED, &r_req->flags));
 }
 
-static int rfuse_queue_request(struct rfuse_req *r_req){
+/* LDY: prepare submit 계측은 data path인 READ/WRITE 요청만 대상으로 한다. */
+static inline bool rfuse_req_is_read_write(struct rfuse_req *r_req)
+{
+	switch (r_req->in.opcode) {
+	case FUSE_READ:
+	case FUSE_WRITE:
+		return true;
+	default:
+		return false;
+	}
+}
+
+enum rfuse_prepare_submit_type {
+	RFUSE_PREPARE_SUBMIT_NONE = 0,
+	RFUSE_PREPARE_SUBMIT_SYNC,
+	RFUSE_PREPARE_SUBMIT_ASYNC,
+};
+
+/* LDY: READ/WRITE request의 simple submit 진입부터 pending queue 삽입까지의
+ * 준비 비용을 중앙에서 계측한다. simple_request는 sync submit,
+ * simple_background는 async submit으로 분리한다.
+ */
+static int rfuse_queue_request(struct rfuse_req *r_req,
+			       u64 ldy_prepare_submit_start_ns,
+			       enum rfuse_prepare_submit_type
+			       ldy_prepare_submit_type)
+{
 	struct fuse_mount *fm = r_req->fm;
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
 	struct rfuse_address_entry *entry;
+	enum rfuse_path_lat_point point;
 	u64 now;
 
 	if(test_bit(FR_BACKGROUND, &r_req->flags)){
@@ -1815,13 +1836,18 @@ static int rfuse_queue_request(struct rfuse_req *r_req){
 	entry->request = r_req->index;				// fill entry
 	if(!test_bit(FR_BACKGROUND, &r_req->flags)) // only increase the reference count for synchronous requests
 		__rfuse_get_request(r_req);
-	if (r_req->ldy_ts_prepare_submit_start_ns)
-		r_req->ldy_ts_enqueue_ns = ktime_get_ns();
 	rfuse_submit_pending_tail(riq);				// Commit entry
 	now = ktime_get_ns();
-	if (r_req->ldy_ts_prepare_submit_start_ns)
-		rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_PREPARE_SUBMIT,
-				      now - r_req->ldy_ts_prepare_submit_start_ns);
+	if (ldy_prepare_submit_start_ns) {
+		r_req->ldy_ts_enqueue_ns = now;
+		if (ldy_prepare_submit_type == RFUSE_PREPARE_SUBMIT_SYNC)
+			point = RFUSE_PATH_LAT_WRITE_PREPARE_SYNC_SUBMIT;
+		else
+			point = RFUSE_PATH_LAT_WRITE_PREPARE_ASYNC_SUBMIT;
+		rfuse_path_lat_record(point, now - ldy_prepare_submit_start_ns);
+	} else {
+		r_req->ldy_ts_enqueue_ns = 0;
+	}
 	spin_unlock(&riq->lock);					// unlock
 		if(waitqueue_active(&riq->idle_user_waitq)){
 			wake_up(&riq->idle_user_waitq);		// Wake up idle user thread
@@ -1832,9 +1858,20 @@ static int rfuse_queue_request(struct rfuse_req *r_req){
 // PENDING QUEUE INSERT
 ssize_t rfuse_simple_request(struct rfuse_req *r_req){
 	ssize_t ret=0;
+	u64 ldy_prepare_submit_start_ns = 0;
 	int err;
 
-	err = rfuse_queue_request(r_req);
+	if (rfuse_req_is_read_write(r_req))
+		ldy_prepare_submit_start_ns = ktime_get_ns();
+
+	if (rfuse_req_is_read_write(r_req))
+		r_req->ldy_ts_prepare_submit_start_ns =
+			ldy_prepare_submit_start_ns;
+	else
+		r_req->ldy_ts_prepare_submit_start_ns = 0;
+
+	err = rfuse_queue_request(r_req, ldy_prepare_submit_start_ns,
+				  RFUSE_PREPARE_SUBMIT_SYNC);
 	if (err)
 		return err;
 	rfuse_request_wait_answer(r_req);
@@ -1861,9 +1898,10 @@ static void rfuse_queue_bg_list(struct fuse_conn *fc, struct list_head *queue)
 		list_del(&bg_entry->list);
 		riq = rfuse_get_specific_iqueue(fc, bg_entry->riq_id);
 		r_req = (struct rfuse_req *)&riq->kreq[bg_entry->request];
+		err = rfuse_queue_request(r_req,
+					  bg_entry->ldy_prepare_submit_start_ns,
+					  RFUSE_PREPARE_SUBMIT_ASYNC);
 		kfree(bg_entry);
-
-		err = rfuse_queue_request(r_req); // only queue request but not wait for it
 		if (unlikely(err)) {
 			r_req->out.error = err;
 			rfuse_request_end(r_req);
@@ -1886,7 +1924,8 @@ static void rfuse_flush_bg_queue_locked(struct rfuse_iqueue *riq,
 }
 
 /* Main: Async request를 할당, 초기화 후에 background list에 삽입 후 pending queue로 push */
-static int rfuse_request_queue_background(struct rfuse_req *r_req)
+static int rfuse_request_queue_background(struct rfuse_req *r_req,
+					  u64 ldy_prepare_submit_start_ns)
 {
 	struct fuse_mount *fm = r_req->fm;
 	struct fuse_conn *fc = fm->fc;
@@ -1912,6 +1951,7 @@ static int rfuse_request_queue_background(struct rfuse_req *r_req)
 	INIT_LIST_HEAD(&bg_entry->list);
 	bg_entry->request = r_req->index;
 	bg_entry->riq_id = r_req->riq_id;
+	bg_entry->ldy_prepare_submit_start_ns = ldy_prepare_submit_start_ns;
 
 	spin_lock(&riq->bg_lock);
 	if (likely(riq->connected)) {
@@ -1941,7 +1981,19 @@ static int rfuse_request_queue_background(struct rfuse_req *r_req)
 
 // BACKGROUND QUEUE INSERT
 int rfuse_simple_background(struct fuse_mount *fm, struct rfuse_req *r_req){
-	return rfuse_request_queue_background(r_req);
+	u64 ldy_prepare_submit_start_ns = 0;
+
+	if (rfuse_req_is_read_write(r_req))
+		ldy_prepare_submit_start_ns = ktime_get_ns();
+
+	if (rfuse_req_is_read_write(r_req))
+		r_req->ldy_ts_prepare_submit_start_ns =
+			ldy_prepare_submit_start_ns;
+	else
+		r_req->ldy_ts_prepare_submit_start_ns = 0;
+
+	return rfuse_request_queue_background(r_req,
+					      ldy_prepare_submit_start_ns);
 }
 
 void rfuse_request_end(struct rfuse_req *r_req){
@@ -1951,14 +2003,23 @@ void rfuse_request_end(struct rfuse_req *r_req){
 	LIST_HEAD(to_queue);
 	u64 complete_req_start;
 	u64 request_end_start;
-	bool record_write_e2e = r_req->ldy_ts_prepare_submit_start_ns != 0;
+	bool record_rw_dequeue_lat = r_req->in.opcode == FUSE_READ ||
+				      r_req->in.opcode == FUSE_WRITE;
+	bool record_rw_e2e = record_rw_dequeue_lat &&
+			     r_req->ldy_ts_prepare_submit_start_ns != 0;
 
 	request_end_start = ktime_get_ns();
 	complete_req_start = request_end_start;
-	if (record_write_e2e && r_req->ldy_ts_reply_comp_start_ns)
-		rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_REPLY_COMP,
-				      request_end_start -
-				      r_req->ldy_ts_reply_comp_start_ns);
+	if (record_rw_e2e && r_req->ldy_ts_reply_comp_start_ns) {
+		if (r_req->in.opcode == FUSE_READ)
+			rfuse_path_lat_record(RFUSE_PATH_LAT_READ_REPLY_COMP,
+					      request_end_start -
+					      r_req->ldy_ts_reply_comp_start_ns);
+		else if (r_req->in.opcode == FUSE_WRITE)
+			rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_REPLY_COMP,
+					      request_end_start -
+					      r_req->ldy_ts_reply_comp_start_ns);
+	}
 
 	if(test_bit(FR_BACKGROUND, &r_req->flags)){
 		spin_lock(&riq->bg_lock);
@@ -1989,24 +2050,45 @@ void rfuse_request_end(struct rfuse_req *r_req){
 
 	{
 		int err;
+		bool record_copy_to_page = r_req->in.opcode == FUSE_READ;
+		u64 copy_to_page_start = 0;
 
+		/* LDY: READ completion에서 shared payload를 page/buffer로 가져오는
+		 * 비용을 copy_to_page로 계측한다.
+		 */
+		if (record_copy_to_page)
+			copy_to_page_start = ktime_get_ns();
 		err = rfuse_import_payload(r_req);
+		if (record_copy_to_page)
+			rfuse_path_lat_record(RFUSE_PATH_LAT_READ_COPY_TO_PAGE,
+					      ktime_get_ns() -
+					      copy_to_page_start);
 		if (err && !r_req->out.error)
 			r_req->out.error = err;
 	}
 
-	rfuse_path_lat_record_usr_write(r_req);
-	if (record_write_e2e)
-		rfuse_path_lat_record_write_e2e(r_req);
+	if (r_req->in.opcode == FUSE_READ)
+		rfuse_path_lat_record_usr_read(r_req);
+	else if (r_req->in.opcode == FUSE_WRITE)
+		rfuse_path_lat_record_usr_write(r_req);
+	if (record_rw_dequeue_lat)
+		rfuse_path_lat_record_rw_e2e(r_req);
 
 	if (test_bit(FR_ASYNC, &r_req->flags)) {
 		r_req->end(r_req->fm, r_req, r_req->out.error);
 	}
 
 	rfuse_put_request(r_req);
-	if (record_write_e2e)
-		rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_COMPLETE_REQ,
-				      ktime_get_ns() - complete_req_start);
+	if (record_rw_e2e) {
+		if (r_req->in.opcode == FUSE_READ)
+			rfuse_path_lat_record(RFUSE_PATH_LAT_READ_COMPLETE_REQ,
+					      ktime_get_ns() -
+					      complete_req_start);
+		else if (r_req->in.opcode == FUSE_WRITE)
+			rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_COMPLETE_REQ,
+					      ktime_get_ns() -
+					      complete_req_start);
+	}
 }
 
 
