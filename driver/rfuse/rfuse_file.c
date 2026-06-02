@@ -1161,6 +1161,7 @@ static ssize_t rfuse_send_write_pages(struct rfuse_io_args *ria,
 	struct fuse_write_out *out;
 	unsigned int offset, i;
 	bool short_write;
+	u64 path_lat_start;
 	int err;
 
 	ria->r_req->in_pages = true;
@@ -1175,11 +1176,11 @@ static ssize_t rfuse_send_write_pages(struct rfuse_io_args *ria,
 	if (fm->fc->handle_killpriv_v2 && !capable(CAP_FSETID))
 		in->write_flags |= FUSE_WRITE_KILL_SUIDGID;
 
-	err = rfuse_prepare_payload(ria->r_req, true);
-	if (err)
-		goto out_put_pages;
-
+	path_lat_start = ktime_get_ns();
+	ria->r_req->ldy_ts_prepare_submit_start_ns = path_lat_start;
 	err = rfuse_simple_request(ria->r_req);
+	rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_SIMPLE_REQUEST,
+			      ktime_get_ns() - path_lat_start);
 	out = (struct fuse_write_out *)&ria->r_req->args;
 	if (!err && out->size > count)
 		err = -EIO;
@@ -1233,23 +1234,33 @@ static int rfuse_write_pages_chunk(struct kiocb *iocb,
 	struct fuse_write_out *out;
 	unsigned int nr_pages;
 	ssize_t count;
+	u64 path_lat_start;
 	int err = 0;
 
 	*written = 0;
 
+	path_lat_start = ktime_get_ns();
 	nr_pages = rfuse_wr_pages(pos, iov_iter_count(ii), fc->max_pages);
 	rp->pages = fuse_pages_alloc(nr_pages, GFP_KERNEL, &rp->descs);
+	rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_ALLOC_PAGE_DESC,
+			      ktime_get_ns() - path_lat_start);
 	if (!rp->pages)
 		return -ENOMEM;
 
+	path_lat_start = ktime_get_ns();
 	r_req = rfuse_get_req(fm, false, false, 0);
+	rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_GET_REQ,
+			      ktime_get_ns() - path_lat_start);
 	if (IS_ERR(r_req)) {
 		kfree(rp->pages);
 		return PTR_ERR(r_req);
 	}
 	ria.r_req = r_req;
 
+	path_lat_start = ktime_get_ns();
 	count = rfuse_fill_write_pages(&ria, mapping, ii, pos, nr_pages);
+	rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_ALLOC_PAGE_COPY,
+			      ktime_get_ns() - path_lat_start);
 	if (count <= 0) {
 		err = count;
 		goto out_put_req;
@@ -1304,7 +1315,6 @@ static int rfuse_invalidate_written_cache(struct address_space *mapping,
 	return wait_err ?: invalidate_err;
 }
 
-static void rfuse_async_wrt_wait_and_register(struct rfuse_async_wrt_ctx *ctx);
 static void rfuse_async_wrt_unregister(struct rfuse_async_wrt_ctx *ctx,
 				       bool update_size_unstable);
 static void rfuse_page_wrt_ctx_release(struct rfuse_req *r_req, int err,
@@ -1357,43 +1367,6 @@ static void rfuse_async_wrt_ctx_reset(struct rfuse_req *r_req,
 	memset(ctx, 0, sizeof(*ctx));
 	r_req->has_wrt_ctx = false;
 	r_req->end = NULL;
-}
-
-static void rfuse_async_wrt_wait_and_register(struct rfuse_async_wrt_ctx *ctx)
-{
-	struct fuse_inode *fi = get_fuse_inode(ctx->inode);
-	u64 path_lat_start;
-	bool overlaps;
-
-	for (;;) {
-		spin_lock(&fi->lock);
-		path_lat_start = ktime_get_ns();
-		overlaps = __rfuse_async_range_overlaps_locked(fi,
-						       ctx->range.start,
-						       ctx->range.last);
-		rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_ASYNC_OVERLAPS_LOCKED,
-				      ktime_get_ns() - path_lat_start);
-		if (!overlaps) {
-			fi->async_writectr++;
-			path_lat_start = ktime_get_ns();
-			rfuse_async_range_insert(&ctx->range,
-						 &fi->async_write_ranges);
-			rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_ASYNC_RANGE_INSERT,
-					      ktime_get_ns() - path_lat_start);
-			ctx->range_registered = true;
-			spin_unlock(&fi->lock);
-			return;
-		}
-		spin_unlock(&fi->lock);
-
-		path_lat_start = ktime_get_ns();
-		wait_event(fi->page_waitq,
-			   !rfuse_async_range_overlaps(ctx->inode,
-						       ctx->range.start,
-						       ctx->range.last));
-		rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_ASYNC_WAIT_EVENT,
-				      ktime_get_ns() - path_lat_start);
-	}
 }
 
 static void rfuse_async_wrt_unregister(struct rfuse_async_wrt_ctx *ctx,
@@ -1606,6 +1579,7 @@ static ssize_t rfuse_send_write_payload(struct kiocb *iocb,
 	struct fuse_file *ff = file->private_data;
 	struct fuse_mount *fm = ff->fm;
 	struct rfuse_async_wrt_ctx *ctx;
+	struct fuse_inode *fi;
 	struct fuse_write_in *in;
 	ssize_t copied = 0;
 	u64 path_lat_start;
@@ -1618,10 +1592,16 @@ static ssize_t rfuse_send_write_payload(struct kiocb *iocb,
 	if (err)
 		goto out_put_req;
 	ctx = &r_req->wrt_ctx;
+	fi = get_fuse_inode(ctx->inode);
+
+	spin_lock(&fi->lock);
+	fi->async_writectr++;
 	path_lat_start = ktime_get_ns();
-	rfuse_async_wrt_wait_and_register(ctx);
-	rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_ASYNC_WAIT_REGISTER,
+	rfuse_async_range_insert(&ctx->range, &fi->async_write_ranges);
+	rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_ASYNC_RANGE_INSERT,
 			      ktime_get_ns() - path_lat_start);
+	ctx->range_registered = true;
+	spin_unlock(&fi->lock);
 
 	in = (struct fuse_write_in *)&r_req->args;
 	in->fh = ff->fh;
@@ -1758,7 +1738,6 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 
 	do {
 		size_t written = 0;
-
 		err = rfuse_write_pages_chunk(iocb, mapping, ii, pos, &written);
 		if (written) {
 			res += written;

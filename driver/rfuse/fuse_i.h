@@ -81,17 +81,42 @@ enum rfuse_path_lat_point {
 	RFUSE_PATH_LAT_PAYLOAD_WAIT_INTERRUPTIBLE,
 	RFUSE_PATH_LAT_WRITE_COPY_FROM_ITER,
 	RFUSE_PATH_LAT_WRITE_SIMPLE_BACKGROUND,
+	/* LDY: rfuse_perform_write() sync/page-cache write path의 단계별
+	 * latency를 path_lat_dump에 포함하기 위한 계측 counter.
+	 */
+	RFUSE_PATH_LAT_WRITE_ALLOC_PAGE_DESC,
+	RFUSE_PATH_LAT_WRITE_ALLOC_PAGE_COPY,
+	RFUSE_PATH_LAT_WRITE_SIMPLE_REQUEST,
+	/* LDY: sync/page-cache write request가 submit, dequeue, backend write,
+	 * reply, completion으로 진행되는 각 구간 latency를 path_lat_dump에
+	 * 포함하기 위한 계측 counter.
+	 */
+	RFUSE_PATH_LAT_WRITE_PREPARE_SUBMIT,
+	RFUSE_PATH_LAT_WRITE_ENQUE_TO_DEQUE,
+	RFUSE_PATH_LAT_WRITE_BACKEND_WRITE,
+	RFUSE_PATH_LAT_WRITE_REPLY_COMP,
+	RFUSE_PATH_LAT_WRITE_COMPLETE_REQ,
+	/* LDY: dev_do_write의 copy pages 구간 latency를 path_lat_dump에
+	 * 포함하기 위한 kernel-side 계측 counter.
+	 */
+	RFUSE_PATH_LAT_DEV_DO_WRITE_COPY_PAGES,
 	RFUSE_PATH_LAT_READ_WAIT_ASYNC_WRITE,
 	RFUSE_PATH_LAT_READ_GET_REQ,
 	RFUSE_PATH_LAT_READ_RESERVE_PAYLOAD,
 	RFUSE_PATH_LAT_READ_SIMPLE_BACKGROUND,
 	RFUSE_PATH_LAT_READ_SIMPLE_REQUEST,
+	/* LDY: dev_do_read의 copy pages 구간 latency를 path_lat_dump에
+	 * 포함하기 위한 kernel-side 계측 counter.
+	 */
+	RFUSE_PATH_LAT_DEV_DO_READ_COPY_PAGES,
 	RFUSE_PATH_LAT_INTERNAL_TRY_REQUEST_ALLOC,
 	RFUSE_PATH_LAT_INTERNAL_BLOCK_ALLOC,
 	RFUSE_PATH_LAT_NR,
 };
 
 void rfuse_path_lat_record(enum rfuse_path_lat_point point, u64 nsec);
+void rfuse_path_lat_record_usr_write(struct rfuse_req *r_req);
+void rfuse_path_lat_record_write_e2e(struct rfuse_req *r_req);
 
 /* One forget request */
 struct fuse_forget_link {

@@ -35,6 +35,28 @@
 
 #define RFUSE_SPLICE_READ_NO_DATA 0x1000
 
+static uint64_t rfuse_now_ns(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+/* LDY: kernel/user 경계를 넘는 write path latency timestamp 차이를
+ * userspace에서 안전하게 delta로 접기 위한 helper.
+ */
+static uint64_t rfuse_elapsed_ns(uint64_t start_ns)
+{
+	uint64_t now;
+
+	if (!start_ns)
+		return 0;
+
+	now = rfuse_now_ns();
+	return now > start_ns ? now - start_ns : 0;
+}
+
 /*
 static unsigned long long rfuse_pread_count;
 static unsigned long long rfuse_pwrite_count;
@@ -398,7 +420,18 @@ static int rfuse_send_reply_iov_nofree(fuse_req_t u_req, int error){
 
 static int rfuse_send_reply_iov(fuse_req_t u_req, int error){
 	int res;
+	struct rfuse_req *r_req = &u_req->riq->ureq[u_req->index];
+	uint64_t now;
 
+	if (r_req->ldy_ts_prepare_submit_start_ns) {
+		now = rfuse_now_ns();
+		if (r_req->ldy_ts_backend_write_start_ns &&
+		    !r_req->ldy_lat_backend_write_ns &&
+		    now > r_req->ldy_ts_backend_write_start_ns)
+			r_req->ldy_lat_backend_write_ns =
+				now - r_req->ldy_ts_backend_write_start_ns;
+		r_req->ldy_ts_reply_comp_start_ns = now;
+	}
 	GET_TIMESTAMPS(4)
 	res = rfuse_send_reply_iov_nofree(u_req,error);
 	rfuse_free_req(u_req);
@@ -1213,6 +1246,8 @@ static void rfuse_do_forget(fuse_req_t u_req, fuse_ino_t nodeid)
 
 static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 	int res = 0;
+	uint64_t start_ns;
+	uint64_t fallback_start_ns;
 	struct rfuse_iqueue *riq = u_req->riq;
 	struct rfuse_req *r_req = &riq->ureq[u_req->index];
 	struct fuse_session *se = u_req->se;
@@ -1225,6 +1260,15 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 	int riq_id = u_req->riq->riq_id;
 	long long int pp_req_index = ((long long int)req_index << 32) & RFUSE_REQ_IDX_MASK;
 	int pp_riq_id = (riq_id << 16) & RFUSE_RIQ_ID_MASK;
+
+	r_req->usr_write_tempbuf_cnt = 0;
+	r_req->usr_write_tempbuf_ns = 0;
+	r_req->usr_write_fbuf_if_min_ns = 0;
+	r_req->usr_write_fbuf_if_max_ns = 0;
+	r_req->usr_write_pread_cnt = 0;
+	r_req->usr_write_pread_ns = 0;
+	r_req->usr_write_pread_bytes = 0;
+	r_req->usr_write_pread_err_cnt = 0;
 	
 	if (rfuse_req_payload_buffer(u_req, &payload) == 0 &&
 	    (payload.flags & RFUSE_PAYLOAD_IN)) {
@@ -1234,18 +1278,31 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 	}
 
 	if(!u_req->w->fbuf.mem) {
+		uint64_t fbuf_if_ns;
+
+		fallback_start_ns = rfuse_now_ns();
 		u_req->w->fbuf.mem = malloc(FUSE_MAX_MAX_PAGES * getpagesize());
 		if(!u_req->w->fbuf.mem) {
 			printf("Error : malloc for write I/O failed\n");
 			fuse_reply_err(u_req, EIO);
 		}
 		u_req->w->fbuf.size = FUSE_MAX_MAX_PAGES * getpagesize();
+		fbuf_if_ns = rfuse_now_ns() - fallback_start_ns;
+		r_req->usr_write_tempbuf_cnt = 1;
+		r_req->usr_write_tempbuf_ns = fbuf_if_ns;
+		r_req->usr_write_fbuf_if_min_ns = fbuf_if_ns;
+		r_req->usr_write_fbuf_if_max_ns = fbuf_if_ns;
 	}
-
 	// 1.Call a system call to receive the data from the kernel page
+	start_ns = rfuse_now_ns();
 	res = pread(ch ? ch->fd : se->fd, u_req->w->fbuf.mem, u_req->w->fbuf.size, (long long int)pp_riq_id | pp_req_index);
+	r_req->usr_write_pread_cnt = 1;
+	r_req->usr_write_pread_ns = rfuse_now_ns() - start_ns;
+	if (res > 0)
+		r_req->usr_write_pread_bytes = res;
 	//rfuse_count_pread();
 	if(res == -1) {
+		r_req->usr_write_pread_err_cnt = 1;
 		printf("Error : pread for write I/O failed\n");
 		fuse_reply_err(u_req, EIO);
 	}
@@ -1261,11 +1318,14 @@ do_write:
 		fi.flags = arg->flags;
 	}
 
-	if (u_req->se->op.write)
+	if (u_req->se->op.write) {
+		r_req->ldy_ts_backend_write_start_ns =
+			r_req->ldy_ts_prepare_submit_start_ns ? rfuse_now_ns() : 0;
 		u_req->se->op.write(u_req, nodeid, param, res,
 				arg->offset, &fi);
-	else
+	} else {
 		fuse_reply_err(u_req, ENOSYS);
+	}
 	
 }
 
@@ -1949,6 +2009,9 @@ bool rfuse_read_queue(struct rfuse_worker *w, struct rfuse_mt *mt, struct fuse_c
 	if (r_req->in.opcode >= FUSE_MAXOP || !rfuse_ll_ops[r_req->in.opcode].func)
 		goto reply_err;
 
+	if (r_req->ldy_ts_enqueue_ns)
+		r_req->ldy_lat_enqueue_to_dequeue_ns =
+			rfuse_elapsed_ns(r_req->ldy_ts_enqueue_ns);
 	GET_TIMESTAMPS(3)
 	if (r_req->in.opcode == FUSE_WRITE && rfuse_req_has_input_payload(u_req)) {
 		rfuse_ll_ops[r_req->in.opcode].func(u_req, r_req->in.nodeid);

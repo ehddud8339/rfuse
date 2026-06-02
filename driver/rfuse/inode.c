@@ -71,6 +71,47 @@ struct rfuse_path_lat_desc {
 
 static struct rfuse_path_lat_stat rfuse_path_lat_stats[RFUSE_PATH_LAT_NR];
 
+struct rfuse_usr_write_stat {
+	atomic64_t tempbuf_cnt;
+	atomic64_t tempbuf_ns;
+	atomic64_t fbuf_if_min_ns;
+	atomic64_t fbuf_if_max_ns;
+	atomic64_t pread_cnt;
+	atomic64_t pread_ns;
+	atomic64_t pread_min_ns;
+	atomic64_t pread_max_ns;
+	atomic64_t pread_bytes;
+	atomic64_t pread_err_cnt;
+};
+
+static struct rfuse_usr_write_stat rfuse_usr_write_stats;
+
+static void rfuse_usr_write_record_min(atomic64_t *stat, u64 nsec)
+{
+	s64 old = atomic64_read(stat);
+
+	while (!old || (s64)nsec < old) {
+		s64 prev = atomic64_cmpxchg(stat, old, nsec);
+
+		if (prev == old)
+			break;
+		old = prev;
+	}
+}
+
+static void rfuse_usr_write_record_max(atomic64_t *stat, u64 nsec)
+{
+	s64 old = atomic64_read(stat);
+
+	while ((s64)nsec > old) {
+		s64 prev = atomic64_cmpxchg(stat, old, nsec);
+
+		if (prev == old)
+			break;
+		old = prev;
+	}
+}
+
 /* LDY: RFUSE 내부 request allocation 경로의 세부 지연을 계측하기 위한 stats.
  * try_request_alloc/block_alloc 단계의 count/total/min/max를 저장한다.
  */
@@ -97,6 +138,34 @@ static const struct rfuse_path_lat_desc rfuse_path_lat_descs[RFUSE_PATH_LAT_NR] 
 		{ "copy_from_iter", RFUSE_PATH_LAT_GROUP_WRITE },
 	[RFUSE_PATH_LAT_WRITE_SIMPLE_BACKGROUND] =
 		{ "simple_background", RFUSE_PATH_LAT_GROUP_WRITE },
+	/* LDY: rfuse_perform_write() sync/page-cache write path의 단계별
+	 * latency를 path_lat_dump에 포함하기 위한 계측 counter.
+	 */
+	[RFUSE_PATH_LAT_WRITE_ALLOC_PAGE_DESC] =
+		{ "alloc_page_desc", RFUSE_PATH_LAT_GROUP_WRITE },
+	[RFUSE_PATH_LAT_WRITE_ALLOC_PAGE_COPY] =
+		{ "alloc_page_copy", RFUSE_PATH_LAT_GROUP_WRITE },
+	[RFUSE_PATH_LAT_WRITE_SIMPLE_REQUEST] =
+		{ "simple_request", RFUSE_PATH_LAT_GROUP_WRITE },
+	/* LDY: sync/page-cache write request가 submit, dequeue, backend write,
+	 * reply, completion으로 진행되는 각 구간 latency를 path_lat_dump에
+	 * 포함하기 위한 계측 counter.
+	 */
+	[RFUSE_PATH_LAT_WRITE_PREPARE_SUBMIT] =
+		{ "prepare_submit", RFUSE_PATH_LAT_GROUP_WRITE },
+	[RFUSE_PATH_LAT_WRITE_ENQUE_TO_DEQUE] =
+		{ "enque_to_deque", RFUSE_PATH_LAT_GROUP_WRITE },
+	[RFUSE_PATH_LAT_WRITE_BACKEND_WRITE] =
+		{ "backend_write", RFUSE_PATH_LAT_GROUP_WRITE },
+	[RFUSE_PATH_LAT_WRITE_REPLY_COMP] =
+		{ "reply_comp", RFUSE_PATH_LAT_GROUP_WRITE },
+	[RFUSE_PATH_LAT_WRITE_COMPLETE_REQ] =
+		{ "complete_req", RFUSE_PATH_LAT_GROUP_WRITE },
+	/* LDY: dev_do_write의 copy pages 구간 latency를 path_lat_dump에
+	 * 포함하기 위한 kernel-side 계측 counter.
+	 */
+	[RFUSE_PATH_LAT_DEV_DO_WRITE_COPY_PAGES] =
+		{ "dev_do_write_copy_pages", RFUSE_PATH_LAT_GROUP_WRITE },
 	[RFUSE_PATH_LAT_READ_WAIT_ASYNC_WRITE] =
 		{ "wait_async_write", RFUSE_PATH_LAT_GROUP_READ },
 	[RFUSE_PATH_LAT_READ_GET_REQ] =
@@ -107,6 +176,11 @@ static const struct rfuse_path_lat_desc rfuse_path_lat_descs[RFUSE_PATH_LAT_NR] 
 		{ "simple_background", RFUSE_PATH_LAT_GROUP_READ },
 	[RFUSE_PATH_LAT_READ_SIMPLE_REQUEST] =
 		{ "simple_request", RFUSE_PATH_LAT_GROUP_READ },
+	/* LDY: dev_do_read의 copy pages 구간 latency를 path_lat_dump에
+	 * 포함하기 위한 kernel-side 계측 counter.
+	 */
+	[RFUSE_PATH_LAT_DEV_DO_READ_COPY_PAGES] =
+		{ "dev_do_read_copy_pages", RFUSE_PATH_LAT_GROUP_READ },
 	[RFUSE_PATH_LAT_INTERNAL_TRY_REQUEST_ALLOC] =
 		{ "try_request_alloc", RFUSE_PATH_LAT_GROUP_INTERNAL },
 	[RFUSE_PATH_LAT_INTERNAL_BLOCK_ALLOC] =
@@ -145,6 +219,93 @@ void rfuse_path_lat_record(enum rfuse_path_lat_point point, u64 nsec)
 	}
 }
 
+void rfuse_path_lat_record_usr_write(struct rfuse_req *r_req)
+{
+	u64 val;
+
+	/* LDY: user daemon writes these instrumentation-only ABI fields before
+	 * replying. rfuse_request_end() is the single kernel-side consumer, so
+	 * READ_ONCE plus clearing the request slot prevents duplicate folding if
+	 * an abnormal path observes the slot again.
+	 */
+	val = READ_ONCE(r_req->usr_write_tempbuf_cnt);
+	if (val) {
+		atomic64_add(val, &rfuse_usr_write_stats.tempbuf_cnt);
+		WRITE_ONCE(r_req->usr_write_tempbuf_cnt, 0);
+	}
+
+	val = READ_ONCE(r_req->usr_write_tempbuf_ns);
+	if (val) {
+		atomic64_add(val, &rfuse_usr_write_stats.tempbuf_ns);
+		WRITE_ONCE(r_req->usr_write_tempbuf_ns, 0);
+	}
+
+	val = READ_ONCE(r_req->usr_write_fbuf_if_min_ns);
+	if (val) {
+		rfuse_usr_write_record_min(&rfuse_usr_write_stats.fbuf_if_min_ns,
+					   val);
+		WRITE_ONCE(r_req->usr_write_fbuf_if_min_ns, 0);
+	}
+
+	val = READ_ONCE(r_req->usr_write_fbuf_if_max_ns);
+	if (val) {
+		rfuse_usr_write_record_max(&rfuse_usr_write_stats.fbuf_if_max_ns,
+					   val);
+		WRITE_ONCE(r_req->usr_write_fbuf_if_max_ns, 0);
+	}
+
+	val = READ_ONCE(r_req->usr_write_pread_cnt);
+	if (val) {
+		atomic64_add(val, &rfuse_usr_write_stats.pread_cnt);
+		WRITE_ONCE(r_req->usr_write_pread_cnt, 0);
+	}
+
+	val = READ_ONCE(r_req->usr_write_pread_ns);
+	if (val) {
+		atomic64_add(val, &rfuse_usr_write_stats.pread_ns);
+		rfuse_usr_write_record_min(&rfuse_usr_write_stats.pread_min_ns,
+					   val);
+		rfuse_usr_write_record_max(&rfuse_usr_write_stats.pread_max_ns,
+					   val);
+		WRITE_ONCE(r_req->usr_write_pread_ns, 0);
+	}
+
+	val = READ_ONCE(r_req->usr_write_pread_bytes);
+	if (val) {
+		atomic64_add(val, &rfuse_usr_write_stats.pread_bytes);
+		WRITE_ONCE(r_req->usr_write_pread_bytes, 0);
+	}
+
+	val = READ_ONCE(r_req->usr_write_pread_err_cnt);
+	if (val) {
+		atomic64_add(val, &rfuse_usr_write_stats.pread_err_cnt);
+		WRITE_ONCE(r_req->usr_write_pread_err_cnt, 0);
+	}
+}
+
+/* LDY: userspace가 shared request에 기록한 sync/page-cache write path
+ * delta를 kernel path_lat_dump counter로 집계한다.
+ */
+void rfuse_path_lat_record_write_e2e(struct rfuse_req *r_req)
+{
+	u64 val;
+
+	if (!r_req)
+		return;
+
+	val = READ_ONCE(r_req->ldy_lat_enqueue_to_dequeue_ns);
+	if (val) {
+		rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_ENQUE_TO_DEQUE, val);
+		WRITE_ONCE(r_req->ldy_lat_enqueue_to_dequeue_ns, 0);
+	}
+
+	val = READ_ONCE(r_req->ldy_lat_backend_write_ns);
+	if (val) {
+		rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_BACKEND_WRITE, val);
+		WRITE_ONCE(r_req->ldy_lat_backend_write_ns, 0);
+	}
+}
+
 static void rfuse_path_lat_reset(void)
 {
 	int i;
@@ -155,6 +316,17 @@ static void rfuse_path_lat_reset(void)
 		atomic64_set(&rfuse_path_lat_stats[i].min_ns, 0);
 		atomic64_set(&rfuse_path_lat_stats[i].max_ns, 0);
 	}
+
+	atomic64_set(&rfuse_usr_write_stats.tempbuf_cnt, 0);
+	atomic64_set(&rfuse_usr_write_stats.tempbuf_ns, 0);
+	atomic64_set(&rfuse_usr_write_stats.fbuf_if_min_ns, 0);
+	atomic64_set(&rfuse_usr_write_stats.fbuf_if_max_ns, 0);
+	atomic64_set(&rfuse_usr_write_stats.pread_cnt, 0);
+	atomic64_set(&rfuse_usr_write_stats.pread_ns, 0);
+	atomic64_set(&rfuse_usr_write_stats.pread_min_ns, 0);
+	atomic64_set(&rfuse_usr_write_stats.pread_max_ns, 0);
+	atomic64_set(&rfuse_usr_write_stats.pread_bytes, 0);
+	atomic64_set(&rfuse_usr_write_stats.pread_err_cnt, 0);
 }
 
 static size_t rfuse_path_lat_dump_group(char *buffer, size_t len,
@@ -209,6 +381,52 @@ static size_t rfuse_path_lat_dump_group(char *buffer, size_t len,
 	return len;
 }
 
+static size_t rfuse_usr_write_dump(char *buffer, size_t len)
+{
+	u64 tempbuf_cnt = atomic64_xchg(&rfuse_usr_write_stats.tempbuf_cnt, 0);
+	u64 tempbuf_ns = atomic64_xchg(&rfuse_usr_write_stats.tempbuf_ns, 0);
+	u64 fbuf_if_min_ns = atomic64_xchg(&rfuse_usr_write_stats.fbuf_if_min_ns, 0);
+	u64 fbuf_if_max_ns = atomic64_xchg(&rfuse_usr_write_stats.fbuf_if_max_ns, 0);
+	u64 pread_cnt = atomic64_xchg(&rfuse_usr_write_stats.pread_cnt, 0);
+	u64 pread_ns = atomic64_xchg(&rfuse_usr_write_stats.pread_ns, 0);
+	u64 pread_min_ns = atomic64_xchg(&rfuse_usr_write_stats.pread_min_ns, 0);
+	u64 pread_max_ns = atomic64_xchg(&rfuse_usr_write_stats.pread_max_ns, 0);
+	atomic64_xchg(&rfuse_usr_write_stats.pread_bytes, 0);
+	atomic64_xchg(&rfuse_usr_write_stats.pread_err_cnt, 0);
+
+	if (len >= PAGE_SIZE)
+		return len;
+
+	len += scnprintf(buffer + len, PAGE_SIZE - len,
+			 "[RFUSE-USER-WRITE-COPY-STATS]\n"
+			 "%-28s %12s %16s %16s %16s %16s\n",
+			 "stage", "count", "total_ns", "avg_ns",
+			 "min_ns", "max_ns");
+
+	if (len < PAGE_SIZE)
+		len += scnprintf(buffer + len, PAGE_SIZE - len,
+				 "%-28s %12llu %16llu %16llu %16llu %16llu\n",
+				 "user_write_fbuf_if_block",
+				 (unsigned long long)tempbuf_cnt,
+				 (unsigned long long)tempbuf_ns,
+				 (unsigned long long)(tempbuf_cnt ?
+				 div64_u64(tempbuf_ns, tempbuf_cnt) : 0),
+				 (unsigned long long)fbuf_if_min_ns,
+				 (unsigned long long)fbuf_if_max_ns);
+	if (len < PAGE_SIZE)
+		len += scnprintf(buffer + len, PAGE_SIZE - len,
+				 "%-28s %12llu %16llu %16llu %16llu %16llu\n\n",
+				 "user_write_pread",
+				 (unsigned long long)pread_cnt,
+				 (unsigned long long)pread_ns,
+				 (unsigned long long)(pread_cnt ?
+				 div64_u64(pread_ns, pread_cnt) : 0),
+				 (unsigned long long)pread_min_ns,
+				 (unsigned long long)pread_max_ns);
+
+	return len;
+}
+
 static int path_lat_dump_get(char *buffer, const struct kernel_param *kp)
 {
 	size_t len = 0;
@@ -223,6 +441,8 @@ static int path_lat_dump_get(char *buffer, const struct kernel_param *kp)
 		len = rfuse_path_lat_dump_group(buffer, len,
 						"[RFUSE-INTERNAL-STATS]",
 						RFUSE_PATH_LAT_GROUP_INTERNAL);
+	if (len < PAGE_SIZE)
+		len = rfuse_usr_write_dump(buffer, len);
 
 	return len;
 }

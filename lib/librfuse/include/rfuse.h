@@ -231,10 +231,36 @@ struct rfuse_req{
 	struct rfuse_async_wrt_ctx wrt_ctx;
 	bool has_wrt_ctx;
 	void (*end)(struct fuse_mount *fm, struct rfuse_req *r_req, int error);
+
+	/* LDY: librfuse write data-copy instrumentation ABI extension.
+	 * rfuse_do_write() records fallback temp-buffer path and pread()
+	 * latency so the kernel path_lat_dump interface can aggregate it.
+	 * These fields are instrumentation-only and do not affect request
+	 * semantics.
+	 */
+	uint64_t usr_write_tempbuf_cnt;
+	uint64_t usr_write_tempbuf_ns;
+	uint64_t usr_write_fbuf_if_min_ns;
+	uint64_t usr_write_fbuf_if_max_ns;
+	uint64_t usr_write_pread_cnt;
+	uint64_t usr_write_pread_ns;
+	uint64_t usr_write_pread_bytes;
+	uint64_t usr_write_pread_err_cnt;
+
+	/* LDY: kernel/user 경계를 넘는 sync/page-cache write path 단계별
+	 * latency 측정을 위한 timestamp/delta 전달용 필드. request
+	 * semantics에는 영향을 주지 않는다.
+	 */
+	uint64_t ldy_ts_prepare_submit_start_ns;
+	uint64_t ldy_ts_enqueue_ns;
+	uint64_t ldy_ts_backend_write_start_ns;
+	uint64_t ldy_ts_reply_comp_start_ns;
+	uint64_t ldy_lat_enqueue_to_dequeue_ns;
+	uint64_t ldy_lat_backend_write_ns;
 };
 
 #ifdef __cplusplus
-	static_assert(sizeof(struct rfuse_req) == 368, "rfuse_req ABI drift");
+	static_assert(sizeof(struct rfuse_req) == 480, "rfuse_req ABI drift");
 	static_assert(offsetof(struct rfuse_req, riq_id) == 68, "rfuse_req riq_id offset drift");
 	static_assert(offsetof(struct rfuse_req, payload_page_index) == 232, "rfuse_req payload page index offset drift");
 	static_assert(offsetof(struct rfuse_req, payload_offset) == 240, "rfuse_req payload offset drift");
@@ -242,8 +268,12 @@ struct rfuse_req{
 	static_assert(offsetof(struct rfuse_req, wrt_ctx) == 272, "rfuse_req wrt_ctx offset drift");
 	static_assert(offsetof(struct rfuse_req, has_wrt_ctx) == 352, "rfuse_req has_wrt_ctx offset drift");
 	static_assert(offsetof(struct rfuse_req, end) == 360, "rfuse_req end offset drift");
+	static_assert(offsetof(struct rfuse_req, usr_write_tempbuf_cnt) == 368, "rfuse_req user write stats offset drift");
+	static_assert(offsetof(struct rfuse_req, usr_write_pread_cnt) == 400, "rfuse_req user write pread stats offset drift");
+	static_assert(offsetof(struct rfuse_req, ldy_ts_prepare_submit_start_ns) == 432, "rfuse_req write timestamp offset drift");
+	static_assert(offsetof(struct rfuse_req, ldy_lat_enqueue_to_dequeue_ns) == 464, "rfuse_req write latency offset drift");
 #else
-	_Static_assert(sizeof(struct rfuse_req) == 368, "rfuse_req ABI drift");
+	_Static_assert(sizeof(struct rfuse_req) == 480, "rfuse_req ABI drift");
 	_Static_assert(offsetof(struct rfuse_req, riq_id) == 68, "rfuse_req riq_id offset drift");
 	_Static_assert(offsetof(struct rfuse_req, payload_page_index) == 232, "rfuse_req payload page index offset drift");
 	_Static_assert(offsetof(struct rfuse_req, payload_offset) == 240, "rfuse_req payload offset drift");
@@ -251,6 +281,10 @@ struct rfuse_req{
 	_Static_assert(offsetof(struct rfuse_req, wrt_ctx) == 272, "rfuse_req wrt_ctx offset drift");
 	_Static_assert(offsetof(struct rfuse_req, has_wrt_ctx) == 352, "rfuse_req has_wrt_ctx offset drift");
 	_Static_assert(offsetof(struct rfuse_req, end) == 360, "rfuse_req end offset drift");
+	_Static_assert(offsetof(struct rfuse_req, usr_write_tempbuf_cnt) == 368, "rfuse_req user write stats offset drift");
+	_Static_assert(offsetof(struct rfuse_req, usr_write_pread_cnt) == 400, "rfuse_req user write pread stats offset drift");
+	_Static_assert(offsetof(struct rfuse_req, ldy_ts_prepare_submit_start_ns) == 432, "rfuse_req write timestamp offset drift");
+	_Static_assert(offsetof(struct rfuse_req, ldy_lat_enqueue_to_dequeue_ns) == 464, "rfuse_req write latency offset drift");
 #endif
 
 struct rfuse_interrupt_entry{

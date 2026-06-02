@@ -1799,6 +1799,7 @@ static int rfuse_queue_request(struct rfuse_req *r_req){
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
 	struct rfuse_address_entry *entry;
+	u64 now;
 
 	if(test_bit(FR_BACKGROUND, &r_req->flags)){
 		__set_bit(FR_ASYNC,&r_req->flags);
@@ -1814,10 +1815,16 @@ static int rfuse_queue_request(struct rfuse_req *r_req){
 	entry->request = r_req->index;				// fill entry
 	if(!test_bit(FR_BACKGROUND, &r_req->flags)) // only increase the reference count for synchronous requests
 		__rfuse_get_request(r_req);
+	if (r_req->ldy_ts_prepare_submit_start_ns)
+		r_req->ldy_ts_enqueue_ns = ktime_get_ns();
 	rfuse_submit_pending_tail(riq);				// Commit entry
+	now = ktime_get_ns();
+	if (r_req->ldy_ts_prepare_submit_start_ns)
+		rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_PREPARE_SUBMIT,
+				      now - r_req->ldy_ts_prepare_submit_start_ns);
 	spin_unlock(&riq->lock);					// unlock
-	if(waitqueue_active(&riq->idle_user_waitq)){
-		wake_up(&riq->idle_user_waitq);		// Wake up idle user thread
+		if(waitqueue_active(&riq->idle_user_waitq)){
+			wake_up(&riq->idle_user_waitq);		// Wake up idle user thread
 	}
 	return 0;
 }
@@ -1942,6 +1949,16 @@ void rfuse_request_end(struct rfuse_req *r_req){
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
 	LIST_HEAD(to_queue);
+	u64 complete_req_start;
+	u64 request_end_start;
+	bool record_write_e2e = r_req->ldy_ts_prepare_submit_start_ns != 0;
+
+	request_end_start = ktime_get_ns();
+	complete_req_start = request_end_start;
+	if (record_write_e2e && r_req->ldy_ts_reply_comp_start_ns)
+		rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_REPLY_COMP,
+				      request_end_start -
+				      r_req->ldy_ts_reply_comp_start_ns);
 
 	if(test_bit(FR_BACKGROUND, &r_req->flags)){
 		spin_lock(&riq->bg_lock);
@@ -1978,11 +1995,18 @@ void rfuse_request_end(struct rfuse_req *r_req){
 			r_req->out.error = err;
 	}
 
+	rfuse_path_lat_record_usr_write(r_req);
+	if (record_write_e2e)
+		rfuse_path_lat_record_write_e2e(r_req);
+
 	if (test_bit(FR_ASYNC, &r_req->flags)) {
 		r_req->end(r_req->fm, r_req, r_req->out.error);
 	}
 
 	rfuse_put_request(r_req);
+	if (record_write_e2e)
+		rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_COMPLETE_REQ,
+				      ktime_get_ns() - complete_req_start);
 }
 
 
@@ -2356,6 +2380,7 @@ ssize_t rfuse_dev_do_read(struct fuse_dev *fud, struct file *file, struct iov_it
 	unsigned i;
 	unsigned nbytes;
 	ssize_t res = 0;
+	u64 path_lat_start;
 
 	struct rfuse_copy_state rcs;	
 	int riq_id = (int)((index & RFUSE_RIQ_ID_MASK) >> 16);
@@ -2372,19 +2397,26 @@ ssize_t rfuse_dev_do_read(struct fuse_dev *fud, struct file *file, struct iov_it
 	rcs.r_req = r_req;
 	nbytes = r_req->in.arglen[0];
 
+  // dev do read copy pages start
+	path_lat_start = ktime_get_ns();
 	for(i =0; i<rp->num_pages && (nbytes); i++){
 		int err;
 		unsigned int offset = rp->descs[i].offset;
 		unsigned int count = min(nbytes,rp->descs[i].length);
 
 		err = rfuse_copy_page(&rcs, &rp->pages[i], offset, count, 0);
-		if(err)
+		if(err) {
+			rfuse_path_lat_record(RFUSE_PATH_LAT_DEV_DO_READ_COPY_PAGES,
+					      ktime_get_ns() - path_lat_start);
 			return err;
+		}
 		nbytes -= count;
 		res += count;
 	}
 	rfuse_copy_finish(&rcs);
-
+	rfuse_path_lat_record(RFUSE_PATH_LAT_DEV_DO_READ_COPY_PAGES,
+			      ktime_get_ns() - path_lat_start);
+  // dev do read copy pages end
 	return res;
 }
 
@@ -2461,6 +2493,7 @@ ssize_t rfuse_dev_do_write(struct fuse_dev *fud, struct iov_iter *from, unsigned
 	struct rfuse_pages *rp;
 	unsigned i;
 	ssize_t res = 0;
+	u64 path_lat_start;
 
 	struct rfuse_copy_state rcs;	
 	int riq_id = (int)((index & RFUSE_RIQ_ID_MASK) >> 16);
@@ -2476,19 +2509,26 @@ ssize_t rfuse_dev_do_write(struct fuse_dev *fud, struct iov_iter *from, unsigned
 	if(r_req->out.arglen > nbytes)
 		r_req->out.arglen = nbytes;
 
+  // dev do write copy pages start
+	path_lat_start = ktime_get_ns();
 	for(i =0; i < rp->num_pages && (nbytes); i++){
 		int err;
 		unsigned int offset = rp->descs[i].offset;
 		unsigned int count = min(nbytes,rp->descs[i].length);
 	
 		err = rfuse_copy_page(&rcs, &rp->pages[i],offset, count,0);
-		if(err)
+		if(err) {
+			rfuse_path_lat_record(RFUSE_PATH_LAT_DEV_DO_WRITE_COPY_PAGES,
+					      ktime_get_ns() - path_lat_start);
 			return err;
+		}
 		nbytes -= count;
 		res += count;
 	}
 	rfuse_copy_finish(&rcs);
-
+	rfuse_path_lat_record(RFUSE_PATH_LAT_DEV_DO_WRITE_COPY_PAGES,
+			      ktime_get_ns() - path_lat_start);
+  // dev do write copy pages end 
 	return res;
 }
 
