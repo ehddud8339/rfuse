@@ -58,21 +58,59 @@ struct rfuse_path_lat_stat {
 	atomic64_t max_ns;
 };
 
+enum rfuse_path_lat_group {
+	RFUSE_PATH_LAT_GROUP_READ,
+	RFUSE_PATH_LAT_GROUP_WRITE,
+	RFUSE_PATH_LAT_GROUP_INTERNAL,
+};
+
+struct rfuse_path_lat_desc {
+	const char *name;
+	enum rfuse_path_lat_group group;
+};
+
 static struct rfuse_path_lat_stat rfuse_path_lat_stats[RFUSE_PATH_LAT_NR];
 
-static const char * const rfuse_path_lat_names[RFUSE_PATH_LAT_NR] = {
-	[RFUSE_PATH_LAT_WRITE_CTX_KZALLOC] =
-		"rfuse_payload_write_ctx_kzalloc",
-	[RFUSE_PATH_LAT_ASYNC_WAIT_REGISTER] =
-		"rfuse_payload_async_wait_and_register",
-	[RFUSE_PATH_LAT_TRY_GET_REQ] = "try_rfuse_get_req",
-	[RFUSE_PATH_LAT_RESERVE_PAYLOAD] = "rfuse_reserve_payload",
+/* LDY: RFUSE 내부 request allocation 경로의 세부 지연을 계측하기 위한 stats.
+ * try_request_alloc/block_alloc 단계의 count/total/min/max를 저장한다.
+ */
+static const struct rfuse_path_lat_desc rfuse_path_lat_descs[RFUSE_PATH_LAT_NR] = {
+	[RFUSE_PATH_LAT_WRITE_CTX_INIT] =
+		{ "write_ctx_init", RFUSE_PATH_LAT_GROUP_WRITE },
+	[RFUSE_PATH_LAT_WRITE_ASYNC_WAIT_REGISTER] =
+		{ "write_async_wait_register", RFUSE_PATH_LAT_GROUP_WRITE },
+	[RFUSE_PATH_LAT_WRITE_ASYNC_OVERLAPS_LOCKED] =
+		{ "  overlaps_locked", RFUSE_PATH_LAT_GROUP_WRITE },
+	[RFUSE_PATH_LAT_WRITE_ASYNC_WAIT_EVENT] =
+		{ "  wait_event", RFUSE_PATH_LAT_GROUP_WRITE },
+	[RFUSE_PATH_LAT_WRITE_ASYNC_RANGE_INSERT] =
+		{ "  async_range_insert", RFUSE_PATH_LAT_GROUP_WRITE },
+	[RFUSE_PATH_LAT_WRITE_GET_REQ] =
+		{ "get_req", RFUSE_PATH_LAT_GROUP_WRITE },
+	[RFUSE_PATH_LAT_WRITE_RESERVE_PAYLOAD] =
+		{ "reserve_payload", RFUSE_PATH_LAT_GROUP_WRITE },
 	[RFUSE_PATH_LAT_PAYLOAD_RESERVE_LOCKED] =
-		"rfuse_payload_reserve_locked",
+		{ "payload_reserve_locked", RFUSE_PATH_LAT_GROUP_INTERNAL },
 	[RFUSE_PATH_LAT_PAYLOAD_WAIT_INTERRUPTIBLE] =
-		"rfuse_payload_wait_event_interruptible",
-	[RFUSE_PATH_LAT_COPY_FROM_ITER] = "rfuse_payload_copy_from_iter",
-	[RFUSE_PATH_LAT_SIMPLE_BACKGROUND] = "rfuse_simple_background",
+		{ "payload_wait_interruptible", RFUSE_PATH_LAT_GROUP_INTERNAL },
+	[RFUSE_PATH_LAT_WRITE_COPY_FROM_ITER] =
+		{ "copy_from_iter", RFUSE_PATH_LAT_GROUP_WRITE },
+	[RFUSE_PATH_LAT_WRITE_SIMPLE_BACKGROUND] =
+		{ "simple_background", RFUSE_PATH_LAT_GROUP_WRITE },
+	[RFUSE_PATH_LAT_READ_WAIT_ASYNC_WRITE] =
+		{ "wait_async_write", RFUSE_PATH_LAT_GROUP_READ },
+	[RFUSE_PATH_LAT_READ_GET_REQ] =
+		{ "get_req", RFUSE_PATH_LAT_GROUP_READ },
+	[RFUSE_PATH_LAT_READ_RESERVE_PAYLOAD] =
+		{ "reserve_payload", RFUSE_PATH_LAT_GROUP_READ },
+	[RFUSE_PATH_LAT_READ_SIMPLE_BACKGROUND] =
+		{ "simple_background", RFUSE_PATH_LAT_GROUP_READ },
+	[RFUSE_PATH_LAT_READ_SIMPLE_REQUEST] =
+		{ "simple_request", RFUSE_PATH_LAT_GROUP_READ },
+	[RFUSE_PATH_LAT_INTERNAL_TRY_REQUEST_ALLOC] =
+		{ "try_request_alloc", RFUSE_PATH_LAT_GROUP_INTERNAL },
+	[RFUSE_PATH_LAT_INTERNAL_BLOCK_ALLOC] =
+		{ "block_alloc", RFUSE_PATH_LAT_GROUP_INTERNAL },
 };
 
 void rfuse_path_lat_record(enum rfuse_path_lat_point point, u64 nsec)
@@ -119,21 +157,43 @@ static void rfuse_path_lat_reset(void)
 	}
 }
 
-static int path_lat_dump_get(char *buffer, const struct kernel_param *kp)
+static size_t rfuse_path_lat_dump_group(char *buffer, size_t len,
+					const char *title,
+					enum rfuse_path_lat_group group)
 {
-	size_t len = 0;
 	int i;
+	bool has_rows = false;
 
 	for (i = 0; i < RFUSE_PATH_LAT_NR; i++) {
-		u64 count = atomic64_xchg(&rfuse_path_lat_stats[i].count, 0);
-		u64 total = atomic64_xchg(&rfuse_path_lat_stats[i].total_ns, 0);
-		u64 min = atomic64_xchg(&rfuse_path_lat_stats[i].min_ns, 0);
-		u64 max = atomic64_xchg(&rfuse_path_lat_stats[i].max_ns, 0);
-		u64 avg = count ? div64_u64(total, count) : 0;
+		u64 count;
+		u64 total;
+		u64 min;
+		u64 max;
+		u64 avg;
+
+		if (!rfuse_path_lat_descs[i].name ||
+		    rfuse_path_lat_descs[i].group != group)
+			continue;
+
+		if (!has_rows) {
+			len += scnprintf(buffer + len, PAGE_SIZE - len,
+					 "%s\n"
+					 "%-28s %12s %16s %16s %16s %16s\n",
+					 title, "stage", "count",
+					 "total_ns", "avg_ns",
+					 "min_ns", "max_ns");
+			has_rows = true;
+		}
+
+		count = atomic64_xchg(&rfuse_path_lat_stats[i].count, 0);
+		total = atomic64_xchg(&rfuse_path_lat_stats[i].total_ns, 0);
+		min = atomic64_xchg(&rfuse_path_lat_stats[i].min_ns, 0);
+		max = atomic64_xchg(&rfuse_path_lat_stats[i].max_ns, 0);
+		avg = count ? div64_u64(total, count) : 0;
 
 		len += scnprintf(buffer + len, PAGE_SIZE - len,
-				 "%s count=%llu total_ns=%llu avg_ns=%llu min_ns=%llu max_ns=%llu\n",
-				 rfuse_path_lat_names[i],
+				 "%-28s %12llu %16llu %16llu %16llu %16llu\n",
+				 rfuse_path_lat_descs[i].name,
 				 (unsigned long long)count,
 				 (unsigned long long)total,
 				 (unsigned long long)avg,
@@ -142,6 +202,27 @@ static int path_lat_dump_get(char *buffer, const struct kernel_param *kp)
 		if (len >= PAGE_SIZE)
 			break;
 	}
+
+	if (has_rows && len < PAGE_SIZE)
+		len += scnprintf(buffer + len, PAGE_SIZE - len, "\n");
+
+	return len;
+}
+
+static int path_lat_dump_get(char *buffer, const struct kernel_param *kp)
+{
+	size_t len = 0;
+	len = rfuse_path_lat_dump_group(buffer, len,
+					"[RFUSE-READ-PATH-STATS]",
+					RFUSE_PATH_LAT_GROUP_READ);
+	if (len < PAGE_SIZE)
+		len = rfuse_path_lat_dump_group(buffer, len,
+						"[RFUSE-WRITE-PATH-STATS]",
+						RFUSE_PATH_LAT_GROUP_WRITE);
+	if (len < PAGE_SIZE)
+		len = rfuse_path_lat_dump_group(buffer, len,
+						"[RFUSE-INTERNAL-STATS]",
+						RFUSE_PATH_LAT_GROUP_INTERNAL);
 
 	return len;
 }
@@ -165,7 +246,7 @@ module_param_call(path_lat_dump, path_lat_dump_set, path_lat_dump_get,
 		  NULL, 0644);
 __MODULE_PARM_TYPE(path_lat_dump, "bool");
 MODULE_PARM_DESC(path_lat_dump,
-	"Read RFUSE async write path latency stats; write 1 to reset");
+	"Read RFUSE READ/WRITE path latency stats; write 1 to reset");
 
 #define FUSE_SUPER_MAGIC 0x65735546
 

@@ -292,8 +292,8 @@ static int rfuse_payload_try_alloc(struct rfuse_req *r_req, size_t need,
 	spin_lock(&riq->payload_lock);
 	path_lat_start = ktime_get_ns();
 	ret = rfuse_payload_reserve_locked(r_req, need_pages);
-	rfuse_path_lat_record(RFUSE_PATH_LAT_PAYLOAD_RESERVE_LOCKED,
-			      ktime_get_ns() - path_lat_start);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_PAYLOAD_RESERVE_LOCKED,
+				      ktime_get_ns() - path_lat_start);
 	if (ret) {
 		rfuse_payload_reset_unreserved_req_locked(r_req);
 		rfuse_payload_capture_failure_locked(riq, need_pages, state);
@@ -604,6 +604,7 @@ int rfuse_import_payload(struct rfuse_req *r_req)
 int rfuse_reserve_payload(struct rfuse_req *r_req, size_t len,
 			  unsigned int payload_flags, bool may_wait)
 {
+	bool allow_fallback;
 	int ret;
 
 	if (!r_req)
@@ -619,10 +620,19 @@ int rfuse_reserve_payload(struct rfuse_req *r_req, size_t len,
 		return len <= r_req->payload_capacity ? 0 : -EINVAL;
 
 	rfuse_payload_set_transport_flags(r_req, payload_flags);
+	allow_fallback =
+		(r_req->in.opcode == FUSE_WRITE &&
+		 payload_flags == RFUSE_PAYLOAD_IN) ||
+		(r_req->in.opcode == FUSE_READ &&
+		 payload_flags == RFUSE_PAYLOAD_OUT);
 
-	ret = rfuse_payload_alloc(r_req, len, may_wait);
+	ret = rfuse_payload_alloc(r_req, len,
+				  allow_fallback ? false : may_wait);
 	if (ret) {
 		rfuse_payload_clear_transport_flags(r_req);
+		if (allow_fallback &&
+		    (ret == -EAGAIN || ret == -E2BIG))
+			return RFUSE_PAYLOAD_FALLBACK_ERR;
 		return ret;
 	}
 
@@ -752,17 +762,20 @@ static void rfuse_drop_waiting(struct fuse_conn *fc)
 
 static bool rfuse_block_alloc(struct fuse_conn *fc, bool for_background, int riq_id)
 {
-	(void)for_background;
-	(void)riq_id;
+	struct rfuse_iqueue *riq;
 
-	return !fc->initialized;
+	if (!fc->initialized)
+		return true;
+	if (!for_background)
+		return false;
+
+	riq = rfuse_get_specific_iqueue(fc, riq_id);
+	return riq->blocked;
 }
 
 static bool rfuse_background_submission_available(struct rfuse_iqueue *riq)
 {
-	(void)riq;
-
-	return true;
+	return riq->active_background < riq->max_background;
 }
 
 // Get a unique request number 
@@ -895,6 +908,7 @@ void rfuse_iqueue_init(struct fuse_conn *fc, void *priv){
 		riq[i]->congestion_threshold = FUSE_DEFAULT_CONGESTION_THRESHOLD;
 		riq[i]->num_background = 0;
 		riq[i]->active_background = 0;
+		riq[i]->blocked = 0;
 
 		riq[i]->num_sync_sleeping = 0;
 	}
@@ -1045,16 +1059,17 @@ static int select_numa_aware(struct fuse_conn *fc)
 	if (numa_id < 0)
 		return cpu_id;
 
-	for (offset = 1; offset < NUM_NUMA_NODES; offset++) {
-		int idx = (start_idx + offset) % NUM_NUMA_NODES;
-		int riq_id = numa_group[numa_id][idx];
-		struct rfuse_iqueue *riq = fc->riq[riq_id];
+  for (;;) {
+  	for (offset = 1; offset < NUM_NUMA_NODES; offset++) {
+	  	int idx = (start_idx + offset) % NUM_NUMA_NODES;
+		  int riq_id = numa_group[numa_id][idx];
+  		struct rfuse_iqueue *riq = fc->riq[riq_id];
 
-		if (READ_ONCE(riq->num_background) <= READ_ONCE(riq->congestion_threshold))
-			return riq_id;
-	}
-
-	return cpu_id;
+	  	if (READ_ONCE(riq->num_background) <= READ_ONCE(riq->congestion_threshold))
+		  	return riq_id;
+  	}
+    cond_resched();
+  }
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc,
@@ -1202,16 +1217,8 @@ uint32_t rfuse_get_request_buffer(struct fuse_mount *fm, int riq_id){
 		if(request_index == riq->reqbm.bitmap_size){
 			// There are no empty request buffer
 			riq->reqbm.full = 1; // set to full
-			pr_info("RFUSE: request buffer throttle start riq=%d full=%d pid=%d\n",
-				 riq_id, READ_ONCE(riq->reqbm.full),
-				 current->pid);
 			spin_unlock(&riq->lock);
 			wait_event_interruptible(riq->waitq, !READ_ONCE(riq->reqbm.full));
-      /*
-			pr_info("RFUSE: request buffer throttle end riq=%d full=%d pid=%d\n",
-				 riq_id, READ_ONCE(riq->reqbm.full),
-				 current->pid);
-      */
 		}
 		else{
 			__set_bit(request_index,riq->reqbm.bitmap);
@@ -1229,7 +1236,7 @@ void rfuse_put_request_buffer(struct fuse_mount *fm, uint32_t request_index, int
 
 	if(riq->reqbm.full == 1){
 		riq->reqbm.full = 0;
-		wake_up(&riq->waitq);
+		wake_up_all(&riq->waitq);
 	}
 	spin_unlock(&riq->lock);
 }
@@ -1246,16 +1253,8 @@ uint32_t rfuse_get_argument_buffer(struct fuse_mount *fm, int riq_id){
 		if(arg_index == riq->argbm.bitmap_size){
 			// There are no empty request buffer
 			riq->argbm.full = 1; // set to full
-			pr_info("RFUSE: argument buffer throttle start riq=%d full=%d pid=%d\n",
-				 riq_id, READ_ONCE(riq->argbm.full),
-				 current->pid);
 			spin_unlock(&riq->lock);
 			wait_event_interruptible(riq->waitq,!READ_ONCE(riq->argbm.full));
-      /*
-			pr_info("RFUSE: argument buffer throttle end riq=%d full=%d pid=%d\n",
-				 riq_id, READ_ONCE(riq->argbm.full),
-				 current->pid);
-      */
 		}
 		else{
 			__set_bit(arg_index,riq->argbm.bitmap);
@@ -1274,7 +1273,7 @@ void rfuse_put_argument_buffer(struct fuse_mount *fm, uint32_t arg_index, int ri
 	
 	if(riq->argbm.full == 1){
 		riq->argbm.full = 0;
-		wake_up(&riq->waitq);
+		wake_up_all(&riq->waitq);
 	}
 	spin_unlock(&riq->lock);
 }
@@ -1408,23 +1407,9 @@ struct rfuse_req *rfuse_get_req(struct fuse_mount *fm, bool for_background,
 		if(rfuse_block_alloc(fc, for_background, r_req->riq_id)){
 			err = -EINTR;
 			riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
-      
-			pr_info("RFUSE: background depth throttle start riq=%d req=%u opcode=%u num_background=%u active_background=%u max_background=%u blocked=%d pid=%d\n",
-				 r_req->riq_id, r_req->index, r_req->in.opcode,
-				 riq->num_background, riq->active_background,
-				 riq->max_background, riq->blocked,
-				 current->pid);
-      
 			if (wait_event_killable_exclusive(riq->blocked_waitq, !rfuse_block_alloc(fc, for_background, r_req->riq_id))) {
 				goto out;
 			}
-      /*
-			pr_info("RFUSE: background depth throttle end riq=%d req=%u opcode=%u num_background=%u active_background=%u max_background=%u blocked=%d pid=%d\n",
-				 r_req->riq_id, r_req->index, r_req->in.opcode,
-				 riq->num_background, riq->active_background,
-				 riq->max_background, riq->blocked,
-				 current->pid);
-      */
 		}
 
 
@@ -1490,19 +1475,11 @@ static struct rfuse_req *try_rfuse_request_alloc_on_riq(struct fuse_mount *fm,
 	do {
 		req_index = try_rfuse_get_request_buffer(fm, riq_id); // Get a new index
 		if(req_index == -1) {
-			pr_info("RFUSE: request buffer throttle start riq=%d async=1 full=%d pid=%d\n",
-				 riq_id, READ_ONCE(riq->reqbm.full),
-				 current->pid);
 			if(file_lock)
 				spin_unlock(file_lock);
 			wait_event_interruptible(riq->waitq, !READ_ONCE(riq->reqbm.full));
 			if(file_lock)
 				spin_lock(file_lock);
-      /*
-			pr_info("RFUSE: request buffer throttle end riq=%d async=1 full=%d pid=%d\n",
-				 riq_id, READ_ONCE(riq->reqbm.full),
-				 current->pid);
-      */
 		}
 	} while(req_index == -1);
 	
@@ -1538,12 +1515,16 @@ struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm,
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_req *r_req;
 	struct rfuse_iqueue *riq;
+	u64 path_lat_start;
 	int err;
 
 	if(force) {
 		atomic_inc(&fc->num_waiting);
 
+		path_lat_start = ktime_get_ns();
 		r_req = try_rfuse_request_alloc(fm, payload_len, file_lock);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_INTERNAL_TRY_REQUEST_ALLOC,
+				      ktime_get_ns() - path_lat_start);
 		err = -ENOMEM;
 		if (!r_req) {
 			if (for_background)
@@ -1574,7 +1555,10 @@ struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm,
 			goto out; 
 		}
 
+		path_lat_start = ktime_get_ns();
 		r_req = try_rfuse_request_alloc(fm, payload_len, file_lock);
+		rfuse_path_lat_record(RFUSE_PATH_LAT_INTERNAL_TRY_REQUEST_ALLOC,
+				      ktime_get_ns() - path_lat_start);
 		err = -ENOMEM;
 		if (!r_req) {
 			if (for_background)
@@ -1583,27 +1567,18 @@ struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm,
 		}
 
 		// Pass riq_id to find riq if it needs to wait
+		path_lat_start = ktime_get_ns();
 		if(rfuse_block_alloc(fc, for_background, r_req->riq_id)){
 			err = -EINTR;
 			riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
-      /*
-			pr_info("RFUSE: background depth throttle start riq=%d req=%u opcode=%u num_background=%u active_background=%u max_background=%u blocked=%d pid=%d\n",
-				 r_req->riq_id, r_req->index, r_req->in.opcode,
-				 riq->num_background, riq->active_background,
-				 riq->max_background, riq->blocked,
-				 current->pid);
-      */
 			if (wait_event_killable_exclusive(riq->blocked_waitq, !rfuse_block_alloc(fc, for_background, r_req->riq_id))) {
+				rfuse_path_lat_record(RFUSE_PATH_LAT_INTERNAL_BLOCK_ALLOC,
+						      ktime_get_ns() - path_lat_start);
 				goto out;
 			}
-      /*
-			pr_info("RFUSE: background depth throttle end riq=%d req=%u opcode=%u num_background=%u active_background=%u max_background=%u blocked=%d pid=%d\n",
-				 r_req->riq_id, r_req->index, r_req->in.opcode,
-				 riq->num_background, riq->active_background,
-				 riq->max_background, riq->blocked,
-				 current->pid);
-      */
 		}
+		rfuse_path_lat_record(RFUSE_PATH_LAT_INTERNAL_BLOCK_ALLOC,
+				      ktime_get_ns() - path_lat_start);
 
 
 		r_req->in.uid = from_kuid(fc->user_ns, current_fsuid());
@@ -1819,7 +1794,7 @@ static void rfuse_request_wait_answer(struct rfuse_req *r_req){
 	wait_event(r_req->waitq, test_bit(FR_FINISHED, &r_req->flags));
 }
 
-static void rfuse_queue_request(struct rfuse_req *r_req){
+static int rfuse_queue_request(struct rfuse_req *r_req){
 	struct fuse_mount *fm = r_req->fm;
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
@@ -1831,6 +1806,10 @@ static void rfuse_queue_request(struct rfuse_req *r_req){
 
 	spin_lock(&riq->lock);						// set lock
 	entry = rfuse_read_pending_tail(riq);		// Get an entry
+	if (unlikely(!entry)) {
+		spin_unlock(&riq->lock);
+		return -EAGAIN;
+	}
 	r_req->in.unique = rfuse_get_unique(riq); 
 	entry->request = r_req->index;				// fill entry
 	if(!test_bit(FR_BACKGROUND, &r_req->flags)) // only increase the reference count for synchronous requests
@@ -1840,13 +1819,17 @@ static void rfuse_queue_request(struct rfuse_req *r_req){
 	if(waitqueue_active(&riq->idle_user_waitq)){
 		wake_up(&riq->idle_user_waitq);		// Wake up idle user thread
 	}
+	return 0;
 }
 
 // PENDING QUEUE INSERT
 ssize_t rfuse_simple_request(struct rfuse_req *r_req){
 	ssize_t ret=0;
+	int err;
 
-	rfuse_queue_request(r_req);
+	err = rfuse_queue_request(r_req);
+	if (err)
+		return err;
 	rfuse_request_wait_answer(r_req);
 	smp_rmb();
 
@@ -1865,6 +1848,7 @@ static void rfuse_queue_bg_list(struct fuse_conn *fc, struct list_head *queue)
 		struct rfuse_bg_entry *bg_entry;
 		struct rfuse_iqueue *riq;
 		struct rfuse_req *r_req;
+		int err;
 
 		bg_entry = list_first_entry(queue, struct rfuse_bg_entry, list);
 		list_del(&bg_entry->list);
@@ -1872,7 +1856,11 @@ static void rfuse_queue_bg_list(struct fuse_conn *fc, struct list_head *queue)
 		r_req = (struct rfuse_req *)&riq->kreq[bg_entry->request];
 		kfree(bg_entry);
 
-		rfuse_queue_request(r_req); // only queue request but not wait for it
+		err = rfuse_queue_request(r_req); // only queue request but not wait for it
+		if (unlikely(err)) {
+			r_req->out.error = err;
+			rfuse_request_end(r_req);
+		}
 	}
 }
 
@@ -1895,7 +1883,9 @@ static int rfuse_request_queue_background(struct rfuse_req *r_req)
 {
 	struct fuse_mount *fm = r_req->fm;
 	struct fuse_conn *fc = fm->fc;
-	struct rfuse_bg_entry *bg_entry = kmalloc_node(sizeof(struct rfuse_bg_entry), GFP_KERNEL, cpu_to_node(r_req->riq_id));
+	struct rfuse_bg_entry *bg_entry = kmalloc_node(sizeof(struct rfuse_bg_entry),
+							GFP_KERNEL,
+							cpu_to_node(r_req->riq_id));
 	LIST_HEAD(to_queue);
 	bool queued = false;
 	int err = -ENOTCONN;
@@ -1919,27 +1909,15 @@ static int rfuse_request_queue_background(struct rfuse_req *r_req)
 	spin_lock(&riq->bg_lock);
 	if (likely(riq->connected)) {
 		riq->num_background++;
-    /* LDY: Async request merge */
-    /* Sync 요청는 merge 할 수 있는 요청이라고 하더라도, 애초에 이전 요청이 완료되야 다음 요청이 submit 된다.
-     * 하지만, async 요청은 이전 요청이 완료되지 않더라도 submit 할 수 있다.
-     * 그러므로 background queue에서 write 요청이 들어오면, 이전 tail entry를 꺼내서 offset을 확인
-     * 마지막 offset과 1이 차이가 난다면 바로 다음 chunk 이므로 요청을 하나로 합친다.
-     * 대신 최대로 늘릴 수 있는 건 1MiB, 왜냐하면 이건 제약이니까.
-     * 바로 구현하기 전에 helper 함수를 하나 추가해서, if 문으로 write 요청인지 확인, offset을 확인, 1이 차이가 나는지 확인 후
-     * merge가 가능하면, matach log 출력, 불가능하면 mismatch log 출력한다.
-     * 이게 가능하려면, 현재 async scheduling 기법인 round robin을 CPU id 기반으로 돌려야 한다.
-     */
+		if (riq->num_background == riq->max_background)
+			riq->blocked = 1;
+		if (riq->num_background == riq->congestion_threshold && fm->sb) {
+			set_bdi_congested(fm->sb->s_bdi, BLK_RW_SYNC);
+			set_bdi_congested(fm->sb->s_bdi, BLK_RW_ASYNC);
+		}
+
 		list_add_tail(&bg_entry->list, &riq->bg_queue); // Add it to background queue
 		rfuse_flush_bg_queue_locked(riq, &to_queue);
-		if (list_empty(&to_queue)) {
-      /*
-			pr_info("RFUSE: background queue throttle hold riq=%d req=%u opcode=%u num_background=%u active_background=%u max_background=%u blocked=%d pid=%d\n",
-				 r_req->riq_id, r_req->index, r_req->in.opcode,
-				 riq->num_background, riq->active_background,
-				 riq->max_background, riq->blocked,
-				 current->pid);
-      */
-		}
 		queued = true;
 		err = 0;
 	}
@@ -1968,15 +1946,25 @@ void rfuse_request_end(struct rfuse_req *r_req){
 	if(test_bit(FR_BACKGROUND, &r_req->flags)){
 		spin_lock(&riq->bg_lock);
 		clear_bit(FR_BACKGROUND, &r_req->flags);
+		if (riq->num_background == riq->max_background) {
+			riq->blocked = 0;
+			wake_up(&riq->blocked_waitq);
+		} else if (!riq->blocked) {
+			/*
+			 * Wake the next blocked submitter, if any.  The wake
+			 * above already synchronizes riq->blocked updates with
+			 * sleepers, so waitqueue_active() is sufficient here.
+			 */
+			if (waitqueue_active(&riq->blocked_waitq))
+				wake_up(&riq->blocked_waitq);
+		}
+		if (riq->num_background == riq->congestion_threshold && fm->sb) {
+			clear_bdi_congested(fm->sb->s_bdi, BLK_RW_SYNC);
+			clear_bdi_congested(fm->sb->s_bdi, BLK_RW_ASYNC);
+		}
 		riq->num_background--;
 		riq->active_background--;
 		rfuse_flush_bg_queue_locked(riq, &to_queue);
-		if (!list_empty(&to_queue)) {
-			pr_info("RFUSE: background queue throttle release riq=%d req=%u opcode=%u num_background=%u active_background=%u max_background=%u pid=%d\n",
-				 r_req->riq_id, r_req->index, r_req->in.opcode,
-				 riq->num_background, riq->active_background,
-				 riq->max_background, current->pid);
-		}
 		spin_unlock(&riq->bg_lock);
 
 		rfuse_queue_bg_list(fc, &to_queue);
@@ -2377,6 +2365,8 @@ ssize_t rfuse_dev_do_read(struct fuse_dev *fud, struct file *file, struct iov_it
 
 
 	rp = r_req->rp;
+	if (unlikely(!rp || !rp->pages || !rp->descs))
+		return -EIO;
 	rfuse_copy_init(&rcs, 1, to);	
 
 	rcs.r_req = r_req;
@@ -2424,6 +2414,8 @@ ssize_t rfuse_dev_splice_read(struct file *in, loff_t *ppos, struct pipe_inode_i
 
 	if (!fud)
 		return -EPERM;
+	if (unlikely(!r_req->rp || !r_req->rp->pages || !r_req->rp->descs))
+		return -EIO;
 
 	bufs = kvmalloc_array(pipe->max_usage, sizeof(struct pipe_buffer),
 			GFP_KERNEL);
@@ -2639,6 +2631,7 @@ void rfuse_abort_conn(struct fuse_conn *fc){
 
 		wake_up_all(&riq[i]->waitq);
 		wake_up_all(&riq[i]->idle_user_waitq);
+		wake_up_all(&riq[i]->blocked_waitq);
 	}
 }
 EXPORT_SYMBOL_GPL(rfuse_abort_conn);

@@ -7,6 +7,7 @@
 #include <linux/mount.h>
 #include <linux/wait.h>
 #include <linux/spinlock.h>
+#include <linux/rbtree.h>
 #include <linux/workqueue.h>
  
 #include "rfuse_comp.h"
@@ -42,6 +43,24 @@ enum rfuse_sched_mode {
 
 #define RFUSE_PAYLOAD_IN        (1U << 0)
 #define RFUSE_PAYLOAD_OUT       (1U << 1)
+
+struct fuse_file;
+struct rfuse_pages;
+
+struct rfuse_async_write_range {
+	struct rb_node node;
+	loff_t start;
+	loff_t last;
+	loff_t subtree_last;
+};
+
+struct rfuse_async_wrt_ctx {
+	struct rfuse_async_write_range range;
+	struct inode *inode;
+	struct fuse_file *ff;
+	size_t count;
+	bool range_registered;
+};
 
 struct rfuse_req{
 	/** Request input header **/
@@ -100,6 +119,8 @@ struct rfuse_req{
 	bool payload_reserved:1;
 
 	struct rfuse_pages *rp;
+	struct rfuse_async_wrt_ctx wrt_ctx;
+	bool has_wrt_ctx;
 	void (*end)(struct fuse_mount *fm, struct rfuse_req *r_req, int error);
 };
 
