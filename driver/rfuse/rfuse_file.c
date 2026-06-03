@@ -11,7 +11,7 @@
 #include <linux/uio.h>
 #include <linux/fs.h>
 
-#define LDY_NO_PAYLOAD 1
+#define LDY_NO_PAYLOAD 0
 #define LDY_NO_PAGE_CACHE 1
 
 struct rfuse_release_in {
@@ -1141,7 +1141,8 @@ static ssize_t rfuse_send_write_payload(struct kiocb *iocb, struct iov_iter *ii,
 	struct rfuse_req *r_req;
 	struct fuse_write_in *in;
 	struct fuse_write_out *out;
-	ssize_t copied;
+	ssize_t copied = 0;
+	ssize_t outsize;
 	int err;
 
 	r_req = rfuse_get_req(fm, false, false, count);
@@ -1178,12 +1179,23 @@ static ssize_t rfuse_send_write_payload(struct kiocb *iocb, struct iov_iter *ii,
 	out = (struct fuse_write_out *)&r_req->args;
 	if (!err && out->size > copied)
 		err = -EIO;
-	if (!err)
-		copied = out->size;
+	outsize = out->size;
+	rfuse_put_request(r_req);
+
+	if (err) {
+		iov_iter_revert(ii, copied);
+		return err;
+	}
+	if (outsize < copied)
+		iov_iter_revert(ii, copied - outsize);
+
+	return outsize;
 
 out_put_req:
+	if (copied > 0)
+		iov_iter_revert(ii, copied);
 	rfuse_put_request(r_req);
-	return err ?: copied;
+	return err;
 }
 
 static int rfuse_invalidate_written_cache(struct address_space *mapping,
