@@ -1568,19 +1568,10 @@ static void rfuse_queue_request(struct rfuse_req *r_req){
 // PENDING QUEUE INSERT
 ssize_t rfuse_simple_request(struct rfuse_req *r_req){
 	ssize_t ret=0;
-	int err;
-
-	err = rfuse_prepare_payload(r_req, true);
-	if (err)
-		return err;
 
 	rfuse_queue_request(r_req);
 	rfuse_request_wait_answer(r_req);
 	smp_rmb();
-
-	err = rfuse_import_payload(r_req);
-	if (err)
-		return err;
 
 	ret = r_req->out.error;
 	if (!ret && r_req->out_argvar) {
@@ -1701,8 +1692,13 @@ void rfuse_request_end(struct rfuse_req *r_req){
 		spin_unlock(&riq->bg_lock);
 	}
 
-	if (test_bit(FR_ASYNC, &r_req->flags)) {
+	/* LDY: read reply payload는 daemon 처리 완료 후 completion 단계에서
+	 * kernel page/cache 쪽으로 import한다. sync/async 여부가 아니라
+	 * opcode 기준으로 판단해야 한다.
+	 */
+	if (r_req->in.opcode == FUSE_READ) {
 		int err = rfuse_import_payload(r_req);
+
 		if (err && !r_req->out.error)
 			r_req->out.error = err;
 	}
