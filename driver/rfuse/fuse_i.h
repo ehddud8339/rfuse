@@ -1486,9 +1486,9 @@ void rfuse_extract_complete_head(struct rfuse_iqueue *riq);
 // ALLOCATE NEW REQUEST AND ARGUMENTS
 void rfuse_put_request(struct rfuse_req *req);
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc,
-						size_t payload_len);
+						size_t sbuf_len);
 struct rfuse_req *rfuse_get_req(struct fuse_mount *fm, bool for_background,
-				bool force, size_t payload_len);
+				bool force, size_t sbuf_len);
 uint32_t rfuse_get_request_buffer(struct fuse_mount *fm, int riq_id);
 void rfuse_put_request_buffer(struct fuse_mount *fm, uint32_t arg_index, int riq_id);
 uint32_t rfuse_get_argument_buffer(struct fuse_mount *fm, int riq_id);
@@ -1496,7 +1496,7 @@ void rfuse_put_argument_buffer(struct fuse_mount *fm, uint32_t arg_index, int ri
 
 struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm,
 				    bool for_background, bool force,
-				    size_t payload_len, spinlock_t *file_lock);
+				    size_t sbuf_len, spinlock_t *file_lock);
 struct rfuse_req *try_rfuse_get_req_on_riq(struct fuse_mount *fm,
 					   bool for_background, bool force,
 					   int riq_id, spinlock_t *file_lock);
@@ -1505,13 +1505,13 @@ struct rfuse_req *try_rfuse_get_req_on_riq(struct fuse_mount *fm,
 ssize_t rfuse_simple_request(struct rfuse_req *r_req);
 int rfuse_simple_background(struct fuse_mount *fm, struct rfuse_req *r_req);
 void rfuse_request_end(struct rfuse_req *r_req);
-int rfuse_prepare_payload(struct rfuse_req *r_req, bool may_wait);
-int rfuse_reserve_payload(struct rfuse_req *r_req, size_t len,
-			  unsigned int payload_flags, bool may_wait);
-ssize_t rfuse_payload_copy_from_iter(struct rfuse_req *r_req,
+int rfuse_prepare_sbuf(struct rfuse_req *r_req, bool may_wait);
+int rfuse_reserve_sbuf(struct rfuse_req *r_req, size_t len,
+			  unsigned int sbuf_flags, bool may_wait);
+ssize_t rfuse_sbuf_copy_from_iter(struct rfuse_req *r_req,
 				     struct iov_iter *ii, size_t len);
-int rfuse_import_payload(struct rfuse_req *r_req);
-void rfuse_release_payload(struct rfuse_req *r_req);
+int rfuse_import_sbuf(struct rfuse_req *r_req);
+void rfuse_release_sbuf(struct rfuse_req *r_req);
 
 // Queue into the forget queue
 void rfuse_queue_forget(struct fuse_conn *fc, u64 nodeid, u64 nlookup);

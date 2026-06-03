@@ -31,7 +31,7 @@ struct rfuse_release_in {
 /*
  * Pair FUSE_NOWRITE around RFUSE async write drains.
  *
- * The writeback path is not used by RFUSE's async payload writes, so the
+ * The writeback path is not used by RFUSE's async sbuf writes, so the
  * release side must not flush queued writepages through generic FUSE code.
  *
  * This must be called under i_mutex, otherwise the FUSE_NOWRITE usage
@@ -1398,7 +1398,7 @@ static int rfuse_write_complete_status(struct rfuse_req *r_req, int err,
 	return err;
 }
 
-static void rfuse_payload_write_complete_req(struct fuse_mount *fm,
+static void rfuse_sbuf_write_complete_req(struct fuse_mount *fm,
 					     struct rfuse_req *r_req, int err)
 {
 	struct rfuse_async_wrt_ctx *ctx;
@@ -1471,14 +1471,14 @@ static ssize_t rfuse_send_write_async(struct kiocb *iocb,
 	r_req->in.nodeid = ff->nodeid;
 
 	path_lat_start = ktime_get_ns();
-	err = rfuse_reserve_payload(r_req, count, RFUSE_PAYLOAD_IN, true);
+	err = rfuse_reserve_sbuf(r_req, count, RFUSE_PAYLOAD_IN, true);
 	rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_RESERVE_PAYLOAD,
 			      ktime_get_ns() - path_lat_start);
 	if (err)
 		goto out_put_req_unregister;
 
 	path_lat_start = ktime_get_ns();
-	copied = rfuse_payload_copy_from_iter(r_req, ii, count);
+	copied = rfuse_sbuf_copy_from_iter(r_req, ii, count);
 	rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_COPY_FROM_ITER,
 			      ktime_get_ns() - path_lat_start);
 	if (copied < 0) {
@@ -1494,7 +1494,7 @@ static ssize_t rfuse_send_write_async(struct kiocb *iocb,
 
 	in->size = copied;
 	r_req->in.arglen[0] = copied;
-	r_req->end = rfuse_payload_write_complete_req;
+	r_req->end = rfuse_sbuf_write_complete_req;
 
 	err = rfuse_simple_background(fm, r_req);
 	if (err)
@@ -1514,8 +1514,8 @@ out_put_req:
 	return err;
 }
 
-/* LDY: page cache helper를 거치지 않는 sync payload WRITE 경로.
- * 할당된 rfuse_req에 payload를 예약하고 user buffer를 직접 payload로
+/* LDY: page cache helper를 거치지 않는 sync sbuf WRITE 경로.
+ * 할당된 rfuse_req에 sbuf를 예약하고 user buffer를 직접 sbuf로
  * 복사한 뒤, WRITE 메타를 설정하여 rfuse_simple_request()로 동기 제출한다.
  */
 static ssize_t rfuse_send_write_sync(struct kiocb *iocb,
@@ -1544,14 +1544,14 @@ static ssize_t rfuse_send_write_sync(struct kiocb *iocb,
 	r_req->in.nodeid = ff->nodeid;
 
 	path_lat_start = ktime_get_ns();
-	err = rfuse_reserve_payload(r_req, count, RFUSE_PAYLOAD_IN, true);
+	err = rfuse_reserve_sbuf(r_req, count, RFUSE_PAYLOAD_IN, true);
 	rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_RESERVE_PAYLOAD,
 			      ktime_get_ns() - path_lat_start);
 	if (err)
 		goto out_put_req;
 
 	path_lat_start = ktime_get_ns();
-	copied = rfuse_payload_copy_from_iter(r_req, ii, count);
+	copied = rfuse_sbuf_copy_from_iter(r_req, ii, count);
 	rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_COPY_FROM_ITER,
 			      ktime_get_ns() - path_lat_start);
 	if (copied < 0) {
@@ -1589,11 +1589,11 @@ out_put_req:
 	return err;
 }
 
-/* LDY: shared-buffer payload 기반 WRITE 요청을 준비하고 async submit까지
- * 연결하는 write path entry. payload 부족은 rfuse_reserve_payload()에서
+/* LDY: shared-buffer sbuf 기반 WRITE 요청을 준비하고 async submit까지
+ * 연결하는 write path entry. sbuf 부족은 rfuse_reserve_sbuf()에서
  * wait-and-retry로 처리한다.
  */
-static ssize_t rfuse_perform_write_payload(struct kiocb *iocb,
+static ssize_t rfuse_perform_write_sbuf(struct kiocb *iocb,
 					   struct address_space *mapping,
 					   struct iov_iter *ii, loff_t pos)
 {
@@ -1610,8 +1610,8 @@ static ssize_t rfuse_perform_write_payload(struct kiocb *iocb,
 	if (inode->i_size < pos + write_count)
 		set_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
 
-	/* LDY: payload 기반 write path를 async/non-async 분기로 명확히 분리한다.
-	 * async는 background submit, sync는 rfuse_simple_request() 기반 payload
+	/* LDY: sbuf 기반 write path를 async/non-async 분기로 명확히 분리한다.
+	 * async는 background submit, sync는 rfuse_simple_request() 기반 sbuf
 	 * submit으로 연결한다.
 	 */
 	if (use_async) {
@@ -1648,7 +1648,7 @@ static ssize_t rfuse_perform_write_payload(struct kiocb *iocb,
 			}
 		} while (!err && iov_iter_count(ii));
 	} else {
-		/* LDY: sync payload WRITE는 rfuse_get_req()로 request를 확보한 뒤
+		/* LDY: sync sbuf WRITE는 rfuse_get_req()로 request를 확보한 뒤
 		 * chunk 단위로 rfuse_send_write_sync()에 전달한다. page cache/fallback
 		 * 경로는 사용하지 않는다.
 		 */
@@ -1694,7 +1694,7 @@ static ssize_t rfuse_perform_write_payload(struct kiocb *iocb,
 
 ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, struct iov_iter *ii, loff_t pos){
 #if LDY_NO_PAGE_CACHE
-		return rfuse_perform_write_payload(iocb, mapping, ii, pos);
+		return rfuse_perform_write_sbuf(iocb, mapping, ii, pos);
 #else
 	struct inode *inode = mapping->host;
 	struct fuse_inode *fi = get_fuse_inode(inode);
@@ -1759,13 +1759,13 @@ static ssize_t rfuse_send_write(struct rfuse_io_args *ria, loff_t pos, size_t co
 
 	/* Send request */
 	if (ria->io->async) {
-		err = rfuse_prepare_payload(r_req, true);
+		err = rfuse_prepare_sbuf(r_req, true);
 		if (err)
 			goto out_put_req;
 		return rfuse_async_req_send(fm, ria, count);
 	}
 	
-	err = rfuse_prepare_payload(r_req, true);
+	err = rfuse_prepare_sbuf(r_req, true);
 	if (err)
 		goto out_put_req;
 
@@ -2581,7 +2581,7 @@ int rfuse_do_readpage(struct file *file, struct page *page){
 		desc.length--;
 
 	rfuse_read_args_fill(&ria, file, pos, desc.length, FUSE_READ);
-	res = rfuse_prepare_payload(r_req, true);
+	res = rfuse_prepare_sbuf(r_req, true);
 	if (res) {
 		rfuse_put_request(r_req);
 		return res;
@@ -2730,7 +2730,7 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file,
 
 #if !LDY_NO_PAYLOAD
 	path_lat_start = ktime_get_ns();
-	err = rfuse_reserve_payload(r_req, count, RFUSE_PAYLOAD_OUT, true);
+	err = rfuse_reserve_sbuf(r_req, count, RFUSE_PAYLOAD_OUT, true);
 	rfuse_path_lat_record(RFUSE_PATH_LAT_READ_RESERVE_PAYLOAD,
 			      ktime_get_ns() - path_lat_start);
 	if (err) {
@@ -2882,12 +2882,12 @@ static ssize_t rfuse_send_read(struct rfuse_io_args *ria, loff_t pos, size_t cou
 	}
 
 	if (ria->io->async) {
-		res = rfuse_prepare_payload(r_req, true);
+		res = rfuse_prepare_sbuf(r_req, true);
 		if (res)
 			goto out_put_req;
 		return rfuse_async_req_send(fm, ria, count);
 	}
-	res = rfuse_prepare_payload(r_req, true);
+	res = rfuse_prepare_sbuf(r_req, true);
 	if (res)
 		goto out_put_req;
 	res = rfuse_simple_request(r_req);

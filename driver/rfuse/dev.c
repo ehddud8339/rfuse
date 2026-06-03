@@ -2441,12 +2441,12 @@ static int rfuse_dev_mmap(struct file *file, struct vm_area_struct *vma){
 			return 0;
 		}
 	} else if (map_queue == RFUSE_PAYLOAD) {
-		void *payload = fud->fc->riq[riq_id]->payload.kaddr;
+		void *sbuf = fud->fc->riq[riq_id]->sbuf.kaddr;
 
-		if (!payload || size > fud->fc->riq[riq_id]->payload.size)
+		if (!sbuf || size > fud->fc->riq[riq_id]->sbuf.size)
 			return -EINVAL;
 
-		if (remap_vmalloc_range(vma, payload, 0))
+		if (remap_vmalloc_range(vma, sbuf, 0))
 			return -EAGAIN;
 		return 0;
 	}

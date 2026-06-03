@@ -468,7 +468,7 @@ static int rfuse_send_reply_ok(fuse_req_t u_req){
 	return rfuse_send_reply(u_req, 0);
 }
 
-void *rfuse_req_payload_addr(fuse_req_t req)
+void *rfuse_req_sbuf_addr(fuse_req_t req)
 {
 	struct rfuse_req *r_req;
 	size_t len;
@@ -479,13 +479,13 @@ void *rfuse_req_payload_addr(fuse_req_t req)
 		return 0;
 
 	r_req = &req->riq->ureq[req->index];
-	/* LDY: request payload address 또는 fallback buffer address를 결정하는
+	/* LDY: request sbuf address 또는 fallback buffer address를 결정하는
 	 * 비용을 alloc_payload_or_buf로 계측한다. 동작은 변경하지 않는다.
 	 */
 	if (rfuse_opcode_is_read(r_req->in.opcode))
 		start_ns = rfuse_now_ns();
-	if (rfuse_has_payload(req)) {
-		addr = (char *)req->riq->payload.uaddr + r_req->payload_offset;
+	if (rfuse_has_sbuf(req)) {
+		addr = (char *)req->riq->sbuf.uaddr + r_req->sbuf_offset;
 		if (start_ns) {
 			uint64_t elapsed_ns = rfuse_elapsed_ns(start_ns);
 
@@ -509,10 +509,10 @@ void *rfuse_req_payload_addr(fuse_req_t req)
 	default:
 		if (r_req->out.arglen)
 			len = r_req->out.arglen;
-		else if (r_req->payload_len)
-			len = r_req->payload_len;
+		else if (r_req->sbuf_len)
+			len = r_req->sbuf_len;
 		else
-			len = r_req->payload_capacity;
+			len = r_req->sbuf_capacity;
 		break;
 	}
 
@@ -529,19 +529,19 @@ void *rfuse_req_payload_addr(fuse_req_t req)
 	return addr;
 }
 
-int rfuse_has_payload(fuse_req_t req)
+int rfuse_has_sbuf(fuse_req_t req)
 {
 	struct rfuse_req *r_req;
 
-	if (!req || !req->riq || !req->riq->payload.uaddr)
+	if (!req || !req->riq || !req->riq->sbuf.uaddr)
 		return 0;
 
 	r_req = &req->riq->ureq[req->index];
-	return r_req->payload_capacity &&
-	       !(r_req->payload_flags & RFUSE_PAYLOAD_FALLBACK);
+	return r_req->sbuf_capacity &&
+	       !(r_req->sbuf_flags & RFUSE_PAYLOAD_FALLBACK);
 }
 
-static int rfuse_req_payload_buffer(fuse_req_t req, struct rfuse_payload_view *view)
+static int rfuse_req_sbuf_buffer(fuse_req_t req, struct rfuse_sbuf_view *view)
 {
 	struct rfuse_req *r_req;
 	void *addr;
@@ -553,24 +553,24 @@ static int rfuse_req_payload_buffer(fuse_req_t req, struct rfuse_payload_view *v
 		return -EINVAL;
 
 	r_req = &req->riq->ureq[req->index];
-	if (!rfuse_has_payload(req))
+	if (!rfuse_has_sbuf(req))
 		return -ENODATA;
 
-	addr = (char *)req->riq->payload.uaddr + r_req->payload_offset;
+	addr = (char *)req->riq->sbuf.uaddr + r_req->sbuf_offset;
 	view->addr = addr;
-	view->len = r_req->payload_len;
-	view->capacity = r_req->payload_capacity;
-	view->flags = r_req->payload_flags;
+	view->len = r_req->sbuf_len;
+	view->capacity = r_req->sbuf_capacity;
+	view->flags = r_req->sbuf_flags;
 
 	return 0;
 }
 
-static int rfuse_req_has_input_payload(fuse_req_t req)
+static int rfuse_req_has_input_sbuf(fuse_req_t req)
 {
-	struct rfuse_payload_view payload;
+	struct rfuse_sbuf_view sbuf;
 
-	return rfuse_req_payload_buffer(req, &payload) == 0 &&
-	       (payload.flags & RFUSE_PAYLOAD_IN);
+	return rfuse_req_sbuf_buffer(req, &sbuf) == 0 &&
+	       (sbuf.flags & RFUSE_PAYLOAD_IN);
 }
 
 int fuse_reply_buf(fuse_req_t u_req, const char *buf, size_t size){
@@ -578,7 +578,7 @@ int fuse_reply_buf(fuse_req_t u_req, const char *buf, size_t size){
 	struct fuse_chan *ch = u_req->ch;
 	struct fuse_session *se = u_req->se;
 	struct rfuse_req *r_req = &u_req->riq->ureq[u_req->index];
-	struct rfuse_payload_view payload;
+	struct rfuse_sbuf_view sbuf;
 	int req_index = u_req->index;
 	int riq_id = u_req->riq->riq_id;
 	long long int pp_req_index = ((long long int)req_index << 32) & RFUSE_REQ_IDX_MASK;
@@ -600,13 +600,13 @@ int fuse_reply_buf(fuse_req_t u_req, const char *buf, size_t size){
 		r_req->ldy_ts_reply_comp_start_ns = now;
 	}
 
-	if (rfuse_req_payload_buffer(u_req, &payload) == 0) {
-		if (size > payload.capacity)
+	if (rfuse_req_sbuf_buffer(u_req, &sbuf) == 0) {
+		if (size > sbuf.capacity)
 			return fuse_reply_err(u_req, EIO);
 
-		if (payload.addr != buf)
-			memcpy(payload.addr, buf, size);
-		r_req->payload_len = size;
+		if (sbuf.addr != buf)
+			memcpy(sbuf.addr, buf, size);
+		r_req->sbuf_len = size;
 		r_req->out.arglen = size;
 		return rfuse_send_reply_ok(u_req);
 	}
@@ -1353,7 +1353,7 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 	struct fuse_write_in *arg = (struct fuse_write_in *)&r_req->args;
 	struct fuse_file_info fi;
 	char *param;
-	struct rfuse_payload_view payload;
+	struct rfuse_sbuf_view sbuf;
 	int req_index = u_req->index;
 	int riq_id = u_req->riq->riq_id;
 	long long int pp_req_index = ((long long int)req_index << 32) & RFUSE_REQ_IDX_MASK;
@@ -1361,10 +1361,10 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 
 	rfuse_write_metrics_reset(r_req);
 	
-	if (rfuse_req_payload_buffer(u_req, &payload) == 0 &&
-	    (payload.flags & RFUSE_PAYLOAD_IN)) {
-		res = payload.len;
-		param = payload.addr;
+	if (rfuse_req_sbuf_buffer(u_req, &sbuf) == 0 &&
+	    (sbuf.flags & RFUSE_PAYLOAD_IN)) {
+		res = sbuf.len;
+		param = sbuf.addr;
 		goto do_write;
 	}
 
@@ -1384,7 +1384,7 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 		r_req->usr_write_fbuf_if_min_ns = fbuf_if_ns;
 		r_req->usr_write_fbuf_if_max_ns = fbuf_if_ns;
 	}
-	/* LDY: shared-buffer payload WRITE는 /dev/fuse pread()를 사용하지 않으므로
+	/* LDY: shared-buffer sbuf WRITE는 /dev/fuse pread()를 사용하지 않으므로
 	 * 실제 pread 호출이 있는 legacy 경로에서만 pread latency를 기록한다.
 	 */
 	start_ns = rfuse_now_ns();
@@ -1670,19 +1670,19 @@ int fuse_reply_data(fuse_req_t u_req, struct fuse_bufvec *bufv,
 		    enum fuse_buf_copy_flags flags)
 {
 	int res;
-	struct rfuse_payload_view payload;
+	struct rfuse_sbuf_view sbuf;
 
-	if (rfuse_req_payload_buffer(u_req, &payload) == 0) {
+	if (rfuse_req_sbuf_buffer(u_req, &sbuf) == 0) {
 		struct fuse_bufvec src = *bufv;
-		struct fuse_bufvec dst = FUSE_BUFVEC_INIT(payload.capacity);
+		struct fuse_bufvec dst = FUSE_BUFVEC_INIT(sbuf.capacity);
 		struct rfuse_req *r_req = &u_req->riq->ureq[u_req->index];
 
-		dst.buf[0].mem = payload.addr;
+		dst.buf[0].mem = sbuf.addr;
 		res = fuse_buf_copy(&dst, &src, 0);
 		if (res < 0)
 			return fuse_reply_err(u_req, -res);
 
-		r_req->payload_len = res;
+		r_req->sbuf_len = res;
 		r_req->out.arglen = res;
 		return rfuse_send_reply_ok(u_req);
 	}
@@ -2143,7 +2143,7 @@ bool rfuse_read_queue(struct rfuse_worker *w, struct rfuse_mt *mt, struct fuse_c
 	else
 		r_req->ldy_lat_enqueue_to_dequeue_ns = 0;
 	GET_TIMESTAMPS(3)
-	if (r_req->in.opcode == FUSE_WRITE && rfuse_req_has_input_payload(u_req)) {
+	if (r_req->in.opcode == FUSE_WRITE && rfuse_req_has_input_sbuf(u_req)) {
 		rfuse_ll_ops[r_req->in.opcode].func(u_req, r_req->in.nodeid);
 	} else if (r_req->in.opcode == FUSE_WRITE && se->op.write_buf) {
 		rfuse_write_metrics_reset(r_req);
@@ -2169,28 +2169,28 @@ void *fuse_req_userdata(fuse_req_t req)
 	return req->se->userdata;
 }
 
-int rfuse_req_payload_view(fuse_req_t req, struct rfuse_payload_view *view)
+int rfuse_req_sbuf_view(fuse_req_t req, struct rfuse_sbuf_view *view)
 {
-	return rfuse_req_payload_buffer(req, view);
+	return rfuse_req_sbuf_buffer(req, view);
 }
 
 int rfuse_reply_read_from_fd(fuse_req_t req, int fd, off_t off, size_t size)
 {
-	struct rfuse_payload_view payload;
+	struct rfuse_sbuf_view sbuf;
 	struct rfuse_req *r_req;
 	ssize_t res;
 
-	if (rfuse_req_payload_buffer(req, &payload) == 0) {
+	if (rfuse_req_sbuf_buffer(req, &sbuf) == 0) {
 		r_req = &req->riq->ureq[req->index];
-		if (size > payload.capacity)
-			size = payload.capacity;
+		if (size > sbuf.capacity)
+			size = sbuf.capacity;
 
-		res = pread(fd, payload.addr, size, off);
+		res = pread(fd, sbuf.addr, size, off);
 		//rfuse_count_pread();
 		if (res < 0)
 			return fuse_reply_err(req, errno);
 
-		r_req->payload_len = res;
+		r_req->sbuf_len = res;
 		r_req->out.arglen = res;
 		return rfuse_send_reply_ok(req);
 	}

@@ -3153,11 +3153,11 @@ int fuse_session_mount(struct fuse_session *se, const char *mountpoint)
 			goto error_out;
 		}
 
-		riq[i]->payload.uaddr = mmap(0, riq[i]->payload.size,
+		riq[i]->sbuf.uaddr = mmap(0, riq[i]->sbuf.size,
 				PROT_READ | PROT_WRITE, MAP_SHARED,
 				fd, RFUSE_PAYLOAD | riq_id);
-		if (riq[i]->payload.uaddr == MAP_FAILED) {
-			fuse_log(FUSE_LOG_ERR, "rfuse: failed to mmap payload buffer, errno: %d\n", errno);
+		if (riq[i]->sbuf.uaddr == MAP_FAILED) {
+			fuse_log(FUSE_LOG_ERR, "rfuse: failed to mmap sbuf buffer, errno: %d\n", errno);
 			goto error_out;
 		}
 
@@ -3199,7 +3199,7 @@ void fuse_session_unmount(struct fuse_session *se)
 				munmap(se->riq[i]->completes.uaddr,sizeof(struct rfuse_address_entry)*RFUSE_MAX_QUEUE_SIZE);
 				munmap(se->riq[i]->uarg,2*sizeof(struct rfuse_arg)*RFUSE_MAX_QUEUE_SIZE);
 				munmap(se->riq[i]->ureq,2*sizeof(struct rfuse_req)*RFUSE_MAX_QUEUE_SIZE);
-				munmap(se->riq[i]->payload.uaddr, se->riq[i]->payload.size);
+				munmap(se->riq[i]->sbuf.uaddr, se->riq[i]->sbuf.size);
 			}
 		//munmap(se->riq, sizeof(struct rfuse_iqueue) * RFUSE_NUM_IQUEUE);	
 		free(se->riq);

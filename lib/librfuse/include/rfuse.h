@@ -209,12 +209,12 @@ struct rfuse_req{
 		uint8_t argument_space[112];
 	}args; // 112
 
-	uint32_t payload_page_index;
-	uint32_t payload_page_count;
-	uint32_t payload_offset;
-	uint32_t payload_len;
-	uint32_t payload_capacity;
-	uint32_t payload_flags;
+	uint32_t sbuf_page_index;
+	uint32_t sbuf_page_count;
+	uint32_t sbuf_offset;
+	uint32_t sbuf_len;
+	uint32_t sbuf_capacity;
+	uint32_t sbuf_flags;
 
 	bool force:1;
 	bool noreply:1;
@@ -225,7 +225,7 @@ struct rfuse_req{
 	bool page_zeroing:1;
 	bool page_replace:1;
 	bool may_block:1;
-	bool payload_reserved:1;
+	bool sbuf_reserved:1;
 
 	struct rfuse_pages *rp;
 	struct rfuse_async_wrt_ctx wrt_ctx;
@@ -262,8 +262,8 @@ struct rfuse_req{
 #ifdef __cplusplus
 	static_assert(sizeof(struct rfuse_req) == 480, "rfuse_req ABI drift");
 	static_assert(offsetof(struct rfuse_req, riq_id) == 68, "rfuse_req riq_id offset drift");
-	static_assert(offsetof(struct rfuse_req, payload_page_index) == 232, "rfuse_req payload page index offset drift");
-	static_assert(offsetof(struct rfuse_req, payload_offset) == 240, "rfuse_req payload offset drift");
+	static_assert(offsetof(struct rfuse_req, sbuf_page_index) == 232, "rfuse_req sbuf page index offset drift");
+	static_assert(offsetof(struct rfuse_req, sbuf_offset) == 240, "rfuse_req sbuf offset drift");
 	static_assert(offsetof(struct rfuse_req, rp) == 264, "rfuse_req rp offset drift");
 	static_assert(offsetof(struct rfuse_req, wrt_ctx) == 272, "rfuse_req wrt_ctx offset drift");
 	static_assert(offsetof(struct rfuse_req, has_wrt_ctx) == 352, "rfuse_req has_wrt_ctx offset drift");
@@ -275,8 +275,8 @@ struct rfuse_req{
 #else
 	_Static_assert(sizeof(struct rfuse_req) == 480, "rfuse_req ABI drift");
 	_Static_assert(offsetof(struct rfuse_req, riq_id) == 68, "rfuse_req riq_id offset drift");
-	_Static_assert(offsetof(struct rfuse_req, payload_page_index) == 232, "rfuse_req payload page index offset drift");
-	_Static_assert(offsetof(struct rfuse_req, payload_offset) == 240, "rfuse_req payload offset drift");
+	_Static_assert(offsetof(struct rfuse_req, sbuf_page_index) == 232, "rfuse_req sbuf page index offset drift");
+	_Static_assert(offsetof(struct rfuse_req, sbuf_offset) == 240, "rfuse_req sbuf offset drift");
 	_Static_assert(offsetof(struct rfuse_req, rp) == 264, "rfuse_req rp offset drift");
 	_Static_assert(offsetof(struct rfuse_req, wrt_ctx) == 272, "rfuse_req wrt_ctx offset drift");
 	_Static_assert(offsetof(struct rfuse_req, has_wrt_ctx) == 352, "rfuse_req has_wrt_ctx offset drift");
@@ -339,7 +339,7 @@ struct rfuse_arg{
 	uint8_t garbage[256];
 };
 
-struct rfuse_payload_map {
+struct rfuse_sbuf_map {
 	void *uaddr;
 	void *kaddr;
 	uint32_t size;
@@ -366,7 +366,7 @@ struct rfuse_iqueue{
 	struct rfuse_arg *karg; // kernel address
 	struct rfuse_req *ureq;
 	struct rfuse_req *kreq;
-	struct rfuse_payload_map payload;
+	struct rfuse_sbuf_map sbuf;
 
 	unsigned connected;
 	char no_touch_waitq[24];
@@ -397,25 +397,28 @@ struct rfuse_iqueue{
 	unsigned active_background;
 	int blocked;
 	char no_touch_blocked_waitq[24];
-	uint32_t no_touch_payload_lock;
+	uint32_t no_touch_sbuf_lock;
 	uint32_t no_touch_padding_5;
-	char no_touch_payload_waitq[24];
-	unsigned long *payload_bitmap;
-	uint32_t payload_page_count;
-	uint32_t payload_free_pages;
-	uint32_t payload_search_hint;
+	char no_touch_sbuf_waitq[24];
+	unsigned long *sbuf_bitmap;
+	uint32_t sbuf_page_count;
+	uint32_t sbuf_free_pages;
+	uint32_t sbuf_search_hint;
+	uint32_t sbuf_max_free_hint;
 };
 
 #ifdef __cplusplus
 static_assert(sizeof(struct rfuse_iqueue) == 448, "rfuse_iqueue ABI drift");
 static_assert(offsetof(struct rfuse_iqueue, connected) == 192, "rfuse_iqueue connected offset drift");
-static_assert(offsetof(struct rfuse_iqueue, payload_bitmap) == 424, "rfuse_iqueue payload bitmap offset drift");
-static_assert(offsetof(struct rfuse_iqueue, payload_page_count) == 432, "rfuse_iqueue payload page count offset drift");
+static_assert(offsetof(struct rfuse_iqueue, sbuf_bitmap) == 424, "rfuse_iqueue sbuf bitmap offset drift");
+static_assert(offsetof(struct rfuse_iqueue, sbuf_page_count) == 432, "rfuse_iqueue sbuf page count offset drift");
+static_assert(offsetof(struct rfuse_iqueue, sbuf_max_free_hint) == 444, "rfuse_iqueue sbuf max-free hint offset drift");
 #else
 _Static_assert(sizeof(struct rfuse_iqueue) == 448, "rfuse_iqueue ABI drift");
 _Static_assert(offsetof(struct rfuse_iqueue, connected) == 192, "rfuse_iqueue connected offset drift");
-_Static_assert(offsetof(struct rfuse_iqueue, payload_bitmap) == 424, "rfuse_iqueue payload bitmap offset drift");
-_Static_assert(offsetof(struct rfuse_iqueue, payload_page_count) == 432, "rfuse_iqueue payload page count offset drift");
+_Static_assert(offsetof(struct rfuse_iqueue, sbuf_bitmap) == 424, "rfuse_iqueue sbuf bitmap offset drift");
+_Static_assert(offsetof(struct rfuse_iqueue, sbuf_page_count) == 432, "rfuse_iqueue sbuf page count offset drift");
+_Static_assert(offsetof(struct rfuse_iqueue, sbuf_max_free_hint) == 444, "rfuse_iqueue sbuf max-free hint offset drift");
 #endif
 
 struct rfuse_loop_args{
@@ -457,7 +460,7 @@ struct rfuse_mt {
 	int riq_id;
 };
 
-struct rfuse_payload_view {
+struct rfuse_sbuf_view {
 	void *addr;
 	size_t len;
 	size_t capacity;
@@ -588,14 +591,14 @@ const struct fuse_ctx *fuse_req_ctx(fuse_req_t req);
 int fuse_req_getgroups(fuse_req_t req, int size, gid_t list[]);
 
 /*
- * Returns the request payload buffer.  When the kernel did not provide a
- * direct payload mapping, this returns a malloc buffer sized for the request.
+ * Returns the request sbuf. When the kernel did not provide a direct sbuf
+ * mapping, this returns a malloc buffer sized for the request.
  */
-void *rfuse_req_payload_addr(fuse_req_t req);
+void *rfuse_req_sbuf_addr(fuse_req_t req);
 
-int rfuse_has_payload(fuse_req_t req);
+int rfuse_has_sbuf(fuse_req_t req);
 
-int rfuse_req_payload_view(fuse_req_t req, struct rfuse_payload_view *view);
+int rfuse_req_sbuf_view(fuse_req_t req, struct rfuse_sbuf_view *view);
 
 int rfuse_reply_read_from_fd(fuse_req_t req, int fd, off_t off, size_t size);
 

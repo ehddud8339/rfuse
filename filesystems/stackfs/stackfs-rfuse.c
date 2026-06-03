@@ -1070,24 +1070,24 @@ static void stackfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size,
 		fuse_reply_data(req, &buf, FUSE_BUF_SPLICE_MOVE);
 	} else {
 		char *buf;
-		int has_payload;
+		int has_sbuf;
 
 		//StackFS_trace("Read on name : %s, Kernel inode : %llu, fuse inode : %llu, off : %lu, size : %zu",
 		//			lo_name(req, ino), get_lower_fuse_inode_no(req, ino), get_higher_fuse_inode_no(req, ino), offset, size);
-		buf = rfuse_req_payload_addr(req);
+		buf = rfuse_req_sbuf_addr(req);
 		if (buf == NULL)
 			return (void) fuse_reply_err(req, ENOMEM);
-		has_payload = rfuse_has_payload(req);
+		has_sbuf = rfuse_has_sbuf(req);
 
 		res = pread(lf->fd, buf, size, offset);
 		if (res == -1) {
-			if (!has_payload)
+			if (!has_sbuf)
 				free(buf);
 			return (void) fuse_reply_err(req, errno);
 		}
 
 		res = fuse_reply_buf(req, buf, res);
-		if (!has_payload)
+		if (!has_sbuf)
 			free(buf);
 	}
 }

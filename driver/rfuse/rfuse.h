@@ -100,12 +100,12 @@ struct rfuse_req{
 		uint8_t argument_space[112];
 	}args; // 112
 
-	uint32_t payload_page_index;
-	uint32_t payload_page_count;
-	uint32_t payload_offset;
-	uint32_t payload_len;
-	uint32_t payload_capacity;
-	uint32_t payload_flags;
+	uint32_t sbuf_page_index;
+	uint32_t sbuf_page_count;
+	uint32_t sbuf_offset;
+	uint32_t sbuf_len;
+	uint32_t sbuf_capacity;
+	uint32_t sbuf_flags;
 
 	bool force:1;
 	bool noreply:1;
@@ -116,7 +116,7 @@ struct rfuse_req{
 	bool page_zeroing:1;
 	bool page_replace:1;
 	bool may_block:1;
-	bool payload_reserved:1;
+	bool sbuf_reserved:1;
 
 	struct rfuse_pages *rp;
 	struct rfuse_async_wrt_ctx wrt_ctx;
@@ -210,7 +210,7 @@ struct rfuse_arg{
 	uint8_t garbage[256];
 };
 
-struct rfuse_payload_map {
+struct rfuse_sbuf_map {
 	void *uaddr;
 	void *kaddr;
 	uint32_t size;
@@ -239,8 +239,8 @@ struct rfuse_iqueue{
 	struct rfuse_req *ureq;	// user address
 	struct rfuse_req *kreq; // kernel address
 
-	/** Shared payload buffer **/
-	struct rfuse_payload_map payload;
+	/** Shared sbuf buffer **/
+	struct rfuse_sbuf_map sbuf;
 
 	/** Connection established **/
 	unsigned connected;
@@ -288,17 +288,23 @@ struct rfuse_iqueue{
 	wait_queue_head_t blocked_waitq;
 
 	/*
-	 * Shared payload allocator state, protected by payload_lock.
-	 * payload_bitmap is the allocator source of truth.
-	 * payload_free_pages is a cached aggregate counter for fast
-	 * rejection/debugging only, and payload_search_hint is advisory only.
+	 * Shared sbuf allocator state, protected by sbuf_lock.
+	 * sbuf_bitmap is the allocator source of truth.
+	 * sbuf_free_pages is a cached aggregate counter for fast
+	 * rejection/debugging only, and sbuf_search_hint is advisory only.
 	 */
-	spinlock_t payload_lock;
-	wait_queue_head_t payload_waitq;
-	unsigned long *payload_bitmap;
-	uint32_t payload_page_count;
-	uint32_t payload_free_pages;
-	uint32_t payload_search_hint;
+	spinlock_t sbuf_lock;
+	wait_queue_head_t sbuf_waitq;
+	unsigned long *sbuf_bitmap;
+	uint32_t sbuf_page_count;
+	uint32_t sbuf_free_pages;
+	uint32_t sbuf_search_hint;
+	/*
+	 * LDY: sbuf allocator의 next-fit search cursor와 별개인 metadata.
+	 * 현재 riq sbuf pool에서 가능한 최대 contiguous free run의
+	 * advisory upper bound를 "page" 단위로 유지한다.
+	 */
+	uint32_t sbuf_max_free_hint;
 };
 
 #endif
