@@ -34,6 +34,7 @@
  */
 
 #define RFUSE_SELECTION_ALGO 2
+#define PAYLOAD_AWARE 1
 
 atomic_t rr_id = ATOMIC_INIT(0);
 
@@ -1047,20 +1048,25 @@ static void rfuse_drop_waiting(struct fuse_conn *fc)
 
 static bool rfuse_block_alloc(struct fuse_conn *fc, bool for_background, int riq_id)
 {
-	struct rfuse_iqueue *riq;
-
 	if (!fc->initialized)
 		return true;
 	if (!for_background)
 		return false;
 
+#if PAYLOAD_AWARE
+	return false;
+#else
+	struct rfuse_iqueue *riq;
+
 	riq = rfuse_get_specific_iqueue(fc, riq_id);
 	return riq->blocked;
+#endif
 }
 
 static bool rfuse_background_submission_available(struct rfuse_iqueue *riq)
 {
-	return riq->active_background < riq->max_background;
+  return true;	
+  // return riq->active_background < riq->max_background;
 }
 
 // Get a unique request number 
@@ -1334,7 +1340,8 @@ static int select_numa_aware_v2(struct fuse_conn *fc, size_t len)
 	int start_idx;
 	int numa_id;
 	int offset;
-	unsigned int requested_pages = DIV_ROUND_UP(len, PAGE_SIZE);
+  int i;	
+  unsigned int requested_pages = DIV_ROUND_UP(len, PAGE_SIZE);
 
 	numa_id = find_numa_group_and_index(cpu_id, &start_idx);
 	if (numa_id < 0)
@@ -1346,17 +1353,18 @@ static int select_numa_aware_v2(struct fuse_conn *fc, size_t len)
 		  int riq_id = numa_group[numa_id][idx];
   		struct rfuse_iqueue *riq = fc->riq[riq_id];
 
-	  	if (READ_ONCE(riq->num_background) <= READ_ONCE(riq->congestion_threshold)) {
+	  	//if (READ_ONCE(riq->num_background) <= READ_ONCE(riq->congestion_threshold)) {
 			  /* LDY: NUMA-aware candidate 중에서 요청 sbuf를 담을 가능성이
 			   * 있는 riq만 빠르게 통과시키기 위한 largest-free pages hint 검사.
 			   * 실제 allocation의 source of truth는 sbuf_bitmap이다.
 			   */
 			  if (READ_ONCE(riq->sbuf_max_free_hint) >= requested_pages)
 				  return riq_id;
-		  }
+		  //}
   	}
     cond_resched();
   }
+  return cpu_id;
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc,
@@ -2221,13 +2229,21 @@ static int rfuse_request_queue_background(struct rfuse_req *r_req,
 {
 	struct fuse_mount *fm = r_req->fm;
 	struct fuse_conn *fc = fm->fc;
-	struct rfuse_bg_entry *bg_entry = kmalloc_node(sizeof(struct rfuse_bg_entry),
-							GFP_KERNEL,
-							cpu_to_node(r_req->riq_id));
+	u64 start_ns;
+	u64 end_ns;
+	struct rfuse_bg_entry *bg_entry;
 	LIST_HEAD(to_queue);
 	bool queued = false;
 	int err = -ENOTCONN;
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
+
+	start_ns = ktime_get_ns();
+	bg_entry = kmalloc_node(sizeof(struct rfuse_bg_entry),
+				GFP_KERNEL,
+				cpu_to_node(r_req->riq_id));
+	end_ns = ktime_get_ns();
+	rfuse_path_lat_record(RFUSE_PATH_LAT_INTERNAL_BG_ENTRY_ALLOC,
+			      end_ns - start_ns);
 
 	if (!bg_entry)
 		return -ENOMEM;
@@ -2245,7 +2261,12 @@ static int rfuse_request_queue_background(struct rfuse_req *r_req,
 	bg_entry->riq_id = r_req->riq_id;
 	bg_entry->ldy_prepare_submit_start_ns = ldy_prepare_submit_start_ns;
 
+	start_ns = ktime_get_ns();
 	spin_lock(&riq->bg_lock);
+	end_ns = ktime_get_ns();
+	rfuse_path_lat_record(RFUSE_PATH_LAT_INTERNAL_BG_LOCK_WAIT,
+			      end_ns - start_ns);
+	start_ns = end_ns;
 	if (likely(riq->connected)) {
 		riq->num_background++;
 		if (riq->num_background == riq->max_background)
@@ -2257,9 +2278,12 @@ static int rfuse_request_queue_background(struct rfuse_req *r_req,
 
 		list_add_tail(&bg_entry->list, &riq->bg_queue); // Add it to background queue
 		rfuse_flush_bg_queue_locked(riq, &to_queue);
-		queued = true;
-		err = 0;
+			queued = true;
+			err = 0;
 	}
+	end_ns = ktime_get_ns();
+	rfuse_path_lat_record(RFUSE_PATH_LAT_INTERNAL_BG_LOCK_BODY,
+			      end_ns - start_ns);
 	spin_unlock(&riq->bg_lock);
 
 	if (queued)

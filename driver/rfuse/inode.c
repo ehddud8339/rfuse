@@ -187,6 +187,16 @@ static const struct rfuse_path_lat_desc rfuse_path_lat_descs[RFUSE_PATH_LAT_NR] 
 		{ "try_request_alloc", RFUSE_PATH_LAT_GROUP_INTERNAL },
 	[RFUSE_PATH_LAT_INTERNAL_BLOCK_ALLOC] =
 		{ "block_alloc", RFUSE_PATH_LAT_GROUP_INTERNAL },
+	/* LDY: background request queueing tail 원인을 분리하기 위해
+	 * bg_entry allocation, bg_lock 획득 대기, lock 내부 queue/meta 조작을
+	 * 각각 path_lat_dump에 기록하는 internal counter.
+	 */
+	[RFUSE_PATH_LAT_INTERNAL_BG_ENTRY_ALLOC] =
+		{ "bg_entry_alloc", RFUSE_PATH_LAT_GROUP_INTERNAL },
+	[RFUSE_PATH_LAT_INTERNAL_BG_LOCK_WAIT] =
+		{ "bg_lock_wait", RFUSE_PATH_LAT_GROUP_INTERNAL },
+	[RFUSE_PATH_LAT_INTERNAL_BG_LOCK_BODY] =
+		{ "bg_lock_body", RFUSE_PATH_LAT_GROUP_INTERNAL },
 };
 
 void rfuse_path_lat_record(enum rfuse_path_lat_point point, u64 nsec)

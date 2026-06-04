@@ -110,6 +110,13 @@ enum rfuse_path_lat_point {
 	RFUSE_PATH_LAT_DEV_DO_READ_COPY_PAGES,
 	RFUSE_PATH_LAT_INTERNAL_TRY_REQUEST_ALLOC,
 	RFUSE_PATH_LAT_INTERNAL_BLOCK_ALLOC,
+	/* LDY: background request queueing tail 원인을 분리하기 위해
+	 * bg_entry allocation, bg_lock 획득 대기, lock 내부 queue/meta 조작을
+	 * 각각 path_lat_dump에 기록하는 internal counter.
+	 */
+	RFUSE_PATH_LAT_INTERNAL_BG_ENTRY_ALLOC,
+	RFUSE_PATH_LAT_INTERNAL_BG_LOCK_WAIT,
+	RFUSE_PATH_LAT_INTERNAL_BG_LOCK_BODY,
 	RFUSE_PATH_LAT_NR,
 };
 
