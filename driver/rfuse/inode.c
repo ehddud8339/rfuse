@@ -1658,7 +1658,7 @@ static struct dentry *fuse_get_dentry(struct super_block *sb,
 			if (!fc->export_support)
 				goto out_err;
 
-			r_req = rfuse_get_req(fm, false, false, 0);
+			r_req = rfuse_get_req(fm, false, false, 0, NULL);
 			if (IS_ERR(r_req)) {
 				err = PTR_ERR(r_req);
 				goto out_err;
@@ -1765,7 +1765,7 @@ static struct dentry *fuse_get_parent(struct dentry *child)
 	if (!fc->export_support)
 		return ERR_PTR(-ESTALE);
 
-	r_req = rfuse_get_req(fm, false, false, 0);
+	r_req = rfuse_get_req(fm, false, false, 0, NULL);
 	if (IS_ERR(r_req))
 		return ERR_PTR(PTR_ERR(r_req));
 	err = rfuse_lookup_name(child_inode->i_sb, get_node_id(child_inode), &dotdot_name, r_req, &inode);

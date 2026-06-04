@@ -305,6 +305,20 @@ struct rfuse_iqueue{
 	 * advisory upper bound를 "page" 단위로 유지한다.
 	 */
 	uint32_t sbuf_max_free_hint;
+	/* LDY: riq별 최근 file stream을 구분하기 위한 hint.
+	 * 같은 fuse_inode에서 나온 request가 반복되면 streaming 요청으로 보고,
+	 * 이후 scheduler에서 current CPU 제외 여부를 판단하는 데 사용한다.
+	 * shared riq ABI에 노출되므로 kernel pointer 대신 nodeid를 저장하며,
+	 * scheduling hint이므로 strict correctness state가 아니다.
+	 */
+	u64 stream_hint;
 };
+
+static_assert(sizeof(struct rfuse_iqueue) == 456);
+static_assert(offsetof(struct rfuse_iqueue, connected) == 192);
+static_assert(offsetof(struct rfuse_iqueue, sbuf_bitmap) == 424);
+static_assert(offsetof(struct rfuse_iqueue, sbuf_page_count) == 432);
+static_assert(offsetof(struct rfuse_iqueue, sbuf_max_free_hint) == 444);
+static_assert(offsetof(struct rfuse_iqueue, stream_hint) == 448);
 
 #endif

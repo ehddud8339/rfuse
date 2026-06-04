@@ -1494,9 +1494,11 @@ void rfuse_extract_complete_head(struct rfuse_iqueue *riq);
 // ALLOCATE NEW REQUEST AND ARGUMENTS
 void rfuse_put_request(struct rfuse_req *req);
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc,
+						struct fuse_inode *fi,
 						size_t sbuf_len);
 struct rfuse_req *rfuse_get_req(struct fuse_mount *fm, bool for_background,
-				bool force, size_t sbuf_len);
+				bool force, size_t sbuf_len,
+				struct fuse_inode *fi);
 uint32_t rfuse_get_request_buffer(struct fuse_mount *fm, int riq_id);
 void rfuse_put_request_buffer(struct fuse_mount *fm, uint32_t arg_index, int riq_id);
 uint32_t rfuse_get_argument_buffer(struct fuse_mount *fm, int riq_id);
@@ -1504,7 +1506,8 @@ void rfuse_put_argument_buffer(struct fuse_mount *fm, uint32_t arg_index, int ri
 
 struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm,
 				    bool for_background, bool force,
-				    size_t sbuf_len, spinlock_t *file_lock);
+				    size_t sbuf_len, struct fuse_inode *fi,
+				    spinlock_t *file_lock);
 struct rfuse_req *try_rfuse_get_req_on_riq(struct fuse_mount *fm,
 					   bool for_background, bool force,
 					   int riq_id, spinlock_t *file_lock);

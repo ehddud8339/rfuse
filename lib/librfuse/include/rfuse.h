@@ -405,20 +405,29 @@ struct rfuse_iqueue{
 	uint32_t sbuf_free_pages;
 	uint32_t sbuf_search_hint;
 	uint32_t sbuf_max_free_hint;
+	/* LDY: riq별 최근 file stream을 구분하기 위한 hint.
+	 * 같은 fuse_inode에서 나온 request가 반복되면 streaming 요청으로 보고,
+	 * 이후 scheduler에서 current CPU 제외 여부를 판단하는 데 사용한다.
+	 * shared riq ABI에 노출되므로 kernel pointer 대신 nodeid를 저장하며,
+	 * scheduling hint이므로 strict correctness state가 아니다.
+	 */
+	uint64_t stream_hint;
 };
 
 #ifdef __cplusplus
-static_assert(sizeof(struct rfuse_iqueue) == 448, "rfuse_iqueue ABI drift");
+static_assert(sizeof(struct rfuse_iqueue) == 456, "rfuse_iqueue ABI drift");
 static_assert(offsetof(struct rfuse_iqueue, connected) == 192, "rfuse_iqueue connected offset drift");
 static_assert(offsetof(struct rfuse_iqueue, sbuf_bitmap) == 424, "rfuse_iqueue sbuf bitmap offset drift");
 static_assert(offsetof(struct rfuse_iqueue, sbuf_page_count) == 432, "rfuse_iqueue sbuf page count offset drift");
 static_assert(offsetof(struct rfuse_iqueue, sbuf_max_free_hint) == 444, "rfuse_iqueue sbuf max-free hint offset drift");
+static_assert(offsetof(struct rfuse_iqueue, stream_hint) == 448, "rfuse_iqueue stream hint offset drift");
 #else
-_Static_assert(sizeof(struct rfuse_iqueue) == 448, "rfuse_iqueue ABI drift");
+_Static_assert(sizeof(struct rfuse_iqueue) == 456, "rfuse_iqueue ABI drift");
 _Static_assert(offsetof(struct rfuse_iqueue, connected) == 192, "rfuse_iqueue connected offset drift");
 _Static_assert(offsetof(struct rfuse_iqueue, sbuf_bitmap) == 424, "rfuse_iqueue sbuf bitmap offset drift");
 _Static_assert(offsetof(struct rfuse_iqueue, sbuf_page_count) == 432, "rfuse_iqueue sbuf page count offset drift");
 _Static_assert(offsetof(struct rfuse_iqueue, sbuf_max_free_hint) == 444, "rfuse_iqueue sbuf max-free hint offset drift");
+_Static_assert(offsetof(struct rfuse_iqueue, stream_hint) == 448, "rfuse_iqueue stream hint offset drift");
 #endif
 
 struct rfuse_loop_args{

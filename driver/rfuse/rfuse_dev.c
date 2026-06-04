@@ -935,6 +935,7 @@ static int rfuse_iqueue_alloc_one(struct rfuse_iqueue **riq_out, int riq_id,
 	init_waitqueue_head(&riq->idle_user_waitq);
 	riq->connected = 1;
 	riq->priv = priv;
+	WRITE_ONCE(riq->stream_hint, 0);
 
 	rfuse_init_ring_buffer_1(&riq->pending);
 	rfuse_init_ring_buffer_2(&riq->interrupts);
@@ -1334,47 +1335,73 @@ static int select_numa_aware(struct fuse_conn *fc)
   }
 }
 
-static int select_numa_aware_v2(struct fuse_conn *fc, size_t len)
+static int select_numa_aware_v2(struct fuse_conn *fc,
+				struct fuse_inode *fi, size_t len)
 {
 	int cpu_id = task_cpu(current);
 	int start_idx;
 	int numa_id;
 	int offset;
-  int i;	
-  unsigned int requested_pages = DIV_ROUND_UP(len, PAGE_SIZE);
+	unsigned int requested_pages = DIV_ROUND_UP(len, PAGE_SIZE);
+	u64 nodeid = 0;
 
 	numa_id = find_numa_group_and_index(cpu_id, &start_idx);
 	if (numa_id < 0)
 		return cpu_id;
 
-  for (;;) {
-    int idx = start_idx;
-    int riq_id = numa_group[numa_id][idx];
-    struct rfuse_iqueue *riq = fc->riq[riq_id];
+	if (fi)
+		nodeid = READ_ONCE(fi->nodeid);
 
-    if (READ_ONCE(riq->active_background) == 0)
-      return riq_id;
+	for (;;) {
+		int idx = start_idx;
+		int riq_id = numa_group[numa_id][idx];
+		struct rfuse_iqueue *riq = NULL;
 
-  	for (offset = 1; offset < NUM_NUMA_NODES; offset++) {
-	  	idx = (start_idx + offset) % NUM_NUMA_NODES;
-		  riq_id = numa_group[numa_id][idx];
-  		riq = fc->riq[riq_id];
+		if (riq_id >= 0 && riq_id < RFUSE_NUM_IQUEUE)
+			riq = fc->riq[riq_id];
 
-	  	if ((READ_ONCE(riq->num_background) <= READ_ONCE(riq->congestion_threshold)) ||
+		if (nodeid && riq) {
+			u64 old = READ_ONCE(riq->stream_hint);
+
+			/* LDY: riq별 stream_hint는 최근 file stream의 nodeid를 기억한다.
+			 * 현재 CPU riq의 hint와 현재 요청 fi->nodeid가 다르면 short-flow의
+			 * 첫 요청으로 보고 local wake latency를 줄이기 위해 current riq를
+			 * 선택한다. 같으면 streaming 요청으로 보고 app/daemon runqueue 경쟁을
+			 * 피하기 위해 current riq를 제외한 기존 remote 선택 경로로 보낸다.
+			 */
+			if (old != nodeid) {
+				WRITE_ONCE(riq->stream_hint, nodeid);
+				return riq_id;
+			}
+		}
+
+		for (offset = 1; offset < NUM_NUMA_NODES; offset++) {
+			idx = (start_idx + offset) % NUM_NUMA_NODES;
+			riq_id = numa_group[numa_id][idx];
+			if (riq_id < 0 || riq_id >= RFUSE_NUM_IQUEUE)
+				continue;
+
+			riq = fc->riq[riq_id];
+			if (!riq)
+				continue;
+
+			if ((READ_ONCE(riq->num_background) <= READ_ONCE(riq->congestion_threshold)) ||
 			    (READ_ONCE(riq->sbuf_max_free_hint) >= requested_pages))
 				return riq_id;
 		}
-    cond_resched();
-  }
-  return cpu_id;
+		cond_resched();
+	}
+
+	return cpu_id;
 }
 
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc,
+						struct fuse_inode *fi,
 						size_t sbuf_len)
 {
 	int id;
 
-	id = select_numa_aware_v2(fc, sbuf_len);
+	id = select_numa_aware_v2(fc, fi, sbuf_len);
 
 	return fc->riq[id];
 }
@@ -1625,7 +1652,9 @@ void rfuse_put_request(struct rfuse_req *r_req){
     }  
 }
 
-struct rfuse_req *rfuse_request_alloc(struct fuse_mount *fm, size_t sbuf_len){
+static struct rfuse_req *rfuse_request_alloc(struct fuse_mount *fm,
+					     size_t sbuf_len,
+					     struct fuse_inode *fi){
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_iqueue *riq = rfuse_get_iqueue(fc);
 	int riq_id = riq->riq_id;
@@ -1633,6 +1662,7 @@ struct rfuse_req *rfuse_request_alloc(struct fuse_mount *fm, size_t sbuf_len){
 	uint32_t req_index;
 
 	(void)sbuf_len;
+	(void)fi;
 
 	req_index = rfuse_get_request_buffer(fm, riq_id); // Get a new index
 	r_req = (struct rfuse_req*)&riq->kreq[req_index]; // Get a new entry
@@ -1653,7 +1683,8 @@ struct rfuse_req *rfuse_request_alloc(struct fuse_mount *fm, size_t sbuf_len){
 }
 
 struct rfuse_req *rfuse_get_req(struct fuse_mount *fm, bool for_background,
-				bool force, size_t sbuf_len){
+				bool force, size_t sbuf_len,
+				struct fuse_inode *fi){
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_req *r_req;
 	struct rfuse_iqueue *riq;
@@ -1662,7 +1693,7 @@ struct rfuse_req *rfuse_get_req(struct fuse_mount *fm, bool for_background,
 	if(force) {
 		atomic_inc(&fc->num_waiting);
 
-		r_req = rfuse_request_alloc(fm, sbuf_len);
+		r_req = rfuse_request_alloc(fm, sbuf_len, fi);
 		err = -ENOMEM;
 		if (!r_req) {
 			if (for_background)
@@ -1693,7 +1724,7 @@ struct rfuse_req *rfuse_get_req(struct fuse_mount *fm, bool for_background,
 			goto out; 
 		}
 
-		r_req = rfuse_request_alloc(fm, sbuf_len);
+		r_req = rfuse_request_alloc(fm, sbuf_len, fi);
 		err = -ENOMEM;
 		if (!r_req) {
 			if (for_background)
@@ -1800,16 +1831,18 @@ static struct rfuse_req *try_rfuse_request_alloc_on_riq(struct fuse_mount *fm,
 
 static struct rfuse_req *try_rfuse_request_alloc(struct fuse_mount *fm,
 						 size_t sbuf_len,
+						 struct fuse_inode *fi,
 						 spinlock_t *file_lock){
 	struct fuse_conn *fc = fm->fc;
-	struct rfuse_iqueue *riq = rfuse_get_iqueue_for_async(fc, sbuf_len);
+	struct rfuse_iqueue *riq = rfuse_get_iqueue_for_async(fc, fi, sbuf_len);
 
 	return try_rfuse_request_alloc_on_riq(fm, riq->riq_id, file_lock);
 }
 
 struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm,
 				    bool for_background, bool force,
-				    size_t sbuf_len, spinlock_t *file_lock){
+				    size_t sbuf_len, struct fuse_inode *fi,
+				    spinlock_t *file_lock){
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_req *r_req;
 	struct rfuse_iqueue *riq;
@@ -1820,7 +1853,7 @@ struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm,
 		atomic_inc(&fc->num_waiting);
 
 		path_lat_start = ktime_get_ns();
-		r_req = try_rfuse_request_alloc(fm, sbuf_len, file_lock);
+		r_req = try_rfuse_request_alloc(fm, sbuf_len, fi, file_lock);
 		rfuse_path_lat_record(RFUSE_PATH_LAT_INTERNAL_TRY_REQUEST_ALLOC,
 				      ktime_get_ns() - path_lat_start);
 		err = -ENOMEM;
@@ -1854,7 +1887,7 @@ struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm,
 		}
 
 		path_lat_start = ktime_get_ns();
-		r_req = try_rfuse_request_alloc(fm, sbuf_len, file_lock);
+		r_req = try_rfuse_request_alloc(fm, sbuf_len, fi, file_lock);
 		rfuse_path_lat_record(RFUSE_PATH_LAT_INTERNAL_TRY_REQUEST_ALLOC,
 				      ktime_get_ns() - path_lat_start);
 		err = -ENOMEM;
@@ -3063,6 +3096,7 @@ void rfuse_abort_conn(struct fuse_conn *fc){
 
 		spin_lock(&riq[i]->lock);
 		riq[i]->connected = 0;
+		WRITE_ONCE(riq[i]->stream_hint, 0);
 
 		spin_lock(&riq[i]->bg_lock);
 		rfuse_flush_bg_queue_locked(riq[i], &to_queue);
