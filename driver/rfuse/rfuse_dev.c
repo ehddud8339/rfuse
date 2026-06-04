@@ -597,7 +597,7 @@ void rfuse_release_sbuf(struct rfuse_req *r_req)
 	 * checks catch obvious misuse, but they do not prove absence of a late
 	 * release after range reuse without an additional reservation cookie.
 	 */
-	wake_up_all(&riq->sbuf_waitq);
+	wake_up(&riq->sbuf_waitq);
 	r_req->sbuf_flags = 0;
 }
 
@@ -1348,20 +1348,22 @@ static int select_numa_aware_v2(struct fuse_conn *fc, size_t len)
 		return cpu_id;
 
   for (;;) {
-  	for (offset = 1; offset < NUM_NUMA_NODES; offset++) {
-	  	int idx = (start_idx + offset) % NUM_NUMA_NODES;
-		  int riq_id = numa_group[numa_id][idx];
-  		struct rfuse_iqueue *riq = fc->riq[riq_id];
+    int idx = start_idx;
+    int riq_id = numa_group[numa_id][idx];
+    struct rfuse_iqueue *riq = fc->riq[riq_id];
 
-	  	//if (READ_ONCE(riq->num_background) <= READ_ONCE(riq->congestion_threshold)) {
-			  /* LDY: NUMA-aware candidate 중에서 요청 sbuf를 담을 가능성이
-			   * 있는 riq만 빠르게 통과시키기 위한 largest-free pages hint 검사.
-			   * 실제 allocation의 source of truth는 sbuf_bitmap이다.
-			   */
-			  if (READ_ONCE(riq->sbuf_max_free_hint) >= requested_pages)
-				  return riq_id;
-		  //}
-  	}
+    if (READ_ONCE(riq->active_background) == 0)
+      return riq_id;
+
+  	for (offset = 1; offset < NUM_NUMA_NODES; offset++) {
+	  	idx = (start_idx + offset) % NUM_NUMA_NODES;
+		  riq_id = numa_group[numa_id][idx];
+  		riq = fc->riq[riq_id];
+
+	  	if ((READ_ONCE(riq->num_background) <= READ_ONCE(riq->congestion_threshold)) ||
+			    (READ_ONCE(riq->sbuf_max_free_hint) >= requested_pages))
+				return riq_id;
+		}
     cond_resched();
   }
   return cpu_id;
