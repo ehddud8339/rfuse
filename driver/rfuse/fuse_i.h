@@ -1207,9 +1207,9 @@ struct fuse_conn *fuse_conn_get(struct fuse_conn *fc);
 /**
  * Initialize fuse_conn
  */
-void fuse_conn_init(struct fuse_conn *fc, struct fuse_mount *fm,
-		    struct user_namespace *user_ns,
-		    const struct fuse_iqueue_ops *fiq_ops, void *fiq_priv);
+int fuse_conn_init(struct fuse_conn *fc, struct fuse_mount *fm,
+		   struct user_namespace *user_ns,
+		   const struct fuse_iqueue_ops *fiq_ops, void *fiq_priv);
 
 /**
  * Release reference to fuse_conn
@@ -1408,7 +1408,7 @@ void fuse_file_release(struct inode *inode, struct fuse_file *ff,
 void fuse_wait_on_page_writeback(struct inode *inode, pgoff_t index);
 
 // RFUSE IQUEUE
-void rfuse_iqueue_init(struct fuse_conn *fc, void *priv); 
+int rfuse_iqueue_init(struct fuse_conn *fc, void *priv);
 void *rfuse_validate_mmap_request(struct fuse_dev *fud, loff_t pgoff, size_t size);
 int rfuse_io_mmap(struct vm_area_struct *vma, struct fuse_dev *fud, int req_index, int riq_id, unsigned nbytes);
 void rfuse_iqueue_release(struct fuse_conn *fc);

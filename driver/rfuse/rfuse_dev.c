@@ -9,12 +9,16 @@
 #include <linux/pagemap.h>
 #include <linux/file.h>
 #include <linux/bitmap.h>
+#include <linux/mutex.h>
+#include <linux/kprobes.h>
 #include <linux/slab.h>
 #include <linux/pipe_fs_i.h>
 #include <linux/swap.h>
 #include <linux/splice.h>
 #include <linux/sched.h>
 #include <linux/random.h>
+#include <linux/cpumask.h>
+#include <linux/nodemask.h>
 #include <linux/vmalloc.h>
 #include <asm/atomic.h>
 
@@ -92,6 +96,113 @@ struct rfuse_sbuf_failure_state {
 	bool has_run;
 	enum rfuse_sbuf_alloc_reason reason;
 };
+
+void rfuse_init_ring_buffer_1(struct ring_buffer_1 *rb);
+void rfuse_init_ring_buffer_2(struct ring_buffer_2 *rb);
+void rfuse_init_ring_buffer_3(struct ring_buffer_3 *rb);
+
+typedef void *(*rfuse_vmalloc_node_range_fn_t)(unsigned long size,
+					       unsigned long align,
+					       unsigned long start,
+					       unsigned long end,
+					       gfp_t gfp_mask,
+					       pgprot_t prot,
+					       unsigned long vm_flags,
+					       int node,
+					       const void *caller);
+
+static DEFINE_MUTEX(rfuse_vmalloc_lookup_lock);
+static rfuse_vmalloc_node_range_fn_t rfuse_vmalloc_node_range_fn;
+static bool rfuse_vmalloc_lookup_done;
+
+static rfuse_vmalloc_node_range_fn_t rfuse_get_vmalloc_node_range_fn(void)
+{
+#ifdef CONFIG_KPROBES
+	static unsigned long (*kallsyms_lookup_name_fn)(const char *name);
+	struct kprobe kp = {
+		.symbol_name = "kallsyms_lookup_name",
+	};
+	rfuse_vmalloc_node_range_fn_t fn;
+	int ret;
+
+	fn = READ_ONCE(rfuse_vmalloc_node_range_fn);
+	if (fn || READ_ONCE(rfuse_vmalloc_lookup_done))
+		return fn;
+
+	mutex_lock(&rfuse_vmalloc_lookup_lock);
+	fn = rfuse_vmalloc_node_range_fn;
+	if (fn || rfuse_vmalloc_lookup_done)
+		goto out_unlock;
+
+	ret = register_kprobe(&kp);
+	if (ret)
+		goto out_done;
+
+	kallsyms_lookup_name_fn = (void *)kp.addr;
+	unregister_kprobe(&kp);
+	if (!kallsyms_lookup_name_fn)
+		goto out_done;
+
+	fn = (rfuse_vmalloc_node_range_fn_t)
+		kallsyms_lookup_name_fn("__vmalloc_node_range");
+	if (!fn)
+		goto out_done;
+
+	WRITE_ONCE(rfuse_vmalloc_node_range_fn, fn);
+
+out_done:
+	WRITE_ONCE(rfuse_vmalloc_lookup_done, true);
+out_unlock:
+	mutex_unlock(&rfuse_vmalloc_lookup_lock);
+	return READ_ONCE(rfuse_vmalloc_node_range_fn);
+#else
+	return NULL;
+#endif
+}
+
+static void *rfuse_vmalloc_user_node(unsigned long size, int node)
+{
+	rfuse_vmalloc_node_range_fn_t fn;
+
+	/*
+	 * LDY: sbuf payload는 riq_id에 대응하는 CPU의 NUMA node에만
+	 * 배치한다. __GFP_THISNODE를 사용해 다른 node fallback을 막고,
+	 * local page 확보에 실패하면 RFUSE init 자체를 실패시킨다.
+	 * VM_USERMAP은 기존 RFUSE_PAYLOAD mmap 경로를 유지하기 위해
+	 * 필요하다.
+	 *
+	 * 외부 module에서는 __vmalloc_node_range()를 직접 link할 수
+	 * 없어서, 1회 kprobe lookup으로 심볼 주소를 얻은 뒤
+	 * vmalloc_user()와 동일한 prot/vm_flags로 호출한다.
+	 */
+	fn = rfuse_get_vmalloc_node_range_fn();
+	if (!fn)
+		return NULL;
+
+	return fn(size, SHMLBA, VMALLOC_START, VMALLOC_END,
+		  GFP_KERNEL | __GFP_ZERO | __GFP_THISNODE,
+		  PAGE_KERNEL, VM_USERMAP, node, __builtin_return_address(0));
+}
+
+static int rfuse_target_node(int riq_id, int *node_id)
+{
+	int node;
+
+	/*
+	 * LDY: riq_id를 CPU index처럼 사용하므로, strict NUMA policy를
+	 * 위해 가능한 CPU/node 조합만 허용한다. sbuf payload는 물론
+	 * 같은 ring의 초기화 경로도 동일한 검증 결과를 사용한다.
+	 */
+	if (riq_id < 0 || riq_id >= nr_cpu_ids || !cpu_possible(riq_id))
+		return -EINVAL;
+
+	node = cpu_to_node(riq_id);
+	if (node < 0 || !node_possible(node) || !node_online(node))
+		return -EINVAL;
+
+	*node_id = node;
+	return 0;
+}
 
 static void rfuse_sbuf_publish_req_locked(struct rfuse_req *r_req,
 					     u32 page_index, u32 page_count)
@@ -741,9 +852,16 @@ int rfuse_prepare_sbuf(struct rfuse_req *r_req, bool may_wait)
 
 static int rfuse_sbuf_pool_init(struct rfuse_iqueue *riq)
 {
+	int err;
+	int node;
+
 	BUILD_BUG_ON(RFUSE_PAYLOAD_POOL_SIZE % PAGE_SIZE);
 
-	riq->sbuf.kaddr = vmalloc_user(RFUSE_PAYLOAD_POOL_SIZE);
+	err = rfuse_target_node(riq->riq_id, &node);
+	if (err)
+		return err;
+
+	riq->sbuf.kaddr = rfuse_vmalloc_user_node(RFUSE_PAYLOAD_POOL_SIZE, node);
 	if (!riq->sbuf.kaddr)
 		return -ENOMEM;
 
@@ -770,19 +888,145 @@ static int rfuse_sbuf_pool_init(struct rfuse_iqueue *riq)
 static void rfuse_sbuf_pool_destroy(struct rfuse_iqueue *riq)
 {
 	if (riq->sbuf_bitmap) {
-		if (riq->sbuf_free_pages != riq->sbuf_page_count ||
-		    !bitmap_empty(riq->sbuf_bitmap, riq->sbuf_page_count)) {
-			pr_debug("RFUSE: sbuf pool destroy outstanding state riq=%d free_pages=%u total_pages=%u empty=%u\n",
-				 riq->riq_id, riq->sbuf_free_pages,
-				 riq->sbuf_page_count,
-				 bitmap_empty(riq->sbuf_bitmap,
-					      riq->sbuf_page_count));
-		}
 		bitmap_free(riq->sbuf_bitmap);
 		riq->sbuf_bitmap = NULL;
 	}
 	if (riq->sbuf.kaddr)
 		vfree(riq->sbuf.kaddr);
+}
+
+static void rfuse_iqueue_destroy_one(struct rfuse_iqueue *riq)
+{
+	if (!riq)
+		return;
+
+	kfree(riq->pending.kaddr);
+	kfree(riq->interrupts.kaddr);
+	kfree(riq->forgets.kaddr);
+	kfree(riq->completes.kaddr);
+	kfree(riq->karg);
+	kfree(riq->kreq);
+	rfuse_sbuf_pool_destroy(riq);
+
+	kfree(riq->argbm.bitmap);
+	kfree(riq->reqbm.bitmap);
+	kfree(riq);
+}
+
+static int rfuse_iqueue_alloc_one(struct rfuse_iqueue **riq_out, int riq_id,
+				       void *priv)
+{
+	struct rfuse_iqueue *riq;
+	int node_id;
+	int err;
+
+	err = rfuse_target_node(riq_id, &node_id);
+	if (err)
+		return err;
+
+	riq = kzalloc_node(4096, GFP_KERNEL, node_id);
+	if (!riq)
+		return -ENOMEM;
+
+	spin_lock_init(&riq->lock);
+	riq->riq_id = riq_id;
+	init_waitqueue_head(&riq->waitq);
+	init_waitqueue_head(&riq->idle_user_waitq);
+	riq->connected = 1;
+	riq->priv = priv;
+
+	rfuse_init_ring_buffer_1(&riq->pending);
+	rfuse_init_ring_buffer_2(&riq->interrupts);
+	rfuse_init_ring_buffer_3(&riq->forgets);
+	rfuse_init_ring_buffer_1(&riq->completes);
+
+	riq->pending.kaddr = kmalloc_node(sizeof(struct rfuse_address_entry) *
+					  RFUSE_MAX_QUEUE_SIZE,
+					  GFP_KERNEL, node_id);
+	if (!riq->pending.kaddr) {
+		err = -ENOMEM;
+		goto err_destroy;
+	}
+
+	riq->interrupts.kaddr = kmalloc_node(sizeof(struct rfuse_interrupt_entry) *
+					     RFUSE_MAX_QUEUE_SIZE,
+					     GFP_KERNEL, node_id);
+	if (!riq->interrupts.kaddr) {
+		err = -ENOMEM;
+		goto err_destroy;
+	}
+
+	riq->forgets.kaddr = kmalloc_node(sizeof(struct rfuse_forget_entry) *
+					  RFUSE_MAX_QUEUE_SIZE,
+					  GFP_KERNEL, node_id);
+	if (!riq->forgets.kaddr) {
+		err = -ENOMEM;
+		goto err_destroy;
+	}
+
+	riq->completes.kaddr = kmalloc_node(sizeof(struct rfuse_address_entry) *
+					    RFUSE_MAX_QUEUE_SIZE,
+					    GFP_KERNEL, node_id);
+	if (!riq->completes.kaddr) {
+		err = -ENOMEM;
+		goto err_destroy;
+	}
+
+	riq->karg = kmalloc_node(sizeof(struct rfuse_arg) *
+				 RFUSE_MAX_QUEUE_SIZE * 2,
+				 GFP_KERNEL, node_id);
+	if (!riq->karg) {
+		err = -ENOMEM;
+		goto err_destroy;
+	}
+
+	riq->kreq = kmalloc_node(sizeof(struct rfuse_req) *
+				 RFUSE_MAX_QUEUE_SIZE * 2,
+				 GFP_KERNEL, node_id);
+	if (!riq->kreq) {
+		err = -ENOMEM;
+		goto err_destroy;
+	}
+
+	err = rfuse_sbuf_pool_init(riq);
+	if (err)
+		goto err_destroy;
+
+	riq->argbm.bitmap_size = RFUSE_MAX_QUEUE_SIZE * 2;
+	riq->reqbm.bitmap_size = RFUSE_MAX_QUEUE_SIZE * 2;
+	riq->reqbm.full = 0;
+	riq->argbm.full = 0;
+	riq->argbm.bitmap = kzalloc_node((RFUSE_MAX_QUEUE_SIZE * 2) >> 3,
+					 GFP_KERNEL, node_id);
+	if (!riq->argbm.bitmap) {
+		err = -ENOMEM;
+		goto err_destroy;
+	}
+
+	riq->reqbm.bitmap = kzalloc_node((RFUSE_MAX_QUEUE_SIZE * 2) >> 3,
+					 GFP_KERNEL, node_id);
+	if (!riq->reqbm.bitmap) {
+		err = -ENOMEM;
+		goto err_destroy;
+	}
+
+	INIT_LIST_HEAD(&riq->bg_queue);
+	spin_lock_init(&riq->bg_lock);
+	init_waitqueue_head(&riq->blocked_waitq);
+
+	riq->max_background = FUSE_DEFAULT_MAX_BACKGROUND;
+	riq->congestion_threshold = FUSE_DEFAULT_CONGESTION_THRESHOLD;
+	riq->num_background = 0;
+	riq->active_background = 0;
+	riq->blocked = 0;
+	riq->num_sync_sleeping = 0;
+
+	*riq_out = riq;
+	return 0;
+
+err_destroy:
+	rfuse_iqueue_destroy_one(riq);
+	return err;
 }
 
 
@@ -883,8 +1127,13 @@ static void rfuse_init_iqueue_numa_candidates(struct fuse_conn *fc)
 	memset(fc->riq_node_count, 0, sizeof(fc->riq_node_count));
 
 	for (i = 0; i < RFUSE_NUM_IQUEUE; i++) {
-		int node = cpu_to_node(i);
+		int node;
 		unsigned int count;
+		int err;
+
+		err = rfuse_target_node(i, &node);
+		if (err)
+			continue;
 
 		if (node < 0 || node >= MAX_NUMNODES)
 			continue;
@@ -898,69 +1147,44 @@ static void rfuse_init_iqueue_numa_candidates(struct fuse_conn *fc)
 	}
 }
 
-void rfuse_iqueue_init(struct fuse_conn *fc, void *priv){
-	int i = 0;	
+int rfuse_iqueue_init(struct fuse_conn *fc, void *priv)
+{
+	int i = 0;
+	int err;
 	struct rfuse_iqueue **riq;
-	int node_id = 0;
 
-	// init rfuse iqueue
-	riq = kzalloc(sizeof(struct rfuse_iqueue *) * RFUSE_NUM_IQUEUE, GFP_KERNEL);
-	for(i = 0; i < RFUSE_NUM_IQUEUE; i++){
-		node_id = cpu_to_node(i);
+	/* LDY: 실패 시 부분 초기화된 riq 배열을 남기지 않도록 포인터 배열도
+	 * zero-init 해두고, 각 ring은 개별 unwind helper로 정리한다.
+	 */
+	riq = kcalloc(RFUSE_NUM_IQUEUE, sizeof(*riq), GFP_KERNEL);
+	if (!riq)
+		return -ENOMEM;
 
-		riq[i] = kzalloc_node(4096, GFP_KERNEL, node_id);
-
-		spin_lock_init(&riq[i]->lock);
-		riq[i]->riq_id = i;
-		init_waitqueue_head(&riq[i]->waitq);
-		init_waitqueue_head(&riq[i]->idle_user_waitq);
-		riq[i]->connected=1;
-		riq[i]->priv=priv;
-	
-		// init ring buffer
-		rfuse_init_ring_buffer_1(&riq[i]->pending);
-		rfuse_init_ring_buffer_2(&riq[i]->interrupts);
-		rfuse_init_ring_buffer_3(&riq[i]->forgets);
-		rfuse_init_ring_buffer_1(&riq[i]->completes);
-	
-		// allocate space for mmap
-		riq[i]->pending.kaddr = kmalloc_node(sizeof(struct rfuse_address_entry) * RFUSE_MAX_QUEUE_SIZE, GFP_KERNEL, node_id);
-		riq[i]->interrupts.kaddr = kmalloc_node(sizeof(struct rfuse_interrupt_entry) * RFUSE_MAX_QUEUE_SIZE, GFP_KERNEL, node_id);
-		riq[i]->forgets.kaddr = kmalloc_node(sizeof(struct rfuse_forget_entry) * RFUSE_MAX_QUEUE_SIZE, GFP_KERNEL, node_id);
-		riq[i]->completes.kaddr = kmalloc_node(sizeof(struct rfuse_address_entry) * RFUSE_MAX_QUEUE_SIZE, GFP_KERNEL, node_id);
-		riq[i]->karg = kmalloc_node(sizeof(struct rfuse_arg)*RFUSE_MAX_QUEUE_SIZE * 2, GFP_KERNEL, node_id);
-		riq[i]->kreq = kmalloc_node(sizeof(struct rfuse_req)*RFUSE_MAX_QUEUE_SIZE * 2, GFP_KERNEL, node_id);
-		rfuse_sbuf_pool_init(riq[i]);
-	
-		// init bitmaps
-		riq[i]->argbm.bitmap_size = RFUSE_MAX_QUEUE_SIZE * 2;
-		riq[i]->reqbm.bitmap_size = RFUSE_MAX_QUEUE_SIZE * 2;
-		riq[i]->reqbm.full=0;
-		riq[i]->argbm.full=0;
-		riq[i]->argbm.bitmap = kzalloc_node((RFUSE_MAX_QUEUE_SIZE*2)>>3, GFP_KERNEL, node_id);
-		riq[i]->reqbm.bitmap = kzalloc_node((RFUSE_MAX_QUEUE_SIZE*2)>>3, GFP_KERNEL, node_id);
-
-		// init background queue
-		INIT_LIST_HEAD(&riq[i]->bg_queue);
-		spin_lock_init(&riq[i]->bg_lock);
-		init_waitqueue_head(&riq[i]->blocked_waitq);
-
-		riq[i]->max_background = FUSE_DEFAULT_MAX_BACKGROUND;
-		riq[i]->congestion_threshold = FUSE_DEFAULT_CONGESTION_THRESHOLD;
-		riq[i]->num_background = 0;
-		riq[i]->active_background = 0;
-		riq[i]->blocked = 0;
-
-		riq[i]->num_sync_sleeping = 0;
+	for (i = 0; i < RFUSE_NUM_IQUEUE; i++) {
+		err = rfuse_iqueue_alloc_one(&riq[i], i, priv);
+		if (err)
+			goto err_destroy;
 	}
 
 	fc->riq = riq;
 	rfuse_init_iqueue_numa_candidates(fc);
+	return 0;
+
+err_destroy:
+	while (--i >= 0)
+		rfuse_iqueue_destroy_one(riq[i]);
+	kfree(riq);
+	fc->riq = NULL;
+	return err;
 }
 
-void rfuse_iqueue_release(struct fuse_conn *fc){
+void rfuse_iqueue_release(struct fuse_conn *fc)
+{
 	int i = 0;
 	struct rfuse_iqueue **riq = fc->riq;
+
+	if (!riq)
+		return;
 
 	pr_info("RFUSE_SCHED mode=%d local=%llu spread=%llu switches=%llu mask=0x%llx low_windows=%d\n",
 		atomic_read(&fc->rfuse_sched_mode),
@@ -971,20 +1195,11 @@ void rfuse_iqueue_release(struct fuse_conn *fc){
 		atomic_read(&fc->rfuse_sched_low_windows));
 
 	for(i = 0; i < RFUSE_NUM_IQUEUE; i++) {
-		kfree(riq[i]->pending.kaddr);
-		kfree(riq[i]->interrupts.kaddr);
-		kfree(riq[i]->forgets.kaddr);
-		kfree(riq[i]->completes.kaddr);
-		kfree(riq[i]->karg);
-		kfree(riq[i]->kreq);
-		rfuse_sbuf_pool_destroy(riq[i]);
-	
-		kfree(riq[i]->argbm.bitmap);
-		kfree(riq[i]->reqbm.bitmap);
-		kfree(riq[i]);
+		rfuse_iqueue_destroy_one(riq[i]);
 	}
 
 	kfree(riq);
+	fc->riq = NULL;
 }
 /* for I/O mmap pages*/
 int rfuse_io_mmap(struct vm_area_struct *vma, struct fuse_dev *fud, int req_index, int riq_id, unsigned nbytes){

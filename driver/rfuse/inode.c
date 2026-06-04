@@ -1231,10 +1231,12 @@ static void fuse_pqueue_init(struct fuse_pqueue *fpq)
 	fpq->connected = 1;
 }
 
-void fuse_conn_init(struct fuse_conn *fc, struct fuse_mount *fm,
-		    struct user_namespace *user_ns,
-		    const struct fuse_iqueue_ops *fiq_ops, void *fiq_priv)
+int fuse_conn_init(struct fuse_conn *fc, struct fuse_mount *fm,
+		   struct user_namespace *user_ns,
+		   const struct fuse_iqueue_ops *fiq_ops, void *fiq_priv)
 {
+	int err;
+
 	memset(fc, 0, sizeof(*fc));
 	spin_lock_init(&fc->lock);
 	spin_lock_init(&fc->bg_lock);
@@ -1270,11 +1272,19 @@ void fuse_conn_init(struct fuse_conn *fc, struct fuse_mount *fm,
 	atomic64_set(&fc->rfuse_sched_switch_count, 0);
 	
 	// (rfuse) Initialize the "RFUSE_NUM_IQUEUE" iqueues in fuse_conn 
-	rfuse_iqueue_init(fc, fiq_priv);	
+	err = rfuse_iqueue_init(fc, fiq_priv);
+	if (err) {
+		put_pid_ns(fc->pid_ns);
+		put_user_ns(fc->user_ns);
+		fc->pid_ns = NULL;
+		fc->user_ns = NULL;
+		return err;
+	}
 
 	INIT_LIST_HEAD(&fc->mounts);
 	list_add(&fm->fc_entry, &fc->mounts);
 	fm->fc = fc;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(fuse_conn_init);
 
@@ -1975,7 +1985,12 @@ static int fuse_get_tree(struct fs_context *fsc)
 	}
 	
 	// Initialize the connection
-	fuse_conn_init(fc, fm, fsc->user_ns, &fuse_dev_fiq_ops, NULL);
+	err = fuse_conn_init(fc, fm, fsc->user_ns, &fuse_dev_fiq_ops, NULL);
+	if (err) {
+		kfree(fm);
+		kfree(fc);
+		return err;
+	}
 	fc->release = fuse_free_conn;
 
 	fsc->s_fs_info = fm;
