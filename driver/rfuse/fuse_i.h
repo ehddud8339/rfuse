@@ -124,6 +124,7 @@ void rfuse_path_lat_record(enum rfuse_path_lat_point point, u64 nsec);
 void rfuse_path_lat_record_usr_read(struct rfuse_req *r_req);
 void rfuse_path_lat_record_usr_write(struct rfuse_req *r_req);
 void rfuse_path_lat_record_rw_e2e(struct rfuse_req *r_req);
+void rfuse_riq_req_count_record(int riq_id);
 
 /* One forget request */
 struct fuse_forget_link {

@@ -24,6 +24,7 @@
 #include <linux/posix_acl.h>
 #include <linux/pid_namespace.h>
 #include <linux/ktime.h>
+#include <linux/debugfs.h>
 
 MODULE_AUTHOR("Miklos Szeredi <miklos@szeredi.hu>");
 MODULE_DESCRIPTION("Filesystem in Userspace");
@@ -58,6 +59,13 @@ struct rfuse_path_lat_stat {
 	atomic64_t max_ns;
 };
 
+struct rfuse_path_lat_snapshot_stat {
+	u64 count;
+	u64 total_ns;
+	u64 min_ns;
+	u64 max_ns;
+};
+
 enum rfuse_path_lat_group {
 	RFUSE_PATH_LAT_GROUP_READ,
 	RFUSE_PATH_LAT_GROUP_WRITE,
@@ -69,7 +77,39 @@ struct rfuse_path_lat_desc {
 	enum rfuse_path_lat_group group;
 };
 
+struct rfuse_usr_write_snapshot {
+	u64 tempbuf_cnt;
+	u64 tempbuf_ns;
+	u64 fbuf_if_min_ns;
+	u64 fbuf_if_max_ns;
+	u64 pread_cnt;
+	u64 pread_ns;
+	u64 pread_min_ns;
+	u64 pread_max_ns;
+	u64 pread_bytes;
+	u64 pread_err_cnt;
+};
+
+struct rfuse_path_lat_dump_snapshot {
+	struct rfuse_path_lat_snapshot_stat path[RFUSE_PATH_LAT_NR];
+	struct rfuse_usr_write_snapshot usr_write;
+	u64 riq_req_counts[RFUSE_NUM_IQUEUE];
+};
+
+struct rfuse_path_lat_dump_file {
+	struct mutex lock;
+	char *buffer;
+	size_t len;
+	bool generated;
+};
+
 static struct rfuse_path_lat_stat rfuse_path_lat_stats[RFUSE_PATH_LAT_NR];
+
+/* LDY: 각 riq가 opcode와 무관하게 daemon worker에 전달된 request 개수를
+ * path_lat_dump에서 확인하기 위한 per-riq counter.
+ * shared rfuse_iqueue ABI를 건드리지 않기 위해 kernel 내부 전역 통계로 둔다.
+ */
+static atomic64_t rfuse_riq_req_counts[RFUSE_NUM_IQUEUE];
 
 struct rfuse_usr_write_stat {
 	atomic64_t tempbuf_cnt;
@@ -85,6 +125,15 @@ struct rfuse_usr_write_stat {
 };
 
 static struct rfuse_usr_write_stat rfuse_usr_write_stats;
+static struct dentry *rfuse_debugfs_dir;
+
+static u64 rfuse_dump_counter_read(atomic64_t *counter, bool reset)
+{
+	if (reset)
+		return atomic64_xchg(counter, 0);
+
+	return atomic64_read(counter);
+}
 
 static void rfuse_usr_write_record_min(atomic64_t *stat, u64 nsec)
 {
@@ -361,6 +410,75 @@ void rfuse_path_lat_record_usr_read(struct rfuse_req *r_req)
 	WRITE_ONCE(r_req->usr_write_pread_err_cnt, 0);
 }
 
+/* LDY: path_lat_dump reset/dump 경로에서 재사용할 수 있도록 riq별 request
+ * count 증가는 별도 helper로 모은다. riq가 확정된 submit 시점에서만 호출한다.
+ */
+void rfuse_riq_req_count_record(int riq_id)
+{
+	if (riq_id < 0 || riq_id >= RFUSE_NUM_IQUEUE)
+		return;
+
+	atomic64_inc(&rfuse_riq_req_counts[riq_id]);
+}
+
+/* LDY: path_lat_dump sysfs는 4KB 버퍼 제한이 있고, debugfs full dump는
+ * read session 동안 동일한 snapshot을 반복해서 내보내야 한다.
+ * 그래서 dump/reset 대상 counter를 한 번에 읽어 들이는 snapshot helper를 둔다.
+ */
+static void rfuse_path_lat_dump_snapshot_take(
+	struct rfuse_path_lat_dump_snapshot *snapshot, bool reset)
+{
+	int i;
+
+	memset(snapshot, 0, sizeof(*snapshot));
+
+	for (i = 0; i < RFUSE_PATH_LAT_NR; i++) {
+		snapshot->path[i].count =
+			rfuse_dump_counter_read(&rfuse_path_lat_stats[i].count,
+						reset);
+		snapshot->path[i].total_ns =
+			rfuse_dump_counter_read(&rfuse_path_lat_stats[i].total_ns,
+						reset);
+		snapshot->path[i].min_ns =
+			rfuse_dump_counter_read(&rfuse_path_lat_stats[i].min_ns,
+						reset);
+		snapshot->path[i].max_ns =
+			rfuse_dump_counter_read(&rfuse_path_lat_stats[i].max_ns,
+						reset);
+	}
+
+	snapshot->usr_write.tempbuf_cnt =
+		rfuse_dump_counter_read(&rfuse_usr_write_stats.tempbuf_cnt, reset);
+	snapshot->usr_write.tempbuf_ns =
+		rfuse_dump_counter_read(&rfuse_usr_write_stats.tempbuf_ns, reset);
+	snapshot->usr_write.fbuf_if_min_ns =
+		rfuse_dump_counter_read(&rfuse_usr_write_stats.fbuf_if_min_ns,
+					reset);
+	snapshot->usr_write.fbuf_if_max_ns =
+		rfuse_dump_counter_read(&rfuse_usr_write_stats.fbuf_if_max_ns,
+					reset);
+	snapshot->usr_write.pread_cnt =
+		rfuse_dump_counter_read(&rfuse_usr_write_stats.pread_cnt, reset);
+	snapshot->usr_write.pread_ns =
+		rfuse_dump_counter_read(&rfuse_usr_write_stats.pread_ns, reset);
+	snapshot->usr_write.pread_min_ns =
+		rfuse_dump_counter_read(&rfuse_usr_write_stats.pread_min_ns,
+					reset);
+	snapshot->usr_write.pread_max_ns =
+		rfuse_dump_counter_read(&rfuse_usr_write_stats.pread_max_ns,
+					reset);
+	snapshot->usr_write.pread_bytes =
+		rfuse_dump_counter_read(&rfuse_usr_write_stats.pread_bytes, reset);
+	snapshot->usr_write.pread_err_cnt =
+		rfuse_dump_counter_read(&rfuse_usr_write_stats.pread_err_cnt,
+					reset);
+
+	for (i = 0; i < RFUSE_NUM_IQUEUE; i++) {
+		snapshot->riq_req_counts[i] =
+			rfuse_dump_counter_read(&rfuse_riq_req_counts[i], reset);
+	}
+}
+
 static void rfuse_path_lat_reset(void)
 {
 	int i;
@@ -382,11 +500,129 @@ static void rfuse_path_lat_reset(void)
 	atomic64_set(&rfuse_usr_write_stats.pread_max_ns, 0);
 	atomic64_set(&rfuse_usr_write_stats.pread_bytes, 0);
 	atomic64_set(&rfuse_usr_write_stats.pread_err_cnt, 0);
+
+	for (i = 0; i < RFUSE_NUM_IQUEUE; i++)
+		atomic64_set(&rfuse_riq_req_counts[i], 0);
 }
 
-static size_t rfuse_path_lat_dump_group(char *buffer, size_t len,
-					const char *title,
-					enum rfuse_path_lat_group group)
+static size_t rfuse_count_line_len(const char *fmt, ...)
+{
+	va_list args;
+	char line[192];
+	size_t len;
+
+	va_start(args, fmt);
+	len = vsnprintf(line, sizeof(line), fmt, args);
+	va_end(args);
+
+	return len;
+}
+
+static size_t rfuse_path_lat_dump_group_required_len(const char *title,
+						      enum rfuse_path_lat_group group)
+{
+	int i;
+	size_t len = 0;
+	bool has_rows = false;
+
+	for (i = 0; i < RFUSE_PATH_LAT_NR; i++) {
+		if (!rfuse_path_lat_descs[i].name ||
+		    rfuse_path_lat_descs[i].group != group)
+			continue;
+
+		if (!has_rows) {
+			len += rfuse_count_line_len(
+				"%s\n%-28s %12s %16s %16s %16s %16s\n",
+				title, "stage", "count", "total_ns",
+				"avg_ns", "min_ns", "max_ns");
+			has_rows = true;
+		}
+
+		len += rfuse_count_line_len(
+			"%-28s %12llu %16llu %16llu %16llu %16llu\n",
+			rfuse_path_lat_descs[i].name,
+			(unsigned long long)U64_MAX,
+			(unsigned long long)U64_MAX,
+			(unsigned long long)U64_MAX,
+			(unsigned long long)U64_MAX,
+			(unsigned long long)U64_MAX);
+	}
+
+	if (has_rows)
+		len += 1;
+
+	return len;
+}
+
+static size_t rfuse_usr_write_dump_required_len(void)
+{
+	size_t len = 0;
+
+	len += rfuse_count_line_len(
+		"[RFUSE-USER-WRITE-COPY-STATS]\n"
+		"%-28s %12s %16s %16s %16s %16s\n",
+		"stage", "count", "total_ns", "avg_ns",
+		"min_ns", "max_ns");
+	len += rfuse_count_line_len(
+		"%-28s %12llu %16llu %16llu %16llu %16llu\n",
+		"fbuf_if_block",
+		(unsigned long long)U64_MAX,
+		(unsigned long long)U64_MAX,
+		(unsigned long long)U64_MAX,
+		(unsigned long long)U64_MAX,
+		(unsigned long long)U64_MAX);
+	len += rfuse_count_line_len(
+		"%-28s %12llu %16llu %16llu %16llu %16llu\n\n",
+		"pread",
+		(unsigned long long)U64_MAX,
+		(unsigned long long)U64_MAX,
+		(unsigned long long)U64_MAX,
+		(unsigned long long)U64_MAX,
+		(unsigned long long)U64_MAX);
+
+	return len;
+}
+
+static size_t rfuse_riq_req_count_dump_required_len(void)
+{
+	int i;
+	size_t len = 0;
+
+	len += rfuse_count_line_len("[RFUSE-RIQ-REQ-COUNT]\n");
+
+	for (i = 0; i < RFUSE_NUM_IQUEUE; i++) {
+		len += rfuse_count_line_len("riq[%d]: count=%llu\n", i,
+					    (unsigned long long)U64_MAX);
+	}
+
+	len += 1;
+
+	return len;
+}
+
+/* LDY: module_param get() 버퍼는 4KB로 고정이어서, full dump가 이를 넘는지
+ * 먼저 계산해야 중간 truncation 전에 reset을 막을 수 있다.
+ */
+static size_t rfuse_path_lat_dump_required_len(void)
+{
+	size_t len = 0;
+
+	len += rfuse_path_lat_dump_group_required_len(
+		"[RFUSE-READ-PATH-STATS]", RFUSE_PATH_LAT_GROUP_READ);
+	len += rfuse_path_lat_dump_group_required_len(
+		"[RFUSE-WRITE-PATH-STATS]", RFUSE_PATH_LAT_GROUP_WRITE);
+	len += rfuse_path_lat_dump_group_required_len(
+		"[RFUSE-INTERNAL-STATS]", RFUSE_PATH_LAT_GROUP_INTERNAL);
+	len += rfuse_usr_write_dump_required_len();
+	len += rfuse_riq_req_count_dump_required_len();
+
+	return len;
+}
+
+static size_t rfuse_path_lat_dump_group_snapshot(
+	char *buffer, size_t len, size_t capacity,
+	const struct rfuse_path_lat_dump_snapshot *snapshot,
+	const char *title, enum rfuse_path_lat_group group)
 {
 	int i;
 	bool has_rows = false;
@@ -403,7 +639,7 @@ static size_t rfuse_path_lat_dump_group(char *buffer, size_t len,
 			continue;
 
 		if (!has_rows) {
-			len += scnprintf(buffer + len, PAGE_SIZE - len,
+			len += scnprintf(buffer + len, capacity - len,
 					 "%s\n"
 					 "%-28s %12s %16s %16s %16s %16s\n",
 					 title, "stage", "count",
@@ -412,13 +648,13 @@ static size_t rfuse_path_lat_dump_group(char *buffer, size_t len,
 			has_rows = true;
 		}
 
-		count = atomic64_xchg(&rfuse_path_lat_stats[i].count, 0);
-		total = atomic64_xchg(&rfuse_path_lat_stats[i].total_ns, 0);
-		min = atomic64_xchg(&rfuse_path_lat_stats[i].min_ns, 0);
-		max = atomic64_xchg(&rfuse_path_lat_stats[i].max_ns, 0);
+		count = snapshot->path[i].count;
+		total = snapshot->path[i].total_ns;
+		min = snapshot->path[i].min_ns;
+		max = snapshot->path[i].max_ns;
 		avg = count ? div64_u64(total, count) : 0;
 
-		len += scnprintf(buffer + len, PAGE_SIZE - len,
+		len += scnprintf(buffer + len, capacity - len,
 				 "%-28s %12llu %16llu %16llu %16llu %16llu\n",
 				 rfuse_path_lat_descs[i].name,
 				 (unsigned long long)count,
@@ -426,80 +662,135 @@ static size_t rfuse_path_lat_dump_group(char *buffer, size_t len,
 				 (unsigned long long)avg,
 				 (unsigned long long)min,
 				 (unsigned long long)max);
-		if (len >= PAGE_SIZE)
-			break;
 	}
 
-	if (has_rows && len < PAGE_SIZE)
-		len += scnprintf(buffer + len, PAGE_SIZE - len, "\n");
+	if (has_rows)
+		len += scnprintf(buffer + len, capacity - len, "\n");
 
 	return len;
 }
 
-static size_t rfuse_usr_write_dump(char *buffer, size_t len)
+static size_t rfuse_usr_write_dump_snapshot(
+	char *buffer, size_t len, size_t capacity,
+	const struct rfuse_path_lat_dump_snapshot *snapshot)
 {
-	u64 tempbuf_cnt = atomic64_xchg(&rfuse_usr_write_stats.tempbuf_cnt, 0);
-	u64 tempbuf_ns = atomic64_xchg(&rfuse_usr_write_stats.tempbuf_ns, 0);
-	u64 fbuf_if_min_ns = atomic64_xchg(&rfuse_usr_write_stats.fbuf_if_min_ns, 0);
-	u64 fbuf_if_max_ns = atomic64_xchg(&rfuse_usr_write_stats.fbuf_if_max_ns, 0);
-	u64 pread_cnt = atomic64_xchg(&rfuse_usr_write_stats.pread_cnt, 0);
-	u64 pread_ns = atomic64_xchg(&rfuse_usr_write_stats.pread_ns, 0);
-	u64 pread_min_ns = atomic64_xchg(&rfuse_usr_write_stats.pread_min_ns, 0);
-	u64 pread_max_ns = atomic64_xchg(&rfuse_usr_write_stats.pread_max_ns, 0);
-	atomic64_xchg(&rfuse_usr_write_stats.pread_bytes, 0);
-	atomic64_xchg(&rfuse_usr_write_stats.pread_err_cnt, 0);
+	u64 tempbuf_cnt = snapshot->usr_write.tempbuf_cnt;
+	u64 tempbuf_ns = snapshot->usr_write.tempbuf_ns;
+	u64 fbuf_if_min_ns = snapshot->usr_write.fbuf_if_min_ns;
+	u64 fbuf_if_max_ns = snapshot->usr_write.fbuf_if_max_ns;
+	u64 pread_cnt = snapshot->usr_write.pread_cnt;
+	u64 pread_ns = snapshot->usr_write.pread_ns;
+	u64 pread_min_ns = snapshot->usr_write.pread_min_ns;
+	u64 pread_max_ns = snapshot->usr_write.pread_max_ns;
 
-	if (len >= PAGE_SIZE)
-		return len;
-
-	len += scnprintf(buffer + len, PAGE_SIZE - len,
+	len += scnprintf(buffer + len, capacity - len,
 			 "[RFUSE-USER-WRITE-COPY-STATS]\n"
 			 "%-28s %12s %16s %16s %16s %16s\n",
 			 "stage", "count", "total_ns", "avg_ns",
 			 "min_ns", "max_ns");
+	len += scnprintf(buffer + len, capacity - len,
+			 "%-28s %12llu %16llu %16llu %16llu %16llu\n",
+			 "fbuf_if_block",
+			 (unsigned long long)tempbuf_cnt,
+			 (unsigned long long)tempbuf_ns,
+			 (unsigned long long)(tempbuf_cnt ?
+			 div64_u64(tempbuf_ns, tempbuf_cnt) : 0),
+			 (unsigned long long)fbuf_if_min_ns,
+			 (unsigned long long)fbuf_if_max_ns);
+	len += scnprintf(buffer + len, capacity - len,
+			 "%-28s %12llu %16llu %16llu %16llu %16llu\n\n",
+			 "pread",
+			 (unsigned long long)pread_cnt,
+			 (unsigned long long)pread_ns,
+			 (unsigned long long)(pread_cnt ?
+			 div64_u64(pread_ns, pread_cnt) : 0),
+			 (unsigned long long)pread_min_ns,
+			 (unsigned long long)pread_max_ns);
 
-	if (len < PAGE_SIZE)
-		len += scnprintf(buffer + len, PAGE_SIZE - len,
-				 "%-28s %12llu %16llu %16llu %16llu %16llu\n",
-				 "fbuf_if_block",
-				 (unsigned long long)tempbuf_cnt,
-				 (unsigned long long)tempbuf_ns,
-				 (unsigned long long)(tempbuf_cnt ?
-				 div64_u64(tempbuf_ns, tempbuf_cnt) : 0),
-				 (unsigned long long)fbuf_if_min_ns,
-				 (unsigned long long)fbuf_if_max_ns);
-	if (len < PAGE_SIZE)
-		len += scnprintf(buffer + len, PAGE_SIZE - len,
-				 "%-28s %12llu %16llu %16llu %16llu %16llu\n\n",
-				 "pread",
-				 (unsigned long long)pread_cnt,
-				 (unsigned long long)pread_ns,
-				 (unsigned long long)(pread_cnt ?
-				 div64_u64(pread_ns, pread_cnt) : 0),
-				 (unsigned long long)pread_min_ns,
-				 (unsigned long long)pread_max_ns);
+	return len;
+}
+
+static size_t rfuse_riq_req_count_dump_snapshot(
+	char *buffer, size_t len, size_t capacity,
+	const struct rfuse_path_lat_dump_snapshot *snapshot)
+{
+	int i;
+
+	len += scnprintf(buffer + len, capacity - len,
+			 "[RFUSE-RIQ-REQ-COUNT]\n");
+
+	for (i = 0; i < RFUSE_NUM_IQUEUE; i++) {
+		len += scnprintf(buffer + len, capacity - len,
+				 "riq[%d]: count=%llu\n", i,
+				 (unsigned long long)snapshot->riq_req_counts[i]);
+	}
+
+	len += scnprintf(buffer + len, capacity - len, "\n");
+
+	return len;
+}
+
+static size_t rfuse_path_lat_dump_render(
+	char *buffer, size_t capacity,
+	const struct rfuse_path_lat_dump_snapshot *snapshot)
+{
+	size_t len = 0;
+
+	len = rfuse_path_lat_dump_group_snapshot(buffer, len, capacity, snapshot,
+						 "[RFUSE-READ-PATH-STATS]",
+						 RFUSE_PATH_LAT_GROUP_READ);
+	len = rfuse_path_lat_dump_group_snapshot(buffer, len, capacity, snapshot,
+						 "[RFUSE-WRITE-PATH-STATS]",
+						 RFUSE_PATH_LAT_GROUP_WRITE);
+	len = rfuse_path_lat_dump_group_snapshot(buffer, len, capacity, snapshot,
+						 "[RFUSE-INTERNAL-STATS]",
+						 RFUSE_PATH_LAT_GROUP_INTERNAL);
+	len = rfuse_usr_write_dump_snapshot(buffer, len, capacity, snapshot);
+	len = rfuse_riq_req_count_dump_snapshot(buffer, len, capacity, snapshot);
 
 	return len;
 }
 
 static int path_lat_dump_get(char *buffer, const struct kernel_param *kp)
 {
-	size_t len = 0;
-	len = rfuse_path_lat_dump_group(buffer, len,
-					"[RFUSE-READ-PATH-STATS]",
-					RFUSE_PATH_LAT_GROUP_READ);
-	if (len < PAGE_SIZE)
-		len = rfuse_path_lat_dump_group(buffer, len,
-						"[RFUSE-WRITE-PATH-STATS]",
-						RFUSE_PATH_LAT_GROUP_WRITE);
-	if (len < PAGE_SIZE)
-		len = rfuse_path_lat_dump_group(buffer, len,
-						"[RFUSE-INTERNAL-STATS]",
-						RFUSE_PATH_LAT_GROUP_INTERNAL);
-	if (len < PAGE_SIZE)
-		len = rfuse_usr_write_dump(buffer, len);
+	size_t required_len = rfuse_path_lat_dump_required_len();
 
-	return len;
+	if (required_len >= PAGE_SIZE) {
+		if (rfuse_debugfs_dir) {
+			return scnprintf(buffer, PAGE_SIZE,
+					 "[RFUSE-PATH-LAT-DUMP]\n"
+					 "full dump requires %zu bytes but "
+					 "module_param get() buffers are "
+					 "limited to %lu bytes.\n"
+					 "read /sys/kernel/debug/rfuse/"
+					 "path_lat_dump for the full dump "
+					 "with reset.\n"
+					 "write 1 to this parameter to reset "
+					 "counters without dumping.\n",
+					 required_len, (unsigned long)PAGE_SIZE);
+		}
+
+		return scnprintf(buffer, PAGE_SIZE,
+				 "[RFUSE-PATH-LAT-DUMP]\n"
+				 "full dump requires %zu bytes but module_param "
+				 "get() buffers are limited to %lu bytes.\n"
+				 "debugfs full dump is unavailable, so use "
+				 "'echo 1 > path_lat_dump' to reset counters.\n",
+				 required_len, (unsigned long)PAGE_SIZE);
+	} else {
+		struct rfuse_path_lat_dump_snapshot *snapshot;
+		int len;
+
+		snapshot = kmalloc(sizeof(*snapshot), GFP_KERNEL);
+		if (!snapshot)
+			return -ENOMEM;
+
+		rfuse_path_lat_dump_snapshot_take(snapshot, true);
+		len = rfuse_path_lat_dump_render(buffer, PAGE_SIZE, snapshot);
+		kfree(snapshot);
+
+		return len;
+	}
 }
 
 static int path_lat_dump_set(const char *val, const struct kernel_param *kp)
@@ -2263,6 +2554,119 @@ static void fuse_sysfs_cleanup(void)
 	kobject_put(fuse_kobj);
 }
 
+/* LDY: sysfs module_param는 PAGE_SIZE까지만 read를 넘길 수 있으므로,
+ * full path_lat_dump는 debugfs에서 snapshot buffer를 만들어 끝까지 읽게 한다.
+ * 첫 read에서만 snapshot+reset을 수행하고, 이후 read는 같은 버퍼를 재사용한다.
+ */
+static int rfuse_path_lat_dump_debugfs_generate(
+	struct rfuse_path_lat_dump_file *dump)
+{
+	struct rfuse_path_lat_dump_snapshot *snapshot;
+	size_t capacity = rfuse_path_lat_dump_required_len() + 1;
+	int err = 0;
+
+	dump->buffer = kvmalloc(capacity, GFP_KERNEL);
+	if (!dump->buffer)
+		return -ENOMEM;
+
+	snapshot = kmalloc(sizeof(*snapshot), GFP_KERNEL);
+	if (!snapshot) {
+		err = -ENOMEM;
+		goto err_free_buffer;
+	}
+
+	rfuse_path_lat_dump_snapshot_take(snapshot, true);
+	dump->len = rfuse_path_lat_dump_render(dump->buffer, capacity,
+					       snapshot);
+	kfree(snapshot);
+	dump->generated = true;
+
+	return 0;
+
+err_free_buffer:
+	kvfree(dump->buffer);
+	dump->buffer = NULL;
+	return err;
+}
+
+static int rfuse_path_lat_dump_debugfs_open(struct inode *inode,
+					    struct file *file)
+{
+	struct rfuse_path_lat_dump_file *dump;
+
+	dump = kzalloc(sizeof(*dump), GFP_KERNEL);
+	if (!dump)
+		return -ENOMEM;
+
+	mutex_init(&dump->lock);
+	file->private_data = dump;
+
+	return 0;
+}
+
+static ssize_t rfuse_path_lat_dump_debugfs_read(struct file *file,
+						char __user *user_buffer,
+						size_t count, loff_t *ppos)
+{
+	struct rfuse_path_lat_dump_file *dump = file->private_data;
+	int err = 0;
+
+	mutex_lock(&dump->lock);
+	if (!dump->generated)
+		err = rfuse_path_lat_dump_debugfs_generate(dump);
+	mutex_unlock(&dump->lock);
+	if (err)
+		return err;
+
+	return simple_read_from_buffer(user_buffer, count, ppos, dump->buffer,
+				       dump->len);
+}
+
+static int rfuse_path_lat_dump_debugfs_release(struct inode *inode,
+					       struct file *file)
+{
+	struct rfuse_path_lat_dump_file *dump = file->private_data;
+
+	if (dump) {
+		kvfree(dump->buffer);
+		kfree(dump);
+	}
+
+	return 0;
+}
+
+static const struct file_operations rfuse_path_lat_dump_debugfs_fops = {
+	.owner = THIS_MODULE,
+	.open = rfuse_path_lat_dump_debugfs_open,
+	.read = rfuse_path_lat_dump_debugfs_read,
+	.release = rfuse_path_lat_dump_debugfs_release,
+	.llseek = default_llseek,
+};
+
+static void fuse_debugfs_init(void)
+{
+	struct dentry *file;
+
+	rfuse_debugfs_dir = debugfs_create_dir("rfuse", NULL);
+	if (IS_ERR_OR_NULL(rfuse_debugfs_dir)) {
+		rfuse_debugfs_dir = NULL;
+		return;
+	}
+
+	file = debugfs_create_file("path_lat_dump", 0400, rfuse_debugfs_dir,
+				   NULL, &rfuse_path_lat_dump_debugfs_fops);
+	if (IS_ERR_OR_NULL(file)) {
+		debugfs_remove_recursive(rfuse_debugfs_dir);
+		rfuse_debugfs_dir = NULL;
+	}
+}
+
+static void fuse_debugfs_cleanup(void)
+{
+	debugfs_remove_recursive(rfuse_debugfs_dir);
+	rfuse_debugfs_dir = NULL;
+}
+
 static int __init fuse_init(void)
 {
 	int res;
@@ -2283,16 +2687,19 @@ static int __init fuse_init(void)
 	if (res)
 		goto err_dev_cleanup;
 
+	fuse_debugfs_init();
+
 	res = fuse_ctl_init();
 	if (res)
-		goto err_sysfs_cleanup;
+		goto err_debugfs_cleanup;
 
 	sanitize_global_limit(&max_user_bgreq);
 	sanitize_global_limit(&max_user_congthresh);
 
 	return 0;
 
- err_sysfs_cleanup:
+ err_debugfs_cleanup:
+	fuse_debugfs_cleanup();
 	fuse_sysfs_cleanup();
  err_dev_cleanup:
 	fuse_dev_cleanup();
@@ -2307,6 +2714,7 @@ static void __exit fuse_exit(void)
 	pr_debug("exit\n");
 
 	fuse_ctl_cleanup();
+	fuse_debugfs_cleanup();
 	fuse_sysfs_cleanup();
 	fuse_fs_cleanup();
 	fuse_dev_cleanup();

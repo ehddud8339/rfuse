@@ -1432,6 +1432,7 @@ void rfuse_submit_pending_tail(struct rfuse_iqueue *riq){
 	struct ring_buffer_1 *pending = &riq->pending;
 	unsigned int next =  pending->tail + 1;
 	smp_store_release(&pending->tail,next);
+	rfuse_riq_req_count_record(riq->riq_id);
 }
 
 struct rfuse_forget_entry *rfuse_read_forgets_tail(struct rfuse_iqueue *riq){
@@ -1454,6 +1455,7 @@ void rfuse_submit_forgets_tail(struct rfuse_iqueue *riq){
 	struct ring_buffer_3 *forgets = &riq->forgets;
 	unsigned int next =  forgets->tail + 1;
 	smp_store_release(&forgets->tail,next);
+	rfuse_riq_req_count_record(riq->riq_id);
 }
 
 
