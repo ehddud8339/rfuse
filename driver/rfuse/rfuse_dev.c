@@ -1347,13 +1347,13 @@ static int select_numa_aware_v2(struct fuse_conn *fc, size_t len)
   		struct rfuse_iqueue *riq = fc->riq[riq_id];
 
 	  	if (READ_ONCE(riq->num_background) <= READ_ONCE(riq->congestion_threshold)) {
-			/* LDY: NUMA-aware candidate 중에서 요청 sbuf를 담을 가능성이
-			 * 있는 riq만 빠르게 통과시키기 위한 largest-free pages hint 검사.
-			 * 실제 allocation의 source of truth는 sbuf_bitmap이다.
-			 */
-			if (READ_ONCE(riq->sbuf_max_free_hint) >= requested_pages)
-				return riq_id;
-		}
+			  /* LDY: NUMA-aware candidate 중에서 요청 sbuf를 담을 가능성이
+			   * 있는 riq만 빠르게 통과시키기 위한 largest-free pages hint 검사.
+			   * 실제 allocation의 source of truth는 sbuf_bitmap이다.
+			   */
+			  if (READ_ONCE(riq->sbuf_max_free_hint) >= requested_pages)
+				  return riq_id;
+		  }
   	}
     cond_resched();
   }
