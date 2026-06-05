@@ -1342,7 +1342,8 @@ static int select_numa_aware_v2(struct fuse_conn *fc,
 	int start_idx;
 	int numa_id;
 	int offset;
-	unsigned int requested_pages = DIV_ROUND_UP(len, PAGE_SIZE);
+  int i;	
+  unsigned int requested_pages = DIV_ROUND_UP(len, PAGE_SIZE);
 	u64 nodeid = 0;
 
 	numa_id = find_numa_group_and_index(cpu_id, &start_idx);
@@ -1352,7 +1353,7 @@ static int select_numa_aware_v2(struct fuse_conn *fc,
 	if (fi)
 		nodeid = READ_ONCE(fi->nodeid);
 
-	for (;;) {
+	for (i = 0; i < 3; i++) {
 		int idx = start_idx;
 		int riq_id = numa_group[numa_id][idx];
 		struct rfuse_iqueue *riq = NULL;
