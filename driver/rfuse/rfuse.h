@@ -272,6 +272,12 @@ struct rfuse_iqueue{
 	unsigned int pending_max_depth;
 
 	struct rfuse_latency_hist lat[RFUSE_LAT_MAX];
+
+	/*
+	 * Last nodeid observed on this riq for stream-aware async selection.
+	 * This is an advisory scheduling hint, not correctness state.
+	 */
+	u64 stream_hint;
 };
 
 #endif

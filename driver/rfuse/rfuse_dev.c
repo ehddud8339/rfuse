@@ -162,6 +162,7 @@ void rfuse_iqueue_init(struct fuse_conn *fc, void *priv){
 		init_waitqueue_head(&riq[i]->idle_user_waitq);
 		riq[i]->connected=1;
 		riq[i]->priv=priv;
+		WRITE_ONCE(riq[i]->stream_hint, 0);
 
 		// init ring buffer
 		rfuse_init_ring_buffer_1(&riq[i]->pending);
@@ -337,45 +338,112 @@ static int find_numa_group_index(int id, int *start_idx)
 	int group;
 	int index;
 
+	if (start_idx)
+		*start_idx = -1;
+
 	for (group = 0; group < RFUSE_NUM_NUMA_GROUPS; group++) {
 		for (index = 0; index < RFUSE_NUMA_GROUP_SIZE; index++) {
-      if (numa_group[group][index] == id) {
-        *start_idx = index;
-        return group;
-      }
-    }
+			if (numa_group[group][index] == id) {
+				if (start_idx)
+					*start_idx = index;
+				return group;
+			}
+		}
 	}
 	
-	return 0;
+	return -1;
 }
 
-static int select_numa_aware_from_cur_cpu(struct fuse_conn *fc)
+static int select_numa_aware(struct fuse_conn *fc)
 {
+	int cpu_id = task_cpu(current);
 	int numa_id;
 	int start_idx;
 	int i;
-	int cpu_id = select_cpu_id();
+	int offset;
 
 	numa_id = find_numa_group_index(cpu_id, &start_idx);
+	if (numa_id < 0)
+		return cpu_id;
 
-	for (i = 1; i < 4; i++) {
-		int riq_id = numa_group[numa_id][(start_idx + i) % RFUSE_NUMA_GROUP_SIZE];
-		struct rfuse_iqueue *riq = fc->riq[riq_id];
+	for (i = 0; i < 3; i++) {
+		int idx = start_idx;
+		int riq_id = numa_group[numa_id][idx];
+		struct rfuse_iqueue *riq = NULL;
 
-		if (READ_ONCE(riq->num_background) < READ_ONCE(riq->congestion_threshold))
-			return riq_id;
+		for (offset = 1; offset < RFUSE_NUMA_GROUP_SIZE; offset++) {
+			int idx = (start_idx + offset) % RFUSE_NUMA_GROUP_SIZE;
+      int riq_id = numa_group[numa_id][idx];
+			struct rfuse_iqueue *riq = fc->riq[riq_id];
+
+			if (riq_id < 0 || riq_id >= RFUSE_NUM_IQUEUE)
+				continue;
+
+			if (READ_ONCE(riq->num_background) <= READ_ONCE(riq->congestion_threshold))
+				return riq_id;
+		}
+		cond_resched();
 	}
 
 	return cpu_id;
 }
 
+static int select_numa_aware_bg_stream(struct fuse_conn *fc, u64 inode)
+{
+	int cpu_id = task_cpu(current);
+	int numa_id;
+	int start_idx;
+	int i;
+	int offset;
+	u64 nodeid = inode;
+
+	numa_id = find_numa_group_index(cpu_id, &start_idx);
+	if (numa_id < 0)
+		return cpu_id;
+
+	for (i = 0; i < 3; i++) {
+		int idx = start_idx;
+		int riq_id = numa_group[numa_id][idx];
+		struct rfuse_iqueue *riq = NULL;
+
+		if (riq_id >= 0 && riq_id < RFUSE_NUM_IQUEUE)
+			riq = fc->riq[riq_id];
+
+		if (nodeid && riq) {
+			u64 old = READ_ONCE(riq->stream_hint);
+
+			if (old != nodeid) {
+				WRITE_ONCE(riq->stream_hint, nodeid);
+				return riq_id;
+			}
+		}
+
+		for (offset = 1; offset < RFUSE_NUMA_GROUP_SIZE; offset++) {
+			idx = (start_idx + offset) % RFUSE_NUMA_GROUP_SIZE;
+			riq_id = numa_group[numa_id][idx];
+			if (riq_id < 0 || riq_id >= RFUSE_NUM_IQUEUE)
+				continue;
+
+			riq = fc->riq[riq_id];
+			if (!riq)
+				continue;
+
+			if (READ_ONCE(riq->num_background) <= READ_ONCE(riq->congestion_threshold))
+				return riq_id;
+		}
+		cond_resched();
+	}
+
+	return cpu_id;
+}
 
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc, u64 inode){
 	int id = 0;
 
 	// id = select_round_robin(fc);
 	// id = select_cpu_id();
-	id = select_numa_aware_from_cur_cpu(fc);
+	// id = select_numa_aware(fc);
+  id = select_numa_aware_bg_stream(fc, inode);
 
 	return fc->riq[id];
 }
@@ -385,7 +453,8 @@ struct rfuse_iqueue *rfuse_get_iqueue_for_wt_async(struct fuse_conn *fc, u64 ino
 
 	// id = select_round_robin(fc);
   // id = select_cpu_id();
-	id = select_numa_aware_from_cur_cpu(fc);
+	// id = select_numa_aware(fc);
+  id = select_numa_aware_bg_stream(fc, inode);
 
 	return fc->riq[id];
 }
@@ -2018,6 +2087,7 @@ void rfuse_abort_conn(struct fuse_conn *fc){
 	for(i = 0; i < RFUSE_NUM_IQUEUE; i++) {
 		spin_lock(&riq[i]->lock);
 		riq[i]->connected = 0;
+		WRITE_ONCE(riq[i]->stream_hint, 0);
 
 		spin_lock(&riq[i]->bg_lock);
 		rfuse_flush_bg_queue(fc, riq[i]->riq_id);
