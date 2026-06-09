@@ -422,7 +422,6 @@ static int rfuse_sbuf_try_alloc(struct rfuse_req *r_req, size_t need,
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(r_req->fm->fc,
 							     r_req->riq_id);
 	u32 need_pages;
-	u64 path_lat_start;
 	int ret;
 
 	if (!need)
@@ -440,10 +439,7 @@ static int rfuse_sbuf_try_alloc(struct rfuse_req *r_req, size_t need,
 	}
 
 	spin_lock(&riq->sbuf_lock);
-	path_lat_start = ktime_get_ns();
 	ret = rfuse_sbuf_reserve_locked(r_req, need_pages);
-		rfuse_path_lat_record(RFUSE_PATH_LAT_PAYLOAD_RESERVE_LOCKED,
-				      ktime_get_ns() - path_lat_start);
 	if (ret) {
 		rfuse_sbuf_reset_unreserved_req_locked(r_req);
 		rfuse_sbuf_capture_failure_locked(riq, need_pages, state);
@@ -539,7 +535,6 @@ static int rfuse_sbuf_alloc(struct rfuse_req *r_req, size_t need, bool may_wait)
 							     r_req->riq_id);
 	struct rfuse_sbuf_failure_state state = { 0 };
 	u32 need_pages;
-	u64 path_lat_start;
 	int ret;
 
 	if (!need)
@@ -557,12 +552,9 @@ static int rfuse_sbuf_alloc(struct rfuse_req *r_req, size_t need, bool may_wait)
 			break;
 
 		rfuse_sbuf_log_failure(r_req, need_pages, &state, "wait");
-		path_lat_start = ktime_get_ns();
 		ret = wait_event_interruptible(riq->sbuf_waitq,
 				!r_req->fm->fc->connected ||
 				rfuse_sbuf_can_reserve(riq, need_pages));
-		rfuse_path_lat_record(RFUSE_PATH_LAT_PAYLOAD_WAIT_INTERRUPTIBLE,
-				      ktime_get_ns() - path_lat_start);
 		if (ret)
 			break;
 		if (!r_req->fm->fc->connected) {
@@ -1462,7 +1454,6 @@ void rfuse_submit_pending_tail(struct rfuse_iqueue *riq){
 	struct ring_buffer_1 *pending = &riq->pending;
 	unsigned int next =  pending->tail + 1;
 	smp_store_release(&pending->tail,next);
-	rfuse_riq_req_count_record(riq->riq_id);
 }
 
 struct rfuse_forget_entry *rfuse_read_forgets_tail(struct rfuse_iqueue *riq){
@@ -1485,7 +1476,6 @@ void rfuse_submit_forgets_tail(struct rfuse_iqueue *riq){
 	struct ring_buffer_3 *forgets = &riq->forgets;
 	unsigned int next =  forgets->tail + 1;
 	smp_store_release(&forgets->tail,next);
-	rfuse_riq_req_count_record(riq->riq_id);
 }
 
 
@@ -1847,16 +1837,12 @@ struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm,
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_req *r_req;
 	struct rfuse_iqueue *riq;
-	u64 path_lat_start;
 	int err;
 
 	if(force) {
 		atomic_inc(&fc->num_waiting);
 
-		path_lat_start = ktime_get_ns();
 		r_req = try_rfuse_request_alloc(fm, sbuf_len, fi, file_lock);
-		rfuse_path_lat_record(RFUSE_PATH_LAT_INTERNAL_TRY_REQUEST_ALLOC,
-				      ktime_get_ns() - path_lat_start);
 		err = -ENOMEM;
 		if (!r_req) {
 			if (for_background)
@@ -1887,10 +1873,7 @@ struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm,
 			goto out; 
 		}
 
-		path_lat_start = ktime_get_ns();
 		r_req = try_rfuse_request_alloc(fm, sbuf_len, fi, file_lock);
-		rfuse_path_lat_record(RFUSE_PATH_LAT_INTERNAL_TRY_REQUEST_ALLOC,
-				      ktime_get_ns() - path_lat_start);
 		err = -ENOMEM;
 		if (!r_req) {
 			if (for_background)
@@ -1899,19 +1882,13 @@ struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm,
 		}
 
 		// Pass riq_id to find riq if it needs to wait
-		path_lat_start = ktime_get_ns();
 		if(rfuse_block_alloc(fc, for_background, r_req->riq_id)){
 			err = -EINTR;
 			riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
 			if (wait_event_killable_exclusive(riq->blocked_waitq, !rfuse_block_alloc(fc, for_background, r_req->riq_id))) {
-				rfuse_path_lat_record(RFUSE_PATH_LAT_INTERNAL_BLOCK_ALLOC,
-						      ktime_get_ns() - path_lat_start);
 				goto out;
 			}
 		}
-		rfuse_path_lat_record(RFUSE_PATH_LAT_INTERNAL_BLOCK_ALLOC,
-				      ktime_get_ns() - path_lat_start);
-
 
 		r_req->in.uid = from_kuid(fc->user_ns, current_fsuid());
 		r_req->in.gid = from_kgid(fc->user_ns, current_fsgid());
@@ -2126,39 +2103,12 @@ static void rfuse_request_wait_answer(struct rfuse_req *r_req){
 	wait_event(r_req->waitq, test_bit(FR_FINISHED, &r_req->flags));
 }
 
-/* LDY: prepare submit 계측은 data path인 READ/WRITE 요청만 대상으로 한다. */
-static inline bool rfuse_req_is_read_write(struct rfuse_req *r_req)
-{
-	switch (r_req->in.opcode) {
-	case FUSE_READ:
-	case FUSE_WRITE:
-		return true;
-	default:
-		return false;
-	}
-}
-
-enum rfuse_prepare_submit_type {
-	RFUSE_PREPARE_SUBMIT_NONE = 0,
-	RFUSE_PREPARE_SUBMIT_SYNC,
-	RFUSE_PREPARE_SUBMIT_ASYNC,
-};
-
-/* LDY: READ/WRITE request의 simple submit 진입부터 pending queue 삽입까지의
- * 준비 비용을 중앙에서 계측한다. simple_request는 sync submit,
- * simple_background는 async submit으로 분리한다.
- */
-static int rfuse_queue_request(struct rfuse_req *r_req,
-			       u64 ldy_prepare_submit_start_ns,
-			       enum rfuse_prepare_submit_type
-			       ldy_prepare_submit_type)
+static int rfuse_queue_request(struct rfuse_req *r_req)
 {
 	struct fuse_mount *fm = r_req->fm;
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
 	struct rfuse_address_entry *entry;
-	enum rfuse_path_lat_point point;
-	u64 now;
 
 	if(test_bit(FR_BACKGROUND, &r_req->flags)){
 		__set_bit(FR_ASYNC,&r_req->flags);
@@ -2175,17 +2125,6 @@ static int rfuse_queue_request(struct rfuse_req *r_req,
 	if(!test_bit(FR_BACKGROUND, &r_req->flags)) // only increase the reference count for synchronous requests
 		__rfuse_get_request(r_req);
 	rfuse_submit_pending_tail(riq);				// Commit entry
-	now = ktime_get_ns();
-	if (ldy_prepare_submit_start_ns) {
-		r_req->ldy_ts_enqueue_ns = now;
-		if (ldy_prepare_submit_type == RFUSE_PREPARE_SUBMIT_SYNC)
-			point = RFUSE_PATH_LAT_WRITE_PREPARE_SYNC_SUBMIT;
-		else
-			point = RFUSE_PATH_LAT_WRITE_PREPARE_ASYNC_SUBMIT;
-		rfuse_path_lat_record(point, now - ldy_prepare_submit_start_ns);
-	} else {
-		r_req->ldy_ts_enqueue_ns = 0;
-	}
 	spin_unlock(&riq->lock);					// unlock
 		if(waitqueue_active(&riq->idle_user_waitq)){
 			wake_up(&riq->idle_user_waitq);		// Wake up idle user thread
@@ -2196,20 +2135,9 @@ static int rfuse_queue_request(struct rfuse_req *r_req,
 // PENDING QUEUE INSERT
 ssize_t rfuse_simple_request(struct rfuse_req *r_req){
 	ssize_t ret=0;
-	u64 ldy_prepare_submit_start_ns = 0;
 	int err;
 
-	if (rfuse_req_is_read_write(r_req))
-		ldy_prepare_submit_start_ns = ktime_get_ns();
-
-	if (rfuse_req_is_read_write(r_req))
-		r_req->ldy_ts_prepare_submit_start_ns =
-			ldy_prepare_submit_start_ns;
-	else
-		r_req->ldy_ts_prepare_submit_start_ns = 0;
-
-	err = rfuse_queue_request(r_req, ldy_prepare_submit_start_ns,
-				  RFUSE_PREPARE_SUBMIT_SYNC);
+	err = rfuse_queue_request(r_req);
 	if (err)
 		return err;
 	rfuse_request_wait_answer(r_req);
@@ -2236,9 +2164,7 @@ static void rfuse_queue_bg_list(struct fuse_conn *fc, struct list_head *queue)
 		list_del(&bg_entry->list);
 		riq = rfuse_get_specific_iqueue(fc, bg_entry->riq_id);
 		r_req = (struct rfuse_req *)&riq->kreq[bg_entry->request];
-		err = rfuse_queue_request(r_req,
-					  bg_entry->ldy_prepare_submit_start_ns,
-					  RFUSE_PREPARE_SUBMIT_ASYNC);
+		err = rfuse_queue_request(r_req);
 		kfree(bg_entry);
 		if (unlikely(err)) {
 			r_req->out.error = err;
@@ -2262,26 +2188,19 @@ static void rfuse_flush_bg_queue_locked(struct rfuse_iqueue *riq,
 }
 
 /* Main: Async request를 할당, 초기화 후에 background list에 삽입 후 pending queue로 push */
-static int rfuse_request_queue_background(struct rfuse_req *r_req,
-					  u64 ldy_prepare_submit_start_ns)
+static int rfuse_request_queue_background(struct rfuse_req *r_req)
 {
 	struct fuse_mount *fm = r_req->fm;
 	struct fuse_conn *fc = fm->fc;
-	u64 start_ns;
-	u64 end_ns;
 	struct rfuse_bg_entry *bg_entry;
 	LIST_HEAD(to_queue);
 	bool queued = false;
 	int err = -ENOTCONN;
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
 
-	start_ns = ktime_get_ns();
 	bg_entry = kmalloc_node(sizeof(struct rfuse_bg_entry),
 				GFP_KERNEL,
 				cpu_to_node(r_req->riq_id));
-	end_ns = ktime_get_ns();
-	rfuse_path_lat_record(RFUSE_PATH_LAT_INTERNAL_BG_ENTRY_ALLOC,
-			      end_ns - start_ns);
 
 	if (!bg_entry)
 		return -ENOMEM;
@@ -2297,14 +2216,8 @@ static int rfuse_request_queue_background(struct rfuse_req *r_req,
 	INIT_LIST_HEAD(&bg_entry->list);
 	bg_entry->request = r_req->index;
 	bg_entry->riq_id = r_req->riq_id;
-	bg_entry->ldy_prepare_submit_start_ns = ldy_prepare_submit_start_ns;
 
-	start_ns = ktime_get_ns();
 	spin_lock(&riq->bg_lock);
-	end_ns = ktime_get_ns();
-	rfuse_path_lat_record(RFUSE_PATH_LAT_INTERNAL_BG_LOCK_WAIT,
-			      end_ns - start_ns);
-	start_ns = end_ns;
 	if (likely(riq->connected)) {
 		riq->num_background++;
 		if (riq->num_background == riq->max_background)
@@ -2319,9 +2232,6 @@ static int rfuse_request_queue_background(struct rfuse_req *r_req,
 			queued = true;
 			err = 0;
 	}
-	end_ns = ktime_get_ns();
-	rfuse_path_lat_record(RFUSE_PATH_LAT_INTERNAL_BG_LOCK_BODY,
-			      end_ns - start_ns);
 	spin_unlock(&riq->bg_lock);
 
 	if (queued)
@@ -2335,19 +2245,7 @@ static int rfuse_request_queue_background(struct rfuse_req *r_req,
 
 // BACKGROUND QUEUE INSERT
 int rfuse_simple_background(struct fuse_mount *fm, struct rfuse_req *r_req){
-	u64 ldy_prepare_submit_start_ns = 0;
-
-	if (rfuse_req_is_read_write(r_req))
-		ldy_prepare_submit_start_ns = ktime_get_ns();
-
-	if (rfuse_req_is_read_write(r_req))
-		r_req->ldy_ts_prepare_submit_start_ns =
-			ldy_prepare_submit_start_ns;
-	else
-		r_req->ldy_ts_prepare_submit_start_ns = 0;
-
-	return rfuse_request_queue_background(r_req,
-					      ldy_prepare_submit_start_ns);
+	return rfuse_request_queue_background(r_req);
 }
 
 void rfuse_request_end(struct rfuse_req *r_req){
@@ -2355,25 +2253,6 @@ void rfuse_request_end(struct rfuse_req *r_req){
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
 	LIST_HEAD(to_queue);
-	u64 complete_req_start;
-	u64 request_end_start;
-	bool record_rw_dequeue_lat = r_req->in.opcode == FUSE_READ ||
-				      r_req->in.opcode == FUSE_WRITE;
-	bool record_rw_e2e = record_rw_dequeue_lat &&
-			     r_req->ldy_ts_prepare_submit_start_ns != 0;
-
-	request_end_start = ktime_get_ns();
-	complete_req_start = request_end_start;
-	if (record_rw_e2e && r_req->ldy_ts_reply_comp_start_ns) {
-		if (r_req->in.opcode == FUSE_READ)
-			rfuse_path_lat_record(RFUSE_PATH_LAT_READ_REPLY_COMP,
-					      request_end_start -
-					      r_req->ldy_ts_reply_comp_start_ns);
-		else if (r_req->in.opcode == FUSE_WRITE)
-			rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_REPLY_COMP,
-					      request_end_start -
-					      r_req->ldy_ts_reply_comp_start_ns);
-	}
 
 	if(test_bit(FR_BACKGROUND, &r_req->flags)){
 		spin_lock(&riq->bg_lock);
@@ -2404,45 +2283,17 @@ void rfuse_request_end(struct rfuse_req *r_req){
 
 	{
 		int err;
-		bool record_copy_to_page = r_req->in.opcode == FUSE_READ;
-		u64 copy_to_page_start = 0;
 
-		/* LDY: READ completion에서 shared sbuf를 page/buffer로 가져오는
-		 * 비용을 copy_to_page로 계측한다.
-		 */
-		if (record_copy_to_page)
-			copy_to_page_start = ktime_get_ns();
 		err = rfuse_import_sbuf(r_req);
-		if (record_copy_to_page)
-			rfuse_path_lat_record(RFUSE_PATH_LAT_READ_COPY_TO_PAGE,
-					      ktime_get_ns() -
-					      copy_to_page_start);
 		if (err && !r_req->out.error)
 			r_req->out.error = err;
 	}
-
-	if (r_req->in.opcode == FUSE_READ)
-		rfuse_path_lat_record_usr_read(r_req);
-	else if (r_req->in.opcode == FUSE_WRITE)
-		rfuse_path_lat_record_usr_write(r_req);
-	if (record_rw_dequeue_lat)
-		rfuse_path_lat_record_rw_e2e(r_req);
 
 	if (test_bit(FR_ASYNC, &r_req->flags)) {
 		r_req->end(r_req->fm, r_req, r_req->out.error);
 	}
 
 	rfuse_put_request(r_req);
-	if (record_rw_e2e) {
-		if (r_req->in.opcode == FUSE_READ)
-			rfuse_path_lat_record(RFUSE_PATH_LAT_READ_COMPLETE_REQ,
-					      ktime_get_ns() -
-					      complete_req_start);
-		else if (r_req->in.opcode == FUSE_WRITE)
-			rfuse_path_lat_record(RFUSE_PATH_LAT_WRITE_COMPLETE_REQ,
-					      ktime_get_ns() -
-					      complete_req_start);
-	}
 }
 
 
@@ -2816,7 +2667,6 @@ ssize_t rfuse_dev_do_read(struct fuse_dev *fud, struct file *file, struct iov_it
 	unsigned i;
 	unsigned nbytes;
 	ssize_t res = 0;
-	u64 path_lat_start;
 
 	struct rfuse_copy_state rcs;	
 	int riq_id = (int)((index & RFUSE_RIQ_ID_MASK) >> 16);
@@ -2833,26 +2683,18 @@ ssize_t rfuse_dev_do_read(struct fuse_dev *fud, struct file *file, struct iov_it
 	rcs.r_req = r_req;
 	nbytes = r_req->in.arglen[0];
 
-  // dev do read copy pages start
-	path_lat_start = ktime_get_ns();
 	for(i =0; i<rp->num_pages && (nbytes); i++){
 		int err;
 		unsigned int offset = rp->descs[i].offset;
 		unsigned int count = min(nbytes,rp->descs[i].length);
 
 		err = rfuse_copy_page(&rcs, &rp->pages[i], offset, count, 0);
-		if(err) {
-			rfuse_path_lat_record(RFUSE_PATH_LAT_DEV_DO_READ_COPY_PAGES,
-					      ktime_get_ns() - path_lat_start);
+		if(err)
 			return err;
-		}
 		nbytes -= count;
 		res += count;
 	}
 	rfuse_copy_finish(&rcs);
-	rfuse_path_lat_record(RFUSE_PATH_LAT_DEV_DO_READ_COPY_PAGES,
-			      ktime_get_ns() - path_lat_start);
-  // dev do read copy pages end
 	return res;
 }
 
@@ -2929,7 +2771,6 @@ ssize_t rfuse_dev_do_write(struct fuse_dev *fud, struct iov_iter *from, unsigned
 	struct rfuse_pages *rp;
 	unsigned i;
 	ssize_t res = 0;
-	u64 path_lat_start;
 
 	struct rfuse_copy_state rcs;	
 	int riq_id = (int)((index & RFUSE_RIQ_ID_MASK) >> 16);
@@ -2945,26 +2786,18 @@ ssize_t rfuse_dev_do_write(struct fuse_dev *fud, struct iov_iter *from, unsigned
 	if(r_req->out.arglen > nbytes)
 		r_req->out.arglen = nbytes;
 
-  // dev do write copy pages start
-	path_lat_start = ktime_get_ns();
 	for(i =0; i < rp->num_pages && (nbytes); i++){
 		int err;
 		unsigned int offset = rp->descs[i].offset;
 		unsigned int count = min(nbytes,rp->descs[i].length);
 	
 		err = rfuse_copy_page(&rcs, &rp->pages[i],offset, count,0);
-		if(err) {
-			rfuse_path_lat_record(RFUSE_PATH_LAT_DEV_DO_WRITE_COPY_PAGES,
-					      ktime_get_ns() - path_lat_start);
+		if(err)
 			return err;
-		}
 		nbytes -= count;
 		res += count;
 	}
 	rfuse_copy_finish(&rcs);
-	rfuse_path_lat_record(RFUSE_PATH_LAT_DEV_DO_WRITE_COPY_PAGES,
-			      ktime_get_ns() - path_lat_start);
-  // dev do write copy pages end 
 	return res;
 }
 

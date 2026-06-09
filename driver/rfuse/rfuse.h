@@ -122,32 +122,6 @@ struct rfuse_req{
 	struct rfuse_async_wrt_ctx wrt_ctx;
 	bool has_wrt_ctx;
 	void (*end)(struct fuse_mount *fm, struct rfuse_req *r_req, int error);
-
-	/* LDY: librfuse write data-copy instrumentation ABI extension.
-	 * rfuse_do_write() records fallback temp-buffer path and pread()
-	 * latency so the kernel path_lat_dump interface can aggregate it.
-	 * These fields are instrumentation-only and do not affect request
-	 * semantics.
-	 */
-	uint64_t usr_write_tempbuf_cnt;
-	uint64_t usr_write_tempbuf_ns;
-	uint64_t usr_write_fbuf_if_min_ns;
-	uint64_t usr_write_fbuf_if_max_ns;
-	uint64_t usr_write_pread_cnt;
-	uint64_t usr_write_pread_ns;
-	uint64_t usr_write_pread_bytes;
-	uint64_t usr_write_pread_err_cnt;
-
-	/* LDY: kernel/user 경계를 넘는 READ/WRITE dequeue 및 write path
-	 * 단계별 latency 측정을 위한 timestamp/delta 전달용 필드.
-	 * request semantics에는 영향을 주지 않는다.
-	 */
-	uint64_t ldy_ts_prepare_submit_start_ns;
-	uint64_t ldy_ts_enqueue_ns;
-	uint64_t ldy_ts_backend_write_start_ns;
-	uint64_t ldy_ts_reply_comp_start_ns;
-	uint64_t ldy_lat_enqueue_to_dequeue_ns;
-	uint64_t ldy_lat_backend_write_ns;
 };
 
 
@@ -170,7 +144,6 @@ struct rfuse_bg_entry{
 	struct list_head list;
 	uint32_t request;
 	int32_t riq_id;
-	uint64_t ldy_prepare_submit_start_ns;
 };
 
 // Pending queue, Complete Queue

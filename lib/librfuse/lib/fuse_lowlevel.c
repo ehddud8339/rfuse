@@ -2892,13 +2892,7 @@ fallback:
 	}
 
 restart:
-	//printf("rfuse: Read buffer from /dev/fuse\n");
-	// clock_gettime(CLOCK_MONOTONIC, &start);
 	res = read(ch ? ch->fd : se->fd, buf->mem, se->bufsize);
-	// clock_gettime(CLOCK_MONOTONIC, &end);
-
-	// printf("rfuse experiment 3: READ(user->kernel) switch start time: %lu\n",start.tv_sec*1000000000+start.tv_nsec);
-	// printf("rfuse experiment 3: READ(kernel->user) switch end time: %lu\n",end.tv_sec*1000000000+end.tv_nsec);
 
 	err = errno;
 
