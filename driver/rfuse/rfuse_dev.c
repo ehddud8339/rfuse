@@ -1345,7 +1345,8 @@ static int select_numa_aware_v2(struct fuse_conn *fc,
 	if (fi)
 		nodeid = READ_ONCE(fi->nodeid);
 
-	for (i = 0; i < 3; i++) {
+	// for (i = 0; i < 3; i++) {
+  for (;;) {
 		int idx = start_idx;
 		int riq_id = numa_group[numa_id][idx];
 		struct rfuse_iqueue *riq = NULL;
