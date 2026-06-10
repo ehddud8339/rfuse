@@ -1127,6 +1127,11 @@ static ssize_t rfuse_stage_write_pages(struct address_space *mapping,
 	return staged;
 }
 
+static int rfuse_apply_to_page(struct address_space *mapping,
+			       struct rfuse_req *r_req,
+			       loff_t start, loff_t end,
+			       size_t accepted_len);
+
 static ssize_t rfuse_send_write_payload(struct kiocb *iocb,
 					struct address_space *mapping,
 					struct iov_iter *ii, loff_t pos,
@@ -1187,6 +1192,12 @@ static ssize_t rfuse_send_write_payload(struct kiocb *iocb,
 	if (!err && out->size > copied)
 		err = -EIO;
 	outsize = out->size;
+	if (!err && LDY_NO_PAGE_CACHE && outsize > 0) {
+		err = rfuse_apply_to_page(mapping, r_req, pos,
+					  pos + outsize - 1, outsize);
+		if (err)
+			outsize = 0;
+	}
 	if (!LDY_NO_PAGE_CACHE) {
 		rfuse_release_write_pages(&ria, copied, err ? 0 : outsize, err);
 		rfuse_free_write_pages(&ria);
@@ -1214,8 +1225,85 @@ out_put_req:
 	return err;
 }
 
-static int rfuse_invalidate_written_cache(struct address_space *mapping,
-					  loff_t start, loff_t end)
+static int rfuse_apply_to_page(struct address_space *mapping,
+			       struct rfuse_req *r_req,
+			       loff_t start, loff_t end,
+			       size_t accepted_len)
+{
+	struct inode *inode = mapping->host;
+	struct rfuse_iqueue *riq;
+	char *src;
+	pgoff_t start_index;
+	pgoff_t end_index;
+	pgoff_t index;
+	size_t payload_pos = 0;
+
+	if (!accepted_len)
+		return 0;
+	if (end < start || accepted_len != end - start + 1)
+		return -EINVAL;
+	if (accepted_len > r_req->payload_len)
+		return -EIO;
+
+	riq = rfuse_get_specific_iqueue(r_req->fm->fc, r_req->riq_id);
+	if (!riq)
+		return -EIO;
+
+	src = (char *)riq->payload.kaddr + r_req->payload_offset;
+	start_index = start >> PAGE_SHIFT;
+	end_index = end >> PAGE_SHIFT;
+
+	filemap_invalidate_lock(mapping);
+	for (index = start_index; index <= end_index; index++) {
+		struct page *page;
+		loff_t page_start = (loff_t)index << PAGE_SHIFT;
+		loff_t copy_from = max_t(loff_t, start, page_start);
+		loff_t copy_to = min_t(loff_t, end,
+				       page_start + (loff_t)PAGE_SIZE - 1);
+		size_t page_off = copy_from - page_start;
+		size_t copy_len = copy_to - copy_from + 1;
+
+		page = find_lock_page(mapping, index);
+		if (!page)
+			goto next_page;
+
+		if (page->mapping != mapping)
+			goto unlock_page;
+
+		rfuse_wait_on_page_writeback(inode, index);
+		if (page->mapping != mapping)
+			goto unlock_page;
+
+		if (copy_len != PAGE_SIZE && !PageUptodate(page))
+			goto unlock_page;
+
+		if (mapping_writably_mapped(mapping))
+			flush_dcache_page(page);
+
+		{
+			void *dst = kmap_atomic(page);
+
+			memcpy(dst + page_off, src + payload_pos, copy_len);
+			kunmap_atomic(dst);
+		}
+
+		flush_dcache_page(page);
+		if (copy_len == PAGE_SIZE && !PageUptodate(page))
+			SetPageUptodate(page);
+
+unlock_page:
+		unlock_page(page);
+		put_page(page);
+next_page:
+		payload_pos += copy_len;
+	}
+	filemap_invalidate_unlock(mapping);
+
+	return 0;
+}
+
+static int __maybe_unused rfuse_invalidate_written_cache(struct address_space *mapping,
+							 loff_t start, loff_t end)
 {
 	pgoff_t start_index = start >> PAGE_SHIFT;
 	pgoff_t end_index = end >> PAGE_SHIFT;
@@ -1252,23 +1340,12 @@ ssize_t rfuse_perform_write(struct kiocb *iocb, struct address_space *mapping, s
 
 	do {
 		ssize_t count;
-		loff_t write_start = pos;
 		size_t bytes = min_t(size_t, iov_iter_count(ii), fc->max_write);
 
 		count = rfuse_send_write_payload(iocb, mapping, ii, pos, bytes);
 		if (count <= 0) {
 			err = count;
 		} else {
-			if (LDY_NO_PAGE_CACHE) {
-				int invalidate_err;
-
-				invalidate_err = rfuse_invalidate_written_cache(mapping,
-										write_start,
-										write_start + count - 1);
-				if (invalidate_err && !err)
-					err = invalidate_err;
-			}
-
 			res += count;
 			pos += count;
 
