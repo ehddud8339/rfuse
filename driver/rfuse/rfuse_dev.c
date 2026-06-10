@@ -354,6 +354,29 @@ static int find_numa_group_index(int id, int *start_idx)
 	return -1;
 }
 
+static int select_rsc_aware(struct fuse_conn *fc)
+{
+	int cpu_id = task_cpu(current);
+	int i;
+	int offset;
+ 
+	for (i = 0; i < 3; i++) {
+		for (offset = 0; offset < RFUSE_IQUEUE; offset++) {
+			int riq_id = (cpu_id + offset) % RFUSE_IQUEUE;
+			struct rfuse_iqueue *riq = fc->riq[riq_id];
+
+			if (riq_id < 0 || riq_id >= RFUSE_NUM_IQUEUE)
+				continue;
+
+			if (READ_ONCE(riq->num_background) <= READ_ONCE(riq->congestion_threshold))
+				return riq_id;
+		}
+		cond_resched();
+	}
+
+	return cpu_id;
+}
+
 static int select_numa_aware(struct fuse_conn *fc)
 {
 	int cpu_id = task_cpu(current);
@@ -371,7 +394,7 @@ static int select_numa_aware(struct fuse_conn *fc)
 		int riq_id = numa_group[numa_id][idx];
 		struct rfuse_iqueue *riq = NULL;
 
-		for (offset = 1; offset < RFUSE_NUMA_GROUP_SIZE; offset++) {
+		for (offset = 0; offset < RFUSE_NUMA_GROUP_SIZE; offset++) {
 			int idx = (start_idx + offset) % RFUSE_NUMA_GROUP_SIZE;
       int riq_id = numa_group[numa_id][idx];
 			struct rfuse_iqueue *riq = fc->riq[riq_id];
@@ -442,7 +465,8 @@ struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc, u64 inode)
 
 	// id = select_round_robin(fc);
 	// id = select_cpu_id();
-	// id = select_numa_aware(fc);
+  // id = select_rsc_aware(fc);
+  // id = select_numa_aware(fc);
   id = select_numa_aware_bg_stream(fc, inode);
 
 	return fc->riq[id];
