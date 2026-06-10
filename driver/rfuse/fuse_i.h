@@ -1501,9 +1501,6 @@ void rfuse_put_argument_buffer(struct fuse_mount *fm, uint32_t arg_index, int ri
 struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background,
 				    bool force, spinlock_t *file_lock,
 				    u64 inode);
-struct rfuse_req *try_rfuse_wt_get_req(struct fuse_mount *fm, bool for_background,
-				       bool force, spinlock_t *file_lock,
-				       u64 inode);
 
 // SUBMIT A REQUEST TO PENDING/BACKGROUND
 ssize_t rfuse_simple_request(struct rfuse_req *r_req);

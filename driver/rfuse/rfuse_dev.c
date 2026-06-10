@@ -440,21 +440,10 @@ static int select_numa_aware_bg_stream(struct fuse_conn *fc, u64 inode)
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc, u64 inode){
 	int id = 0;
 
-	// id = select_round_robin(fc);
+	id = select_round_robin(fc);
 	// id = select_cpu_id();
 	// id = select_numa_aware(fc);
-  id = select_numa_aware_bg_stream(fc, inode);
-
-	return fc->riq[id];
-}
-
-struct rfuse_iqueue *rfuse_get_iqueue_for_wt_async(struct fuse_conn *fc, u64 inode){
-	int id = 0;
-
-	// id = select_round_robin(fc);
-  // id = select_cpu_id();
-	// id = select_numa_aware(fc);
-  id = select_numa_aware_bg_stream(fc, inode);
+  // id = select_numa_aware_bg_stream(fc, inode);
 
 	return fc->riq[id];
 }
@@ -897,43 +886,6 @@ static struct rfuse_req *try_rfuse_request_alloc(struct fuse_mount *fm,
 	return r_req;
 }
 
-static struct rfuse_req *try_rfuse_wt_request_alloc(struct fuse_mount *fm,
-						    spinlock_t *file_lock,
-						    u64 inode){
-	struct fuse_conn *fc = fm->fc;
-	struct rfuse_iqueue *riq = rfuse_get_iqueue_for_wt_async(fc, inode);
-	int riq_id = riq->riq_id;
-	struct rfuse_req *r_req = NULL;
-	uint32_t req_index;
-
-	do {
-		req_index = try_rfuse_get_request_buffer(fm, riq_id); // Get a new index
-		if(req_index == -1) {
-			if(file_lock)
-				spin_unlock(file_lock);
-			wait_event_interruptible(riq->waitq, !READ_ONCE(riq->reqbm.full));
-			if(file_lock)
-				spin_lock(file_lock);
-		}
-	} while(req_index == -1);
-	
-	r_req = (struct rfuse_req*)&riq->kreq[req_index]; // Get a new entry
-
-	if(r_req) {
-		// Initialize request
-		memset(r_req, 0, sizeof(struct rfuse_req));
-		init_waitqueue_head(&r_req->waitq);
-		refcount_set(&r_req->count, 1);
-		__set_bit(FR_PENDING,&r_req->flags);
-		r_req->fm = fm;
-		r_req->index = req_index;
-		r_req->riq_id = riq_id;
-	}
-
-	// INITIALIZE DONE
-	return r_req;
-}
-
 struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background,
 				    bool force, spinlock_t *file_lock,
 				    u64 inode){
@@ -1012,88 +964,6 @@ struct rfuse_req *try_rfuse_get_req(struct fuse_mount *fm, bool for_background,
 
 out:
 	printk("try r_req allocation failed\n");
-	rfuse_drop_waiting(fc);
-	return ERR_PTR(err);
-}
-
-struct rfuse_req *try_rfuse_wt_get_req(struct fuse_mount *fm, bool for_background,
-				       bool force, spinlock_t *file_lock,
-				       u64 inode){
-	struct fuse_conn *fc = fm->fc;
-	struct rfuse_req *r_req;
-	struct rfuse_iqueue *riq;
-	int err;
-
-	if(force) {
-		atomic_inc(&fc->num_waiting);
-
-		r_req = try_rfuse_wt_request_alloc(fm, file_lock, inode);
-		err = -ENOMEM;
-		if (!r_req) {
-			if (for_background)
-				wake_up(&fc->blocked_waitq);
-			goto out;
-		}
-
-		__set_bit(FR_WAITING, &r_req->flags);
-		if(for_background){
-			__set_bit(FR_BACKGROUND, &r_req->flags);
-		} else{
-			if(!r_req->nocreds)
-				rfuse_force_creds(r_req);
-
-			__set_bit(FR_FORCE, &r_req->flags);
-		}
-	} else {
-		atomic_inc(&fc->num_waiting);
-
-		smp_rmb();
-		err = -ENOTCONN;
-		if(!fc->connected) {
-			goto out;
-		}
-
-		err = -ECONNREFUSED;
-		if (fc->conn_error) {
-			goto out;
-		}
-
-		r_req = try_rfuse_wt_request_alloc(fm, file_lock, inode);
-		err = -ENOMEM;
-		if (!r_req) {
-			if (for_background)
-				wake_up(&fc->blocked_waitq);
-			goto out;
-		}
-
-		// Pass riq_id to find riq if it needs to wait
-		if(rfuse_block_alloc(fc, for_background, r_req->riq_id)){
-			err = -EINTR;
-			riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
-			if (wait_event_killable_exclusive(riq->blocked_waitq, !rfuse_block_alloc(fc, for_background, r_req->riq_id)))
-				goto out;
-		}
-
-		r_req->in.uid = from_kuid(fc->user_ns, current_fsuid());
-		r_req->in.gid = from_kgid(fc->user_ns, current_fsgid());
-		r_req->in.pid = pid_nr_ns(task_pid(current), fc->pid_ns);
-
-		__set_bit(FR_WAITING, &r_req->flags);
-		if (for_background) 
-			__set_bit(FR_BACKGROUND, &r_req->flags);
-
-		if (unlikely(r_req->in.uid == ((uid_t)-1) || r_req->in.gid == ((gid_t)-1))) {
-			rfuse_put_request(r_req);
-			return ERR_PTR(-EOVERFLOW);
-		}
-	}
-
-	smp_mb();
-
-	return r_req;  
-
-out:
-	printk("try wt r_req allocation failed\n");
 	rfuse_drop_waiting(fc);
 	return ERR_PTR(err);
 }

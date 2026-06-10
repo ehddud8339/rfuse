@@ -1594,8 +1594,8 @@ async:
 			ria->path_lat = true;
 
 			start_ns = ktime_get_ns();
-			r_req = try_rfuse_wt_get_req(fm, true, false, NULL,
-						     fi->nodeid);
+			r_req = try_rfuse_get_req(fm, true, false, NULL,
+						  fi->nodeid);
 			rfuse_path_lat_record(RFUSE_PATH_LAT_ASYNC_WT_GET_REQ,
 					      ktime_get_ns() - start_ns);
 			if (IS_ERR(r_req)) {
