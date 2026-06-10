@@ -440,10 +440,10 @@ static int select_numa_aware_bg_stream(struct fuse_conn *fc, u64 inode)
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc, u64 inode){
 	int id = 0;
 
-	id = select_round_robin(fc);
+	// id = select_round_robin(fc);
 	// id = select_cpu_id();
 	// id = select_numa_aware(fc);
-  // id = select_numa_aware_bg_stream(fc, inode);
+  id = select_numa_aware_bg_stream(fc, inode);
 
 	return fc->riq[id];
 }
