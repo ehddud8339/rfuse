@@ -390,10 +390,6 @@ static int select_numa_aware(struct fuse_conn *fc)
 		return cpu_id;
 
 	for (i = 0; i < 3; i++) {
-		int idx = start_idx;
-		int riq_id = numa_group[numa_id][idx];
-		struct rfuse_iqueue *riq = NULL;
-
 		for (offset = 0; offset < RFUSE_NUMA_GROUP_SIZE; offset++) {
 			int idx = (start_idx + offset) % RFUSE_NUMA_GROUP_SIZE;
       int riq_id = numa_group[numa_id][idx];
