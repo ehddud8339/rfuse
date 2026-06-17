@@ -8,6 +8,8 @@
 #include <linux/miscdevice.h>
 #include <linux/pagemap.h>
 #include <linux/file.h>
+#include <linux/kprobes.h>
+#include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/pipe_fs_i.h>
 #include <linux/swap.h>
@@ -60,6 +62,78 @@ static struct fuse_dev *fuse_get_dev(struct file *file)
 
 #define RFUSE_PAYLOAD_UNIT_SIZE (FUSE_MAX_MAX_PAGES * PAGE_SIZE)
 #define RFUSE_PAYLOAD_POOL_SIZE (RFUSE_WORKER_PER_RING * RFUSE_PAYLOAD_UNIT_SIZE)
+
+typedef void *(*rfuse_vmalloc_node_range_fn_t)(unsigned long size,
+					       unsigned long align,
+					       unsigned long start,
+					       unsigned long end,
+					       gfp_t gfp_mask,
+					       pgprot_t prot,
+					       unsigned long vm_flags,
+					       int node,
+					       const void *caller);
+
+static DEFINE_MUTEX(rfuse_vmalloc_lookup_lock);
+static rfuse_vmalloc_node_range_fn_t rfuse_vmalloc_node_range_fn;
+static bool rfuse_vmalloc_lookup_done;
+
+static rfuse_vmalloc_node_range_fn_t rfuse_get_vmalloc_node_range_fn(void)
+{
+#ifdef CONFIG_KPROBES
+	static unsigned long (*kallsyms_lookup_name_fn)(const char *name);
+	struct kprobe kp = {
+		.symbol_name = "kallsyms_lookup_name",
+	};
+	rfuse_vmalloc_node_range_fn_t fn;
+	int ret;
+
+	fn = READ_ONCE(rfuse_vmalloc_node_range_fn);
+	if (fn || READ_ONCE(rfuse_vmalloc_lookup_done))
+		return fn;
+
+	mutex_lock(&rfuse_vmalloc_lookup_lock);
+	fn = rfuse_vmalloc_node_range_fn;
+	if (fn || rfuse_vmalloc_lookup_done)
+		goto out_unlock;
+
+	ret = register_kprobe(&kp);
+	if (ret)
+		goto out_done;
+
+	kallsyms_lookup_name_fn = (void *)kp.addr;
+	unregister_kprobe(&kp);
+	if (!kallsyms_lookup_name_fn)
+		goto out_done;
+
+	fn = (rfuse_vmalloc_node_range_fn_t)
+		kallsyms_lookup_name_fn("__vmalloc_node_range");
+	if (!fn)
+		goto out_done;
+
+	WRITE_ONCE(rfuse_vmalloc_node_range_fn, fn);
+
+out_done:
+	WRITE_ONCE(rfuse_vmalloc_lookup_done, true);
+out_unlock:
+	mutex_unlock(&rfuse_vmalloc_lookup_lock);
+	return READ_ONCE(rfuse_vmalloc_node_range_fn);
+#else
+	return NULL;
+#endif
+}
+
+static void *rfuse_vmalloc_user_node(unsigned long size, int node)
+{
+	rfuse_vmalloc_node_range_fn_t fn;
+
+	fn = rfuse_get_vmalloc_node_range_fn();
+	if (!fn)
+		return NULL;
+
+	return fn(size, SHMLBA, VMALLOC_START, VMALLOC_END,
+		  GFP_KERNEL | __GFP_ZERO | __GFP_THISNODE,
+		  PAGE_KERNEL, VM_USERMAP, node, __builtin_return_address(0));
+}
 
 struct rfuse_payload_extent {
 	struct list_head list;
@@ -185,7 +259,8 @@ static int rfuse_payload_alloc(struct rfuse_req *r_req, size_t need, bool may_wa
 		return -E2BIG;
 	}
 
-	active = kmalloc(sizeof(*active), GFP_KERNEL);
+	active = kmalloc_node(sizeof(*active), GFP_KERNEL,
+			      cpu_to_node(r_req->riq_id));
 	if (!active) {
 		/* pr_info("RFUSE_PAYLOAD_ALLOC riq=%d req=%u opcode=%u need=%zu aligned=%zu ret=%d total_ns=%llu lock_ns=0 wait_ns=0 attempts=0 waits=0 used=%u size=%u may_wait=%d\n",
 		 *	r_req->riq_id, r_req->index, r_req->in.opcode, need,
@@ -545,11 +620,12 @@ int rfuse_prepare_payload(struct rfuse_req *r_req, bool may_wait)
 	return 0;
 }
 
-static int rfuse_payload_pool_init(struct rfuse_iqueue *riq)
+static int rfuse_payload_pool_init(struct rfuse_iqueue *riq, int node_id)
 {
 	struct rfuse_payload_extent *extent;
 
-	riq->payload.kaddr = vmalloc_user(RFUSE_PAYLOAD_POOL_SIZE);
+	riq->payload.kaddr = rfuse_vmalloc_user_node(RFUSE_PAYLOAD_POOL_SIZE,
+						     node_id);
 	if (!riq->payload.kaddr)
 		return -ENOMEM;
 
@@ -562,7 +638,7 @@ static int rfuse_payload_pool_init(struct rfuse_iqueue *riq)
 	INIT_LIST_HEAD(&riq->payload_active);
 	riq->payload_next_generation = 0;
 
-	extent = kmalloc(sizeof(*extent), GFP_KERNEL);
+	extent = kmalloc_node(sizeof(*extent), GFP_KERNEL, node_id);
 	if (!extent) {
 		vfree(riq->payload.kaddr);
 		riq->payload.kaddr = NULL;
@@ -712,7 +788,7 @@ void rfuse_iqueue_init(struct fuse_conn *fc, void *priv){
 		riq[i]->completes.kaddr = kmalloc_node(sizeof(struct rfuse_address_entry) * RFUSE_MAX_QUEUE_SIZE, GFP_KERNEL, node_id);
 		riq[i]->karg = kmalloc_node(sizeof(struct rfuse_arg)*RFUSE_MAX_QUEUE_SIZE * 2, GFP_KERNEL, node_id);
 		riq[i]->kreq = kmalloc_node(sizeof(struct rfuse_req)*RFUSE_MAX_QUEUE_SIZE * 2, GFP_KERNEL, node_id);
-		if (rfuse_payload_pool_init(riq[i])) {
+		if (rfuse_payload_pool_init(riq[i], node_id)) {
 			pr_err("RFUSE: failed to initialize payload pool for riq %d\n", i);
 		}
 	
