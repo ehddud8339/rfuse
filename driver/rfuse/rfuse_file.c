@@ -381,10 +381,14 @@ static void rfuse_release_end(struct fuse_mount *fm, struct rfuse_req *r_req, in
 	iput(rfuse_inarg->inode);
 }
 
-static void rfuse_file_put(struct fuse_file *ff, struct rfuse_req *r_req,
+static bool rfuse_file_put(struct fuse_file *ff, struct rfuse_req *r_req,
 				 bool sync, bool isdir){
 	if (refcount_dec_and_test(&ff->count)) {
-		if(!r_req || isdir ? r_req->in.opcode != FUSE_RELEASEDIR : r_req->in.opcode != FUSE_RELEASE) {
+		bool need_new_req = !r_req ||
+			(isdir ? r_req->in.opcode != FUSE_RELEASEDIR :
+				 r_req->in.opcode != FUSE_RELEASE);
+
+		if(need_new_req) {
 			struct rfuse_req *new_r_req;
 			struct rfuse_release_in *new_rfuse_inarg;
 			
@@ -395,7 +399,7 @@ static void rfuse_file_put(struct fuse_file *ff, struct rfuse_req *r_req,
 				if (IS_ERR(new_r_req)) {
 					iput(ff->release_args->inode);
 					kfree(ff);
-					return;
+					return true;
 				}
 
 				new_rfuse_inarg = (struct rfuse_release_in*)&new_r_req->args;
@@ -409,6 +413,7 @@ static void rfuse_file_put(struct fuse_file *ff, struct rfuse_req *r_req,
 			if (isdir ? ff->fm->fc->no_opendir : ff->fm->fc->no_open) {
 				/* Do nothing when client does not implement 'open' */
 				rfuse_release_end(ff->fm, new_r_req, 0);
+				rfuse_put_request(new_r_req);
 			} else if (sync) {
 				rfuse_simple_request(new_r_req);
 				rfuse_release_end(ff->fm, new_r_req, 0);
@@ -422,6 +427,8 @@ static void rfuse_file_put(struct fuse_file *ff, struct rfuse_req *r_req,
 			if (isdir ? ff->fm->fc->no_opendir : ff->fm->fc->no_open) {
 				/* Do nothing when client does not implement 'open' */
 				rfuse_release_end(ff->fm, r_req, 0);
+				if (!sync)
+					rfuse_put_request(r_req);
 			} else if (sync) {
 				rfuse_simple_request(r_req);
 				rfuse_release_end(ff->fm, r_req, 0);
@@ -433,7 +440,10 @@ static void rfuse_file_put(struct fuse_file *ff, struct rfuse_req *r_req,
 		}
 
 		kfree(ff);
+		return true;
 	}
+
+	return false;
 }
 
 static void rfuse_prepare_release(struct fuse_inode *fi, struct fuse_file *ff,
@@ -491,6 +501,7 @@ void rfuse_file_release(struct inode *inode, struct fuse_file *ff,
 	struct fuse_mount *fm = ff->fm;
 	struct fuse_release_args *ra = ff->release_args;
 	bool destroy = ff->fm->fc->destroy;
+	bool released;
 
 	if (destroy)
 		r_req = rfuse_get_req(fm, false, true);
@@ -522,9 +533,8 @@ void rfuse_file_release(struct inode *inode, struct fuse_file *ff,
 	ra->args.nodeid = ff->nodeid;
 	ra->inode = inode;
 
-
-	rfuse_file_put(ff, r_req, destroy, isdir);
-	if (destroy) // Only put requests that are synchronous
+	released = rfuse_file_put(ff, r_req, destroy, isdir);
+	if (!released || destroy) // Only put requests that are synchronous
 		rfuse_put_request(r_req);
 }
 
