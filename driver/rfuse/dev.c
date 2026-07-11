@@ -22,6 +22,8 @@
 #include <linux/splice.h>
 #include <linux/sched.h>
 #include <linux/vmalloc.h>
+#include <linux/debugfs.h>
+#include <linux/uaccess.h>
 
 
 MODULE_ALIAS_MISCDEV(FUSE_MINOR);
@@ -32,6 +34,63 @@ MODULE_ALIAS("devname:fuse");
 #define FUSE_REQ_ID_STEP (1ULL << 1)
 
 static struct kmem_cache *fuse_req_cachep;
+static struct dentry *rfuse_debugfs_dir;
+static atomic64_t rfuse_syscall_counts[RFUSE_SYSCALL_COUNT_MAX];
+
+static const char * const rfuse_syscall_count_names[] = {
+	[RFUSE_SYSCALL_COUNT_PREAD] = "pread",
+	[RFUSE_SYSCALL_COUNT_PWRITE] = "pwrite",
+	[RFUSE_SYSCALL_COUNT_DO_READ] = "do_read",
+	[RFUSE_SYSCALL_COUNT_DO_WRITE] = "do_write",
+};
+
+static void rfuse_syscall_count_reset(void)
+{
+	int i;
+
+	for (i = 0; i < RFUSE_SYSCALL_COUNT_MAX; i++)
+		atomic64_set(&rfuse_syscall_counts[i], 0);
+}
+
+static int rfuse_syscall_count_add(unsigned int type, u64 count)
+{
+	if (type >= RFUSE_SYSCALL_COUNT_MAX || !count)
+		return -EINVAL;
+
+	atomic64_add(count, &rfuse_syscall_counts[type]);
+	return 0;
+}
+
+static ssize_t rfuse_syscall_count_read(struct file *file, char __user *buf,
+					size_t count, loff_t *ppos)
+{
+	char kbuf[160];
+	int i;
+	int len = 0;
+
+	for (i = 0; i < RFUSE_SYSCALL_COUNT_MAX; i++)
+		len += scnprintf(kbuf + len, sizeof(kbuf) - len,
+				 "%s: %lld\n",
+				 rfuse_syscall_count_names[i],
+				 (long long)atomic64_read(&rfuse_syscall_counts[i]));
+
+	return simple_read_from_buffer(buf, count, ppos, kbuf, len);
+}
+
+static ssize_t rfuse_syscall_count_write(struct file *file,
+					 const char __user *buf,
+					 size_t count, loff_t *ppos)
+{
+	rfuse_syscall_count_reset();
+	return count;
+}
+
+static const struct file_operations rfuse_syscall_count_fops = {
+	.owner = THIS_MODULE,
+	.read = rfuse_syscall_count_read,
+	.write = rfuse_syscall_count_write,
+	.llseek = default_llseek,
+};
 
 static struct fuse_dev *fuse_get_dev(struct file *file)
 {
@@ -2331,6 +2390,7 @@ static long fuse_dev_ioctl(struct file *file, unsigned int cmd,
 		int riq_id;
 		int req_index;
 	} args; 
+	struct rfuse_syscall_count_arg syscall_count_arg;
 
 	switch (cmd) {
 		case FUSE_DEV_IOC_CLONE:
@@ -2404,6 +2464,15 @@ static long fuse_dev_ioctl(struct file *file, unsigned int cmd,
 			}
 			res = 0;
 			// printk("RFUSE: It is time to work! Wake up user-level daemon, riq_id: %d, entries: %d\n", args.riq_id, riq->pending.tail - riq->pending.head);
+			break;
+		case RFUSE_SYSCALL_COUNT:
+			res = -EFAULT;
+			if (copy_from_user(&syscall_count_arg, (char __user *)arg,
+					   sizeof(syscall_count_arg)))
+				break;
+
+			res = rfuse_syscall_count_add(syscall_count_arg.type,
+						      syscall_count_arg.count);
 			break;
 		default:
 			res = -ENOTTY;
@@ -2491,7 +2560,9 @@ static struct miscdevice fuse_miscdevice = {
 
 int __init fuse_dev_init(void)
 {
+	struct dentry *file;
 	int err = -ENOMEM;
+
 	fuse_req_cachep = kmem_cache_create("fuse_request",
 			sizeof(struct fuse_req),
 			0, 0, NULL);
@@ -2502,8 +2573,27 @@ int __init fuse_dev_init(void)
 	if (err)
 		goto out_cache_clean;
 
+	rfuse_syscall_count_reset();
+	rfuse_debugfs_dir = debugfs_create_dir("rfuse", NULL);
+	if (IS_ERR_OR_NULL(rfuse_debugfs_dir)) {
+		err = rfuse_debugfs_dir ? PTR_ERR(rfuse_debugfs_dir) : -ENOMEM;
+		goto out_misc_deregister;
+	}
+
+	file = debugfs_create_file("syscall_count", 0600, rfuse_debugfs_dir,
+				   NULL, &rfuse_syscall_count_fops);
+	if (IS_ERR_OR_NULL(file)) {
+		err = file ? PTR_ERR(file) : -ENOMEM;
+		goto out_debugfs_remove;
+	}
+
 	return 0;
 
+out_debugfs_remove:
+	debugfs_remove_recursive(rfuse_debugfs_dir);
+	rfuse_debugfs_dir = NULL;
+out_misc_deregister:
+	misc_deregister(&fuse_miscdevice);
 out_cache_clean:
 	kmem_cache_destroy(fuse_req_cachep);
 out:
@@ -2512,6 +2602,8 @@ out:
 
 void fuse_dev_cleanup(void)
 {
+	debugfs_remove_recursive(rfuse_debugfs_dir);
+	rfuse_debugfs_dir = NULL;
 	misc_deregister(&fuse_miscdevice);
 	kmem_cache_destroy(fuse_req_cachep);
 }

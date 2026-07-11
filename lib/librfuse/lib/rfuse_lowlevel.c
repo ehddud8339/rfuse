@@ -25,26 +25,33 @@
 
 #define RFUSE_SPLICE_READ_NO_DATA 0x1000
 
-/*
-static unsigned long long rfuse_pread_count;
-static unsigned long long rfuse_pwrite_count;
-
-static void rfuse_count_pread(void)
+static void rfuse_count_syscall_fd(int fd, enum rfuse_syscall_count_type type)
 {
-	unsigned long long count;
+	struct rfuse_syscall_count_arg arg = {
+		.type = type,
+		.count = 1,
+	};
 
-	count = __atomic_add_fetch(&rfuse_pread_count, 1, __ATOMIC_RELAXED);
-	fprintf(stderr, "rfuse: pread_count=%llu\n", count);
+	if (fd >= 0)
+		ioctl(fd, RFUSE_SYSCALL_COUNT, &arg);
 }
 
-static void rfuse_count_pwrite(void)
+static void rfuse_count_syscall_req(fuse_req_t req,
+				    enum rfuse_syscall_count_type type)
 {
-	unsigned long long count;
+	struct fuse_chan *ch;
+	struct fuse_session *se;
 
-	count = __atomic_add_fetch(&rfuse_pwrite_count, 1, __ATOMIC_RELAXED);
-	fprintf(stderr, "rfuse: pwrite_count=%llu\n", count);
+	if (!req)
+		return;
+
+	ch = req->ch;
+	se = req->se;
+	if (ch)
+		rfuse_count_syscall_fd(ch->fd, type);
+	else if (se)
+		rfuse_count_syscall_fd(se->fd, type);
 }
-*/
 
 // ******************************* Ring buffer operations ******************************* //
 
@@ -493,6 +500,7 @@ int fuse_reply_buf(fuse_req_t u_req, const char *buf, size_t size){
 	int riq_id = u_req->riq->riq_id;
 	long long int pp_req_index = ((long long int)req_index << 32) & RFUSE_REQ_IDX_MASK;
 	int pp_riq_id = (riq_id << 16) & RFUSE_RIQ_ID_MASK;
+	ssize_t res;
 
 	if (rfuse_req_sbuf_buffer(u_req, &sbuf) == 0) {
 		if (size > sbuf.capacity)
@@ -505,8 +513,8 @@ int fuse_reply_buf(fuse_req_t u_req, const char *buf, size_t size){
 		return rfuse_send_reply_ok(u_req);
 	}
 
-	ssize_t res = pwrite(ch ? ch->fd : se->fd, buf, size, (long long int)pp_riq_id | pp_req_index);
-	//rfuse_count_pwrite();
+	rfuse_count_syscall_fd(ch ? ch->fd : se->fd, RFUSE_SYSCALL_COUNT_PWRITE);
+	res = pwrite(ch ? ch->fd : se->fd, buf, size, (long long int)pp_riq_id | pp_req_index);
 	int err = errno;
 	if(res == -1){
 		if(!fuse_session_exited(se) && err != ENOENT)
@@ -1219,8 +1227,8 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 		}
 		u_req->w->fbuf.size = FUSE_MAX_MAX_PAGES * getpagesize();
 	}
+	rfuse_count_syscall_fd(ch ? ch->fd : se->fd, RFUSE_SYSCALL_COUNT_PREAD);
 	res = pread(ch ? ch->fd : se->fd, u_req->w->fbuf.mem, u_req->w->fbuf.size, (long long int)pp_riq_id | pp_req_index);
-	//rfuse_count_pread();
 	if(res == -1) {
 		printf("Error : pread for write I/O failed\n");
 		fuse_reply_err(u_req, EIO);
@@ -1238,6 +1246,7 @@ do_write:
 	}
 
 	if (u_req->se->op.write) {
+		rfuse_count_syscall_req(u_req, RFUSE_SYSCALL_COUNT_DO_WRITE);
 		u_req->se->op.write(u_req, nodeid, param, res,
 				arg->offset, &fi);
 	} else {
@@ -1645,6 +1654,7 @@ static void rfuse_do_read(fuse_req_t u_req, fuse_ino_t nodeid){
 			fi.flags = arg->flags;
 		}
 
+		rfuse_count_syscall_req(u_req, RFUSE_SYSCALL_COUNT_DO_READ);
 		u_req->se->op.read(u_req, nodeid, arg->size, arg->offset, &fi);
 	} else
 		fuse_reply_err(u_req, ENOSYS);
@@ -1973,8 +1983,8 @@ int rfuse_reply_read_from_fd(fuse_req_t req, int fd, off_t off, size_t size)
 		if (size > sbuf.capacity)
 			size = sbuf.capacity;
 
+		rfuse_count_syscall_req(req, RFUSE_SYSCALL_COUNT_PREAD);
 		res = pread(fd, sbuf.addr, size, off);
-		//rfuse_count_pread();
 		if (res < 0)
 			return fuse_reply_err(req, errno);
 

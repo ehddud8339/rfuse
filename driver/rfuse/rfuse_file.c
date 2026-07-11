@@ -14,11 +14,11 @@
 #include <linux/ktime.h>
 
 #ifndef LDY_NO_PAGE_CACHE
-#define LDY_NO_PAGE_CACHE 1
+#define LDY_NO_PAGE_CACHE 0
 #endif
 
 #ifndef LDY_NO_PAYLOAD
-#define LDY_NO_PAYLOAD 0
+#define LDY_NO_PAYLOAD 1
 #endif
 
 struct rfuse_release_in {

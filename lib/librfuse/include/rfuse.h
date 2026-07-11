@@ -120,6 +120,20 @@ extern "C" {
 #define RFUSE_WAKE_UP_COMP 			37
 #define RFUSE_REPLY_ASYNC		 	38
 #define RFUSE_DAEMON_SLEEP 			39
+#define RFUSE_SYSCALL_COUNT			40
+
+enum rfuse_syscall_count_type {
+	RFUSE_SYSCALL_COUNT_PREAD = 0,
+	RFUSE_SYSCALL_COUNT_PWRITE,
+	RFUSE_SYSCALL_COUNT_DO_READ,
+	RFUSE_SYSCALL_COUNT_DO_WRITE,
+	RFUSE_SYSCALL_COUNT_MAX,
+};
+
+struct rfuse_syscall_count_arg {
+	uint32_t type;
+	uint64_t count;
+};
 
 // state for recognizing whether the completion thread is woken up by user request
 #define COMP_NEED_WAKEUP_FROM_USER  (1U << 3)
