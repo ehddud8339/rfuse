@@ -14,11 +14,11 @@
 #include <linux/ktime.h>
 
 #ifndef LDY_NO_PAGE_CACHE
-#define LDY_NO_PAGE_CACHE 0
+#define LDY_NO_PAGE_CACHE 1
 #endif
 
 #ifndef LDY_NO_PAYLOAD
-#define LDY_NO_PAYLOAD 1
+#define LDY_NO_PAYLOAD 0
 #endif
 
 struct rfuse_release_in {
@@ -140,6 +140,8 @@ int rfuse_flush(struct file *file, fl_owner_t id)
 	err = filemap_check_errors(file->f_mapping);
 	if (err)
 		return err;
+
+	rfuse_wait_async_writes(inode);
 
 	err = 0;
 	if (fm->fc->no_flush)
@@ -1352,6 +1354,54 @@ next_page:
 	return 0;
 }
 
+static int rfuse_clear_write_cache_uptodate(struct address_space *mapping,
+					    loff_t pos, size_t count)
+{
+	struct inode *inode = mapping->host;
+	loff_t end;
+	pgoff_t start_index;
+	pgoff_t end_index;
+	pgoff_t index;
+	int err;
+
+	if (!count)
+		return 0;
+
+	end = rfuse_async_range_end(pos, count);
+	start_index = pos >> PAGE_SHIFT;
+	end_index = end >> PAGE_SHIFT;
+
+	filemap_invalidate_lock(mapping);
+	err = filemap_write_and_wait_range(mapping, pos, end);
+	if (err)
+		goto out_unlock;
+
+	for (index = start_index; index <= end_index; index++) {
+		struct page *page;
+
+		page = find_lock_page(mapping, index);
+		if (!page)
+			continue;
+
+		if (page->mapping != mapping)
+			goto unlock_page;
+
+		rfuse_wait_on_page_writeback(inode, index);
+		if (page->mapping != mapping)
+			goto unlock_page;
+
+		ClearPageUptodate(page);
+
+unlock_page:
+		unlock_page(page);
+		put_page(page);
+	}
+out_unlock:
+	filemap_invalidate_unlock(mapping);
+
+	return err;
+}
+
 static int __maybe_unused rfuse_invalidate_written_cache(struct address_space *mapping,
 							 loff_t pos, size_t count)
 {
@@ -1464,10 +1514,13 @@ static int rfuse_write_complete_status(struct rfuse_req *r_req, int err,
 	if (!err && outarg->size > ctx->count)
 		err = -EIO;
 
-	*written = err ? 0 : outarg->size;
 	short_write = !err && outarg->size < ctx->count;
-	if (err || short_write)
-		mapping_set_error(ctx->inode->i_mapping, err ? err : -EIO);
+	if (short_write)
+		err = -EIO;
+
+	*written = err ? 0 : outarg->size;
+	if (err)
+		mapping_set_error(ctx->inode->i_mapping, err);
 
 	return err;
 }
@@ -1483,7 +1536,7 @@ static void rfuse_sbuf_write_complete_req(struct fuse_mount *fm,
 	ctx = &r_req->wrt_ctx;
 
 	err = rfuse_write_complete_status(r_req, err, &written);
-	if (!err) {
+	if (!err && written) {
 		int apply_err;
 
 		apply_err = rfuse_apply_to_page(ctx->inode->i_mapping, r_req,
@@ -1513,17 +1566,7 @@ static ssize_t rfuse_send_write_async(struct kiocb *iocb,
 	ssize_t copied = 0;
 	int err;
 
-	err = rfuse_async_wrt_ctx_init(r_req, inode, ff, pos, count);
-	if (err)
-		goto out_put_req;
-	ctx = &r_req->wrt_ctx;
-	fi = get_fuse_inode(ctx->inode);
-
-	spin_lock(&fi->lock);
-	fi->async_writectr++;
-	rfuse_async_range_insert(&ctx->range, &fi->async_write_ranges);
-	ctx->range_registered = true;
-	spin_unlock(&fi->lock);
+	rfuse_wait_async_write(inode, pos, count);
 
 	in = (struct fuse_write_in *)&r_req->args;
 	in->fh = ff->fh;
@@ -1537,19 +1580,37 @@ static ssize_t rfuse_send_write_async(struct kiocb *iocb,
 
 	err = rfuse_reserve_sbuf(r_req, count, RFUSE_PAYLOAD_IN, true);
 	if (err)
-		goto out_put_req_unregister;
+		goto out_put_req;
 
 	copied = rfuse_sbuf_copy_from_iter(r_req, ii, count);
 	if (copied < 0) {
 		err = copied;
-		goto out_put_req_unregister;
+		goto out_put_req;
 	}
 	if (!copied) {
 		err = -EFAULT;
-		goto out_put_req_unregister;
+		goto out_put_req;
 	}
 
+	err = rfuse_async_wrt_ctx_init(r_req, inode, ff, pos, copied);
+	if (err)
+		goto out_revert_put_req;
+	ctx = &r_req->wrt_ctx;
+	fi = get_fuse_inode(ctx->inode);
+
+	spin_lock(&fi->lock);
+	fi->async_writectr++;
+	rfuse_async_range_insert(&ctx->range, &fi->async_write_ranges);
+	ctx->range_registered = true;
+	spin_unlock(&fi->lock);
+
 	ctx->count = copied;
+
+	err = rfuse_clear_write_cache_uptodate(file->f_mapping, pos, copied);
+	if (err) {
+		mapping_set_error(file->f_mapping, err);
+		goto out_revert_put_req_unregister;
+	}
 
 	in->size = copied;
 	r_req->in.arglen[0] = copied;
@@ -1563,11 +1624,12 @@ static ssize_t rfuse_send_write_async(struct kiocb *iocb,
 
 out_revert_put_req_unregister:
 	iov_iter_revert(ii, copied);
-out_put_req_unregister:
 	r_req->rp = NULL;
 	rfuse_async_wrt_ctx_reset(r_req, true, true);
 	rfuse_put_request(r_req);
 	return err;
+out_revert_put_req:
+	iov_iter_revert(ii, copied);
 out_put_req:
 	rfuse_put_request(r_req);
 	return err;

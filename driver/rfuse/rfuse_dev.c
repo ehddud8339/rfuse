@@ -1393,6 +1393,87 @@ static int select_numa_aware_v2(struct fuse_conn *fc,
 	return cpu_id;
 }
 
+static int select_numa_aware_v3(struct fuse_conn *fc,
+				struct fuse_inode *fi, size_t len)
+{
+	int cpu_id = task_cpu(current);
+	int start_idx;
+	int numa_id;
+	int group;
+	int offset;
+	int idx;
+	int riq_id;
+	struct rfuse_iqueue *riq = NULL;
+	unsigned int requested_pages = DIV_ROUND_UP(len, PAGE_SIZE);
+	u64 nodeid = 0;
+
+	numa_id = find_numa_group_and_index(cpu_id, &start_idx);
+	if (numa_id < 0)
+		return cpu_id;
+
+	if (fi)
+		nodeid = READ_ONCE(fi->nodeid);
+
+	idx = start_idx;
+	riq_id = numa_group[numa_id][idx];
+
+	if (riq_id >= 0 && riq_id < RFUSE_NUM_IQUEUE)
+		riq = fc->riq[riq_id];
+
+	if (nodeid && riq) {
+		u64 old = READ_ONCE(riq->stream_hint);
+
+		/* LDY: riq별 stream_hint는 최근 file stream의 nodeid를 기억한다.
+		 * 현재 CPU riq의 hint와 현재 요청 fi->nodeid가 다르면 short-flow의
+		 * 첫 요청으로 보고 local wake latency를 줄이기 위해 current riq를
+		 * 선택한다. 같으면 streaming 요청으로 보고 app/daemon runqueue 경쟁을
+		 * 피하기 위해 current riq를 제외한 기존 remote 선택 경로로 보낸다.
+		 */
+		if (old != nodeid) {
+			WRITE_ONCE(riq->stream_hint, nodeid);
+			return riq_id;
+		}
+	}
+
+	for (offset = 1; offset < NUM_NUMA_NODES; offset++) {
+		idx = (start_idx + offset) % NUM_NUMA_NODES;
+		riq_id = numa_group[numa_id][idx];
+		if (riq_id < 0 || riq_id >= RFUSE_NUM_IQUEUE)
+			continue;
+
+		riq = fc->riq[riq_id];
+		if (!riq)
+			continue;
+
+		if ((READ_ONCE(riq->num_background) <= READ_ONCE(riq->congestion_threshold)) ||
+		    (READ_ONCE(riq->sbuf_max_free_hint) >= requested_pages))
+			return riq_id;
+	}
+	cond_resched();
+
+	for (group = 0; group < NUM_NUMA_GROUPS; group++) {
+		if (group == numa_id)
+			continue;
+
+		for (offset = 0; offset < NUM_NUMA_NODES; offset++) {
+			riq_id = numa_group[group][offset];
+			if (riq_id < 0 || riq_id >= RFUSE_NUM_IQUEUE)
+				continue;
+
+			riq = fc->riq[riq_id];
+			if (!riq)
+				continue;
+
+			if ((READ_ONCE(riq->num_background) <= READ_ONCE(riq->congestion_threshold)) ||
+			    (READ_ONCE(riq->sbuf_max_free_hint) >= requested_pages))
+				return riq_id;
+		}
+		cond_resched();
+	}
+
+	return cpu_id;
+}
+
 struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc,
 						struct fuse_inode *fi,
 						size_t sbuf_len)
