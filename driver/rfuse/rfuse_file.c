@@ -1182,7 +1182,8 @@ static ssize_t rfuse_send_write_pages(struct rfuse_io_args *ria,
 	in->flags = rfuse_write_flags(iocb);
 	if (fm->fc->handle_killpriv_v2 && !capable(CAP_FSETID))
 		in->write_flags |= FUSE_WRITE_KILL_SUIDGID;
-
+	WRITE_ONCE(ria->r_req->latency_shared_ns[
+		RFUSE_LATENCY_SHARED_SUBMIT_REQUEST], ktime_get_ns());
 	err = rfuse_simple_request(ria->r_req);
 	out = (struct fuse_write_out *)&ria->r_req->args;
 	if (!err && out->size > count)
@@ -1239,27 +1240,37 @@ static int rfuse_write_pages_chunk(struct kiocb *iocb,
 	unsigned int nr_pages;
 	ssize_t count;
 	int err = 0;
+	u64 latency_start_ns;
 
 	*written = 0;
 
-	nr_pages = rfuse_wr_pages(pos, iov_iter_count(ii), fc->max_pages);
-	rp->pages = fuse_pages_alloc(nr_pages, GFP_KERNEL, &rp->descs);
-	if (!rp->pages)
-		return -ENOMEM;
-
+	latency_start_ns = ktime_get_ns();
 	r_req = rfuse_get_req(fm, false, false, 0, fi);
+	rfuse_latency_record(RFUSE_LATENCY_OP_WRITE, RFUSE_LATENCY_GET_REQUEST,
+			     ktime_get_ns() - latency_start_ns);
 	if (IS_ERR(r_req)) {
 		kfree(rp->pages);
 		return PTR_ERR(r_req);
 	}
 	ria.r_req = r_req;
+	latency_start_ns = ktime_get_ns();
+	nr_pages = rfuse_wr_pages(pos, iov_iter_count(ii), fc->max_pages);
+	rp->pages = fuse_pages_alloc(nr_pages, GFP_KERNEL, &rp->descs);
+	if (!rp->pages) {
+		err = -ENOMEM;
+		rfuse_latency_record(RFUSE_LATENCY_OP_WRITE,
+				     RFUSE_LATENCY_PREPARE_CACHE,
+				     ktime_get_ns() - latency_start_ns);
+		goto out_put_req;
+	}
 
 	count = rfuse_fill_write_pages(&ria, mapping, ii, pos, nr_pages);
 	if (count <= 0) {
 		err = count;
 		goto out_put_req;
 	}
-
+	rfuse_latency_record(RFUSE_LATENCY_OP_WRITE, RFUSE_LATENCY_PREPARE_CACHE,
+			     ktime_get_ns() - latency_start_ns);
 	err = rfuse_send_write_pages(&ria, iocb, inode, pos, count);
 	if (err)
 		goto out_put_req;
@@ -1565,9 +1576,13 @@ static ssize_t rfuse_send_write_async(struct kiocb *iocb,
 	struct fuse_write_in *in;
 	ssize_t copied = 0;
 	int err;
+	u64 latency_start_ns;
 
+	latency_start_ns = ktime_get_ns();
 	rfuse_wait_async_write(inode, pos, count);
-
+	rfuse_latency_record(RFUSE_LATENCY_OP_WRITE,
+			     RFUSE_LATENCY_WAIT_ASYNC_WRITE,
+			     ktime_get_ns() - latency_start_ns);
 	in = (struct fuse_write_in *)&r_req->args;
 	in->fh = ff->fh;
 	in->offset = pos;
@@ -1577,12 +1592,18 @@ static ssize_t rfuse_send_write_async(struct kiocb *iocb,
 
 	r_req->in.opcode = FUSE_WRITE;
 	r_req->in.nodeid = ff->nodeid;
-
+	latency_start_ns = ktime_get_ns();
 	err = rfuse_reserve_sbuf(r_req, count, RFUSE_PAYLOAD_IN, true);
+	rfuse_latency_record(RFUSE_LATENCY_OP_WRITE, RFUSE_LATENCY_PREPARE_SBP,
+			     ktime_get_ns() - latency_start_ns);
 	if (err)
 		goto out_put_req;
 
+	latency_start_ns = ktime_get_ns();
 	copied = rfuse_sbuf_copy_from_iter(r_req, ii, count);
+	rfuse_latency_record(RFUSE_LATENCY_OP_WRITE,
+			     RFUSE_LATENCY_COPY_FROM_ITER,
+			     ktime_get_ns() - latency_start_ns);
 	if (copied < 0) {
 		err = copied;
 		goto out_put_req;
@@ -1591,7 +1612,7 @@ static ssize_t rfuse_send_write_async(struct kiocb *iocb,
 		err = -EFAULT;
 		goto out_put_req;
 	}
-
+	latency_start_ns = ktime_get_ns();
 	err = rfuse_async_wrt_ctx_init(r_req, inode, ff, pos, copied);
 	if (err)
 		goto out_revert_put_req;
@@ -1603,7 +1624,9 @@ static ssize_t rfuse_send_write_async(struct kiocb *iocb,
 	rfuse_async_range_insert(&ctx->range, &fi->async_write_ranges);
 	ctx->range_registered = true;
 	spin_unlock(&fi->lock);
-
+	rfuse_latency_record(RFUSE_LATENCY_OP_WRITE,
+			     RFUSE_LATENCY_REGISTER_INTERVAL_TREE,
+			     ktime_get_ns() - latency_start_ns);
 	ctx->count = copied;
 
 	err = rfuse_clear_write_cache_uptodate(file->f_mapping, pos, copied);
@@ -1615,13 +1638,15 @@ static ssize_t rfuse_send_write_async(struct kiocb *iocb,
 	in->size = copied;
 	r_req->in.arglen[0] = copied;
 	r_req->end = rfuse_sbuf_write_complete_req;
-
+	latency_start_ns = ktime_get_ns();
 	err = rfuse_simple_background(fm, r_req);
+	rfuse_latency_record(RFUSE_LATENCY_OP_WRITE,
+			     RFUSE_LATENCY_SUBMIT_REQUEST,
+			     ktime_get_ns() - latency_start_ns);
 	if (err)
 		goto out_revert_put_req_unregister;
 
 	return copied;
-
 out_revert_put_req_unregister:
 	iov_iter_revert(ii, copied);
 	r_req->rp = NULL;
@@ -1739,9 +1764,10 @@ static ssize_t rfuse_perform_write_sbuf(struct kiocb *iocb,
 	 * submit으로 연결한다.
 	 */
 	if (use_async) {
-		do {
+			do {
 			struct rfuse_req *r_req;
 			ssize_t count;
+			u64 latency_start_ns;
 			size_t bytes = min_t(size_t, iov_iter_count(ii),
 					     fc->max_write);
 
@@ -1749,13 +1775,16 @@ static ssize_t rfuse_perform_write_sbuf(struct kiocb *iocb,
 			 * iqueue 선택과 request allocation 세부 절차를 write path에서 직접
 			 * 노출하지 않도록 정리한다.
 			 */
+			latency_start_ns = ktime_get_ns();
 			r_req = try_rfuse_get_req(fm, true, false, bytes, fi,
-						  NULL);
+					      NULL);
+			rfuse_latency_record(RFUSE_LATENCY_OP_WRITE,
+					     RFUSE_LATENCY_GET_REQUEST,
+					     ktime_get_ns() - latency_start_ns);
 			if (IS_ERR(r_req)) {
 				err = PTR_ERR(r_req);
 				break;
 			}
-
 			count = rfuse_send_write_async(iocb, r_req, ii, pos, bytes);
 			if (count <= 0) {
 				err = count;
@@ -2802,14 +2831,21 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file,
 
 	ssize_t res;
 	int err;
+	u64 latency_start_ns;
 
+	latency_start_ns = ktime_get_ns();
 	rfuse_wait_async_write(file_inode(file), pos, count);
-
+	rfuse_latency_record(RFUSE_LATENCY_OP_READ,
+			     RFUSE_LATENCY_WAIT_ASYNC_WRITE,
+			     ktime_get_ns() - latency_start_ns);
+	latency_start_ns = ktime_get_ns();	
 	//if (fm->fc->async_read)
-	if (is_async)
+  if (is_async)
 		r_req = try_rfuse_get_req(fm, true, false, count, fi, NULL);
 	else
 		r_req = rfuse_get_req(fm, false, false, count, fi);
+	rfuse_latency_record(RFUSE_LATENCY_OP_READ, RFUSE_LATENCY_GET_REQUEST,
+			     ktime_get_ns() - latency_start_ns);
 	if (IS_ERR(r_req)) {
 		int i;
 
@@ -2841,22 +2877,34 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file,
 	rfuse_read_args_fill(ria, file, pos, count, FUSE_READ);
 	ria->read.attr_ver = fuse_get_attr_version(fm->fc);
 
+	latency_start_ns = ktime_get_ns();
 #if !LDY_NO_PAYLOAD
 	err = rfuse_reserve_sbuf(r_req, count, RFUSE_PAYLOAD_OUT, true);
 	if (err) {
+		rfuse_latency_record(RFUSE_LATENCY_OP_READ,
+				     RFUSE_LATENCY_PREPARE_SBP,
+				     ktime_get_ns() - latency_start_ns);
 		rfuse_readpages_end(fm, r_req, err);
 		rfuse_put_request(r_req);
 		return;
 	}
 #endif
+	rfuse_latency_record(RFUSE_LATENCY_OP_READ, RFUSE_LATENCY_PREPARE_SBP,
+			     ktime_get_ns() - latency_start_ns);
 	if (is_async) {
 	// if (fm->fc->async_read) {
 		ria->ff = rfuse_file_get(ff);
 		r_req->end = rfuse_readpages_end;
+		latency_start_ns = ktime_get_ns();
 		err = rfuse_simple_background(fm, r_req);
+		rfuse_latency_record(RFUSE_LATENCY_OP_READ,
+				     RFUSE_LATENCY_SUBMIT_REQUEST,
+				     ktime_get_ns() - latency_start_ns);
 		if (!err)
 			return;
 	} else {
+		WRITE_ONCE(r_req->latency_shared_ns[
+			RFUSE_LATENCY_SHARED_SUBMIT_REQUEST], ktime_get_ns());
 		res = rfuse_simple_request(r_req);
 		err = res < 0 ? res : 0;
 		rfuse_readpages_end(fm, r_req, err);
@@ -2922,7 +2970,6 @@ void rfuse_readahead(struct readahead_control *rac)
 		rfuse_send_readpages(ria, rac->file, is_async);
 	}
 }
-
 /*
 void rfuse_readahead(struct readahead_control *rac)
 {
@@ -2961,7 +3008,6 @@ void rfuse_readahead(struct readahead_control *rac)
 	}
 }
 */
-
 static ssize_t rfuse_send_read(struct rfuse_io_args *ria, loff_t pos, size_t count, fl_owner_t owner)
 {
 	struct file *file = ria->io->iocb->ki_filp;

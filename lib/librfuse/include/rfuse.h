@@ -162,6 +162,17 @@ struct rfuse_syscall_count_arg {
 #define RFUSE_PAYLOAD_OUT       (1U << 1)
 #define RFUSE_PAYLOAD_FALLBACK  (1U << 2)
 
+enum rfuse_latency_shared_id {
+	RFUSE_LATENCY_SHARED_SUBMIT_REQUEST = 0,
+	RFUSE_LATENCY_SHARED_ENQUEUE_TO_DEQUEUE,
+	RFUSE_LATENCY_SHARED_PREPARE_LIBRFUSE_CACHE,
+	RFUSE_LATENCY_SHARED_DEV_RFUSE_PREAD,
+	RFUSE_LATENCY_SHARED_BACKEND,
+	RFUSE_LATENCY_SHARED_DEV_RFUSE_PWRITE,
+	RFUSE_LATENCY_SHARED_REPLY_COMPLETION,
+	RFUSE_LATENCY_SHARED_MAX,
+};
+
 struct rfuse_pages;
 struct fuse_mount;
 
@@ -245,10 +256,13 @@ struct rfuse_req{
 	struct rfuse_async_wrt_ctx wrt_ctx;
 	bool has_wrt_ctx;
 	void (*end)(struct fuse_mount *fm, struct rfuse_req *r_req, int error);
+
+	uint64_t latency_shared_ns[RFUSE_LATENCY_SHARED_MAX];
+	uint64_t latency_done_mask;
 };
 
 #ifdef __cplusplus
-	static_assert(sizeof(struct rfuse_req) == 368, "rfuse_req ABI drift");
+	static_assert(sizeof(struct rfuse_req) == 432, "rfuse_req ABI drift");
 	static_assert(offsetof(struct rfuse_req, riq_id) == 68, "rfuse_req riq_id offset drift");
 	static_assert(offsetof(struct rfuse_req, sbuf_page_index) == 232, "rfuse_req sbuf page index offset drift");
 	static_assert(offsetof(struct rfuse_req, sbuf_offset) == 240, "rfuse_req sbuf offset drift");
@@ -256,8 +270,10 @@ struct rfuse_req{
 	static_assert(offsetof(struct rfuse_req, wrt_ctx) == 272, "rfuse_req wrt_ctx offset drift");
 	static_assert(offsetof(struct rfuse_req, has_wrt_ctx) == 352, "rfuse_req has_wrt_ctx offset drift");
 	static_assert(offsetof(struct rfuse_req, end) == 360, "rfuse_req end offset drift");
+	static_assert(offsetof(struct rfuse_req, latency_shared_ns) == 368, "rfuse_req latency offset drift");
+	static_assert(offsetof(struct rfuse_req, latency_done_mask) == 424, "rfuse_req latency mask offset drift");
 #else
-	_Static_assert(sizeof(struct rfuse_req) == 368, "rfuse_req ABI drift");
+	_Static_assert(sizeof(struct rfuse_req) == 432, "rfuse_req ABI drift");
 	_Static_assert(offsetof(struct rfuse_req, riq_id) == 68, "rfuse_req riq_id offset drift");
 	_Static_assert(offsetof(struct rfuse_req, sbuf_page_index) == 232, "rfuse_req sbuf page index offset drift");
 	_Static_assert(offsetof(struct rfuse_req, sbuf_offset) == 240, "rfuse_req sbuf offset drift");
@@ -265,6 +281,8 @@ struct rfuse_req{
 	_Static_assert(offsetof(struct rfuse_req, wrt_ctx) == 272, "rfuse_req wrt_ctx offset drift");
 	_Static_assert(offsetof(struct rfuse_req, has_wrt_ctx) == 352, "rfuse_req has_wrt_ctx offset drift");
 	_Static_assert(offsetof(struct rfuse_req, end) == 360, "rfuse_req end offset drift");
+	_Static_assert(offsetof(struct rfuse_req, latency_shared_ns) == 368, "rfuse_req latency offset drift");
+	_Static_assert(offsetof(struct rfuse_req, latency_done_mask) == 424, "rfuse_req latency mask offset drift");
 #endif
 
 struct rfuse_interrupt_entry{

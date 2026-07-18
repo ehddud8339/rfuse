@@ -24,6 +24,8 @@
 #include <linux/vmalloc.h>
 #include <linux/debugfs.h>
 #include <linux/uaccess.h>
+#include <linux/cpu.h>
+#include <linux/percpu.h>
 
 
 MODULE_ALIAS_MISCDEV(FUSE_MINOR);
@@ -36,6 +38,310 @@ MODULE_ALIAS("devname:fuse");
 static struct kmem_cache *fuse_req_cachep;
 static struct dentry *rfuse_debugfs_dir;
 static atomic64_t rfuse_syscall_counts[RFUSE_SYSCALL_COUNT_MAX];
+
+struct rfuse_latency_stat {
+	u64 count;
+	u64 total_ns;
+	u64 min_ns;
+	u64 max_ns;
+};
+
+struct rfuse_latency_cpu_stats {
+	spinlock_t lock;
+	struct rfuse_latency_stat stats[RFUSE_LATENCY_OP_MAX][RFUSE_LATENCY_MAX];
+};
+
+struct rfuse_latency_name {
+	const char *name[RFUSE_LATENCY_OP_MAX];
+};
+
+struct rfuse_latency_file {
+	char *buf;
+	size_t len;
+	struct rfuse_latency_stat snapshot[RFUSE_LATENCY_OP_MAX][RFUSE_LATENCY_MAX];
+};
+
+static DEFINE_PER_CPU(struct rfuse_latency_cpu_stats, rfuse_latency_stats);
+
+static const struct rfuse_latency_name rfuse_latency_names[RFUSE_LATENCY_MAX] = {
+	[RFUSE_LATENCY_WAIT_ASYNC_WRITE] = {
+		.name = { "wait_async_write", "wait_async_write" },
+	},
+	[RFUSE_LATENCY_GET_REQUEST] = {
+		.name = { "get_request", "get_request" },
+	},
+	[RFUSE_LATENCY_PREPARE_CACHE] = {
+		.name = { NULL, "prepare_cache" },
+	},
+	[RFUSE_LATENCY_PREPARE_SBP] = {
+		.name = { "prepare_sbp", "prepare_sbp" },
+	},
+	[RFUSE_LATENCY_COPY_FROM_ITER] = {
+		.name = { NULL, "copy_from_iter" },
+	},
+	[RFUSE_LATENCY_REGISTER_INTERVAL_TREE] = {
+		.name = { NULL, "register_interval_tree" },
+	},
+	[RFUSE_LATENCY_SUBMIT_REQUEST] = {
+		.name = { "submit_request", "submit_request" },
+	},
+	[RFUSE_LATENCY_ENQUEUE_TO_DEQUEUE] = {
+		.name = { "enqueue_to_dequeue", "enqueue_to_dequeue" },
+	},
+	[RFUSE_LATENCY_PREPARE_LIBRFUSE_CACHE] = {
+		.name = { NULL, "prepare_librfuse_cache" },
+	},
+	[RFUSE_LATENCY_DEV_RFUSE_PREAD] = {
+		.name = { NULL, "dev_rfuse_pread" },
+	},
+	[RFUSE_LATENCY_BACKEND] = {
+		.name = { "backend_read", "backend_write" },
+	},
+	[RFUSE_LATENCY_DEV_RFUSE_PWRITE] = {
+		.name = { "dev_rfuse_pwrite", NULL },
+	},
+	[RFUSE_LATENCY_REPLY_COMPLETION] = {
+		.name = { "reply_completion", "reply_completion" },
+	},
+	[RFUSE_LATENCY_RELEASE_REQUEST] = {
+		.name = { "release_request", "release_request" },
+	},
+	[RFUSE_LATENCY_RELEASE_SBP] = {
+		.name = { "release_sbp", "release_sbp" },
+	},
+	[RFUSE_LATENCY_COPY_TO_CACHE] = {
+		.name = { "copy_to_cache", "copy_to_cache" },
+	},
+};
+
+#define RFUSE_LATENCY_OUTPUT_SIZE	(PAGE_SIZE * 2)
+
+static bool rfuse_latency_request_op(struct rfuse_req *r_req,
+				     enum rfuse_latency_op *op)
+{
+	if (r_req->in.opcode == FUSE_READ) {
+		*op = RFUSE_LATENCY_OP_READ;
+		return true;
+	}
+	if (r_req->in.opcode == FUSE_WRITE) {
+		*op = RFUSE_LATENCY_OP_WRITE;
+		return true;
+	}
+
+	return false;
+}
+
+void rfuse_latency_record(enum rfuse_latency_op op,
+			  enum rfuse_latency_id id, u64 duration_ns)
+{
+	struct rfuse_latency_cpu_stats *cpu_stats;
+	struct rfuse_latency_stat *stat;
+
+	if (op >= RFUSE_LATENCY_OP_MAX || id >= RFUSE_LATENCY_MAX)
+		return;
+
+	preempt_disable();
+	cpu_stats = this_cpu_ptr(&rfuse_latency_stats);
+	spin_lock(&cpu_stats->lock);
+	stat = &cpu_stats->stats[op][id];
+	stat->count++;
+	stat->total_ns += duration_ns;
+	if (stat->count == 1 || duration_ns < stat->min_ns)
+		stat->min_ns = duration_ns;
+	if (duration_ns > stat->max_ns)
+		stat->max_ns = duration_ns;
+	spin_unlock(&cpu_stats->lock);
+	preempt_enable();
+}
+
+void rfuse_latency_record_request(struct rfuse_req *r_req,
+				  enum rfuse_latency_id id,
+				  u64 duration_ns)
+{
+	enum rfuse_latency_op op;
+
+	if (rfuse_latency_request_op(r_req, &op))
+		rfuse_latency_record(op, id, duration_ns);
+}
+
+void rfuse_latency_finish_request(struct rfuse_req *r_req)
+{
+	static const enum rfuse_latency_id shared_to_latency[] = {
+		[RFUSE_LATENCY_SHARED_ENQUEUE_TO_DEQUEUE] =
+			RFUSE_LATENCY_ENQUEUE_TO_DEQUEUE,
+		[RFUSE_LATENCY_SHARED_PREPARE_LIBRFUSE_CACHE] =
+			RFUSE_LATENCY_PREPARE_LIBRFUSE_CACHE,
+		[RFUSE_LATENCY_SHARED_DEV_RFUSE_PREAD] =
+			RFUSE_LATENCY_DEV_RFUSE_PREAD,
+		[RFUSE_LATENCY_SHARED_BACKEND] = RFUSE_LATENCY_BACKEND,
+		[RFUSE_LATENCY_SHARED_DEV_RFUSE_PWRITE] =
+			RFUSE_LATENCY_DEV_RFUSE_PWRITE,
+	};
+	u64 done_mask;
+	u64 now_ns;
+	int id;
+
+	done_mask = xchg(&r_req->latency_done_mask, 0);
+	if (!done_mask)
+		return;
+
+	for (id = RFUSE_LATENCY_SHARED_ENQUEUE_TO_DEQUEUE;
+	     id < RFUSE_LATENCY_SHARED_REPLY_COMPLETION; id++) {
+		u64 duration_ns;
+
+		if (!(done_mask & BIT_ULL(id)))
+			continue;
+		duration_ns = READ_ONCE(r_req->latency_shared_ns[id]);
+		rfuse_latency_record_request(r_req, shared_to_latency[id],
+					     duration_ns);
+		WRITE_ONCE(r_req->latency_shared_ns[id], 0);
+	}
+
+	if (!(done_mask & BIT_ULL(RFUSE_LATENCY_SHARED_REPLY_COMPLETION)))
+		return;
+
+	now_ns = ktime_get_ns();
+	id = RFUSE_LATENCY_SHARED_REPLY_COMPLETION;
+	if (now_ns >= READ_ONCE(r_req->latency_shared_ns[id]))
+		rfuse_latency_record_request(
+			r_req, RFUSE_LATENCY_REPLY_COMPLETION,
+			now_ns - READ_ONCE(r_req->latency_shared_ns[id]));
+	WRITE_ONCE(r_req->latency_shared_ns[id], 0);
+}
+
+static void rfuse_latency_snapshot_and_reset(
+	struct rfuse_latency_stat snapshot[RFUSE_LATENCY_OP_MAX][RFUSE_LATENCY_MAX])
+{
+	int cpu;
+	int op;
+	int id;
+
+	memset(snapshot, 0,
+	       sizeof(struct rfuse_latency_stat) * RFUSE_LATENCY_OP_MAX *
+	       RFUSE_LATENCY_MAX);
+
+	for_each_possible_cpu(cpu) {
+		struct rfuse_latency_cpu_stats *cpu_stats;
+
+		cpu_stats = per_cpu_ptr(&rfuse_latency_stats, cpu);
+		spin_lock(&cpu_stats->lock);
+		for (op = 0; op < RFUSE_LATENCY_OP_MAX; op++) {
+			for (id = 0; id < RFUSE_LATENCY_MAX; id++) {
+				struct rfuse_latency_stat *src;
+				struct rfuse_latency_stat *dst;
+
+				src = &cpu_stats->stats[op][id];
+				dst = &snapshot[op][id];
+				if (src->count) {
+					if (!dst->count || src->min_ns < dst->min_ns)
+						dst->min_ns = src->min_ns;
+					if (src->max_ns > dst->max_ns)
+						dst->max_ns = src->max_ns;
+				}
+				dst->count += src->count;
+				dst->total_ns += src->total_ns;
+			}
+		}
+		memset(cpu_stats->stats, 0, sizeof(cpu_stats->stats));
+		spin_unlock(&cpu_stats->lock);
+	}
+}
+
+static void rfuse_latency_reset(void)
+{
+	int cpu;
+
+	for_each_possible_cpu(cpu) {
+		struct rfuse_latency_cpu_stats *cpu_stats;
+
+		cpu_stats = per_cpu_ptr(&rfuse_latency_stats, cpu);
+		spin_lock(&cpu_stats->lock);
+		memset(cpu_stats->stats, 0, sizeof(cpu_stats->stats));
+		spin_unlock(&cpu_stats->lock);
+	}
+}
+
+static int rfuse_latency_open(struct inode *inode, struct file *file)
+{
+	static const char * const op_names[] = { "[read]", "[write]" };
+	struct rfuse_latency_file *latency_file;
+	int op;
+	int id;
+
+	latency_file = kzalloc(sizeof(*latency_file), GFP_KERNEL);
+	if (!latency_file)
+		return -ENOMEM;
+	latency_file->buf = kzalloc(RFUSE_LATENCY_OUTPUT_SIZE, GFP_KERNEL);
+	if (!latency_file->buf) {
+		kfree(latency_file);
+		return -ENOMEM;
+	}
+
+	rfuse_latency_snapshot_and_reset(latency_file->snapshot);
+	latency_file->len = scnprintf(
+		latency_file->buf, RFUSE_LATENCY_OUTPUT_SIZE,
+		"# unit: ns\n"
+		"%-7s %-28s %20s %20s %20s %20s %20s\n",
+		"op", "name", "count", "avg_ns", "min_ns", "max_ns",
+		"total_ns");
+	for (op = 0; op < RFUSE_LATENCY_OP_MAX; op++) {
+		for (id = 0; id < RFUSE_LATENCY_MAX; id++) {
+			struct rfuse_latency_stat *stat;
+			const char *name = rfuse_latency_names[id].name[op];
+			u64 avg_ns;
+
+			if (!name)
+				continue;
+			stat = &latency_file->snapshot[op][id];
+			avg_ns = stat->count ? stat->total_ns / stat->count : 0;
+			latency_file->len += scnprintf(
+				latency_file->buf + latency_file->len,
+				RFUSE_LATENCY_OUTPUT_SIZE - latency_file->len,
+				"%-7s %-28s %20llu %20llu %20llu %20llu %20llu\n",
+				op_names[op], name, stat->count, avg_ns,
+				stat->count ? stat->min_ns : 0,
+				stat->count ? stat->max_ns : 0,
+				stat->total_ns);
+		}
+	}
+	file->private_data = latency_file;
+
+	return 0;
+}
+
+static ssize_t rfuse_latency_read(struct file *file, char __user *buf,
+				  size_t count, loff_t *ppos)
+{
+	struct rfuse_latency_file *latency_file = file->private_data;
+
+	return simple_read_from_buffer(buf, count, ppos, latency_file->buf,
+				       latency_file->len);
+}
+
+static ssize_t rfuse_latency_write(struct file *file, const char __user *buf,
+				   size_t count, loff_t *ppos)
+{
+	rfuse_latency_reset();
+	return count;
+}
+
+static int rfuse_latency_release(struct inode *inode, struct file *file)
+{
+	struct rfuse_latency_file *latency_file = file->private_data;
+
+	kfree(latency_file->buf);
+	kfree(latency_file);
+	return 0;
+}
+
+static const struct file_operations rfuse_latency_fops = {
+	.owner = THIS_MODULE,
+	.open = rfuse_latency_open,
+	.read = rfuse_latency_read,
+	.write = rfuse_latency_write,
+	.release = rfuse_latency_release,
+	.llseek = default_llseek,
+};
 
 static const char * const rfuse_syscall_count_names[] = {
 	[RFUSE_SYSCALL_COUNT_PREAD] = "pread",
@@ -2561,6 +2867,7 @@ static struct miscdevice fuse_miscdevice = {
 int __init fuse_dev_init(void)
 {
 	struct dentry *file;
+	int cpu;
 	int err = -ENOMEM;
 
 	fuse_req_cachep = kmem_cache_create("fuse_request",
@@ -2574,6 +2881,12 @@ int __init fuse_dev_init(void)
 		goto out_cache_clean;
 
 	rfuse_syscall_count_reset();
+	for_each_possible_cpu(cpu) {
+		struct rfuse_latency_cpu_stats *cpu_stats;
+
+		cpu_stats = per_cpu_ptr(&rfuse_latency_stats, cpu);
+		spin_lock_init(&cpu_stats->lock);
+	}
 	rfuse_debugfs_dir = debugfs_create_dir("rfuse", NULL);
 	if (IS_ERR_OR_NULL(rfuse_debugfs_dir)) {
 		err = rfuse_debugfs_dir ? PTR_ERR(rfuse_debugfs_dir) : -ENOMEM;
@@ -2582,6 +2895,14 @@ int __init fuse_dev_init(void)
 
 	file = debugfs_create_file("syscall_count", 0600, rfuse_debugfs_dir,
 				   NULL, &rfuse_syscall_count_fops);
+	if (IS_ERR_OR_NULL(file)) {
+		err = file ? PTR_ERR(file) : -ENOMEM;
+		goto out_debugfs_remove;
+	}
+
+	file = debugfs_create_file("latency_breakdown", 0600,
+				   rfuse_debugfs_dir, NULL,
+				   &rfuse_latency_fops);
 	if (IS_ERR_OR_NULL(file)) {
 		err = file ? PTR_ERR(file) : -ENOMEM;
 		goto out_debugfs_remove;

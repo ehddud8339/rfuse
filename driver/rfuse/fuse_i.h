@@ -1465,6 +1465,13 @@ ssize_t rfuse_sbuf_copy_from_iter(struct rfuse_req *r_req,
 int rfuse_import_sbuf(struct rfuse_req *r_req);
 void rfuse_release_sbuf(struct rfuse_req *r_req);
 
+void rfuse_latency_record(enum rfuse_latency_op op,
+			  enum rfuse_latency_id id, u64 duration_ns);
+void rfuse_latency_record_request(struct rfuse_req *r_req,
+				  enum rfuse_latency_id id,
+				  u64 duration_ns);
+void rfuse_latency_finish_request(struct rfuse_req *r_req);
+
 // Queue into the forget queue
 void rfuse_queue_forget(struct fuse_conn *fc, u64 nodeid, u64 nlookup);
 

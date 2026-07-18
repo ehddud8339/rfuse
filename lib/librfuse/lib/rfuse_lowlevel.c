@@ -25,6 +25,56 @@
 
 #define RFUSE_SPLICE_READ_NO_DATA 0x1000
 
+static uint64_t rfuse_latency_now_ns(void)
+{
+	struct timespec now;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+		return 0;
+
+	return (uint64_t)now.tv_sec * 1000000000ULL + now.tv_nsec;
+}
+
+static void rfuse_latency_shared_start(struct rfuse_req *r_req,
+				       enum rfuse_latency_shared_id id)
+{
+	RFUSE_WRITE_ONCE(r_req->latency_shared_ns[id], rfuse_latency_now_ns());
+}
+
+static void rfuse_latency_shared_complete(struct rfuse_req *r_req,
+					  enum rfuse_latency_shared_id id,
+					  uint64_t start_ns)
+{
+	uint64_t now_ns = rfuse_latency_now_ns();
+
+	if (!start_ns || now_ns < start_ns)
+		return;
+
+	RFUSE_WRITE_ONCE(r_req->latency_shared_ns[id], now_ns - start_ns);
+	__atomic_fetch_or(&r_req->latency_done_mask, 1ULL << id,
+			  __ATOMIC_RELEASE);
+}
+
+static void rfuse_latency_shared_complete_started(
+	struct rfuse_req *r_req, enum rfuse_latency_shared_id id)
+{
+	rfuse_latency_shared_complete(
+		r_req, id, RFUSE_READ_ONCE(r_req->latency_shared_ns[id]));
+}
+
+static void rfuse_latency_shared_publish_start(
+	struct rfuse_req *r_req, enum rfuse_latency_shared_id id)
+{
+	uint64_t start_ns = rfuse_latency_now_ns();
+
+	if (!start_ns)
+		return;
+
+	RFUSE_WRITE_ONCE(r_req->latency_shared_ns[id], start_ns);
+	__atomic_fetch_or(&r_req->latency_done_mask, 1ULL << id,
+			  __ATOMIC_RELEASE);
+}
+
 static void rfuse_count_syscall_fd(int fd, enum rfuse_syscall_count_type type)
 {
 	struct rfuse_syscall_count_arg arg = {
@@ -342,6 +392,8 @@ static int rfuse_send_msg(struct fuse_session *se, fuse_req_t u_req){
 		r_req = &riq->ureq[u_req->index];
 		tmp_flags = RFUSE_READ_ONCE(r_req->flags);
 		SET_BIT(tmp_flags, FR_FINISHED);
+		rfuse_latency_shared_publish_start(
+			r_req, RFUSE_LATENCY_SHARED_REPLY_COMPLETION);
 		RFUSE_WRITE_ONCE(r_req->flags, tmp_flags);
 		rfuse_smp_mb();
 
@@ -501,7 +553,11 @@ int fuse_reply_buf(fuse_req_t u_req, const char *buf, size_t size){
 	long long int pp_req_index = ((long long int)req_index << 32) & RFUSE_REQ_IDX_MASK;
 	int pp_riq_id = (riq_id << 16) & RFUSE_RIQ_ID_MASK;
 	ssize_t res;
+	int err;
+	uint64_t start_ns;
 
+	rfuse_latency_shared_complete_started(
+		r_req, RFUSE_LATENCY_SHARED_BACKEND);
 	if (rfuse_req_sbuf_buffer(u_req, &sbuf) == 0) {
 		if (size > sbuf.capacity)
 			return fuse_reply_err(u_req, EIO);
@@ -514,8 +570,12 @@ int fuse_reply_buf(fuse_req_t u_req, const char *buf, size_t size){
 	}
 
 	rfuse_count_syscall_fd(ch ? ch->fd : se->fd, RFUSE_SYSCALL_COUNT_PWRITE);
-	res = pwrite(ch ? ch->fd : se->fd, buf, size, (long long int)pp_riq_id | pp_req_index);
-	int err = errno;
+	start_ns = rfuse_latency_now_ns();
+	res = pwrite(ch ? ch->fd : se->fd, buf, size,
+		     (long long int)pp_riq_id | pp_req_index);
+	err = errno;
+	rfuse_latency_shared_complete(
+		r_req, RFUSE_LATENCY_SHARED_DEV_RFUSE_PWRITE, start_ns);
 	if(res == -1){
 		if(!fuse_session_exited(se) && err != ENOENT)
 			perror("RFUSE ERROR: writing to the device failed!!");
@@ -541,7 +601,8 @@ int fuse_reply_write(fuse_req_t u_req, size_t count){
 	struct fuse_write_out *arg = (struct fuse_write_out *)&r_req->args;
 	
 	arg->size = count;
-
+	rfuse_latency_shared_complete_started(
+		r_req, RFUSE_LATENCY_SHARED_BACKEND);
 	return rfuse_send_reply_ok(u_req);
 }
 
@@ -1211,6 +1272,7 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 	int riq_id = u_req->riq->riq_id;
 	long long int pp_req_index = ((long long int)req_index << 32) & RFUSE_REQ_IDX_MASK;
 	int pp_riq_id = (riq_id << 16) & RFUSE_RIQ_ID_MASK;
+	uint64_t start_ns;
 	
 	if (rfuse_req_sbuf_buffer(u_req, &sbuf) == 0 &&
 	    (sbuf.flags & RFUSE_PAYLOAD_IN)) {
@@ -1218,7 +1280,7 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 		param = sbuf.addr;
 		goto do_write;
 	}
-
+	start_ns = rfuse_latency_now_ns();
 	if(!u_req->w->fbuf.mem) {
 		u_req->w->fbuf.mem = malloc(FUSE_MAX_MAX_PAGES * getpagesize());
 		if(!u_req->w->fbuf.mem) {
@@ -1227,13 +1289,19 @@ static void rfuse_do_write(fuse_req_t u_req, fuse_ino_t nodeid){
 		}
 		u_req->w->fbuf.size = FUSE_MAX_MAX_PAGES * getpagesize();
 	}
+	rfuse_latency_shared_complete(
+		r_req, RFUSE_LATENCY_SHARED_PREPARE_LIBRFUSE_CACHE, start_ns);
 	rfuse_count_syscall_fd(ch ? ch->fd : se->fd, RFUSE_SYSCALL_COUNT_PREAD);
-	res = pread(ch ? ch->fd : se->fd, u_req->w->fbuf.mem, u_req->w->fbuf.size, (long long int)pp_riq_id | pp_req_index);
+	start_ns = rfuse_latency_now_ns();
+	res = pread(ch ? ch->fd : se->fd, u_req->w->fbuf.mem,
+		    u_req->w->fbuf.size,
+		    (long long int)pp_riq_id | pp_req_index);
+	rfuse_latency_shared_complete(
+		r_req, RFUSE_LATENCY_SHARED_DEV_RFUSE_PREAD, start_ns);
 	if(res == -1) {
 		printf("Error : pread for write I/O failed\n");
 		fuse_reply_err(u_req, EIO);
 	}
-
 	// 2. Call "u_req->se->op.write" to process write
 	param = (char *)u_req->w->fbuf.mem;
 do_write:
@@ -1247,6 +1315,7 @@ do_write:
 
 	if (u_req->se->op.write) {
 		rfuse_count_syscall_req(u_req, RFUSE_SYSCALL_COUNT_DO_WRITE);
+		rfuse_latency_shared_start(r_req, RFUSE_LATENCY_SHARED_BACKEND);
 		u_req->se->op.write(u_req, nodeid, param, res,
 				arg->offset, &fi);
 	} else {
@@ -1655,6 +1724,7 @@ static void rfuse_do_read(fuse_req_t u_req, fuse_ino_t nodeid){
 		}
 
 		rfuse_count_syscall_req(u_req, RFUSE_SYSCALL_COUNT_DO_READ);
+		rfuse_latency_shared_start(r_req, RFUSE_LATENCY_SHARED_BACKEND);
 		u_req->se->op.read(u_req, nodeid, arg->size, arg->offset, &fi);
 	} else
 		fuse_reply_err(u_req, ENOSYS);
@@ -1912,7 +1982,8 @@ bool rfuse_read_queue(struct rfuse_worker *w, struct rfuse_mt *mt, struct fuse_c
 		pthread_mutex_unlock(&se->riq_lock[riq_id]);
 		processed = true;
 	}
-	
+	rfuse_latency_shared_complete_started(
+		r_req, RFUSE_LATENCY_SHARED_ENQUEUE_TO_DEQUEUE);
 	u_req->unique = r_req->in.unique;
 	u_req->ctx.uid = r_req->in.uid;
 	u_req->ctx.gid = r_req->in.gid;

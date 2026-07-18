@@ -26,6 +26,43 @@ enum rfuse_sched_mode {
 	RFUSE_SCHED_SPREAD = 1,
 };
 
+enum rfuse_latency_op {
+	RFUSE_LATENCY_OP_READ = 0,
+	RFUSE_LATENCY_OP_WRITE,
+	RFUSE_LATENCY_OP_MAX,
+};
+
+enum rfuse_latency_id {
+	RFUSE_LATENCY_WAIT_ASYNC_WRITE = 0,
+	RFUSE_LATENCY_GET_REQUEST,
+	RFUSE_LATENCY_PREPARE_CACHE,
+	RFUSE_LATENCY_PREPARE_SBP,
+	RFUSE_LATENCY_COPY_FROM_ITER,
+	RFUSE_LATENCY_REGISTER_INTERVAL_TREE,
+	RFUSE_LATENCY_SUBMIT_REQUEST,
+	RFUSE_LATENCY_ENQUEUE_TO_DEQUEUE,
+	RFUSE_LATENCY_PREPARE_LIBRFUSE_CACHE,
+	RFUSE_LATENCY_DEV_RFUSE_PREAD,
+	RFUSE_LATENCY_BACKEND,
+	RFUSE_LATENCY_DEV_RFUSE_PWRITE,
+	RFUSE_LATENCY_REPLY_COMPLETION,
+	RFUSE_LATENCY_RELEASE_REQUEST,
+	RFUSE_LATENCY_RELEASE_SBP,
+	RFUSE_LATENCY_COPY_TO_CACHE,
+	RFUSE_LATENCY_MAX,
+};
+
+enum rfuse_latency_shared_id {
+	RFUSE_LATENCY_SHARED_SUBMIT_REQUEST = 0,
+	RFUSE_LATENCY_SHARED_ENQUEUE_TO_DEQUEUE,
+	RFUSE_LATENCY_SHARED_PREPARE_LIBRFUSE_CACHE,
+	RFUSE_LATENCY_SHARED_DEV_RFUSE_PREAD,
+	RFUSE_LATENCY_SHARED_BACKEND,
+	RFUSE_LATENCY_SHARED_DEV_RFUSE_PWRITE,
+	RFUSE_LATENCY_SHARED_REPLY_COMPLETION,
+	RFUSE_LATENCY_SHARED_MAX,
+};
+
 #define RFUSE_RIQ_ID_MASK    0x00ff0000ULL
 #define RFUSE_QUEUE_MAP_MASK 0xff000000ULL
 #define RFUSE_REQ_IDX_MASK   0x0000ffff00000000ULL
@@ -122,7 +159,15 @@ struct rfuse_req{
 	struct rfuse_async_wrt_ctx wrt_ctx;
 	bool has_wrt_ctx;
 	void (*end)(struct fuse_mount *fm, struct rfuse_req *r_req, int error);
+
+	/* Shared kernel/user timestamps and completed user-side durations. */
+	uint64_t latency_shared_ns[RFUSE_LATENCY_SHARED_MAX];
+	uint64_t latency_done_mask;
 };
+
+static_assert(sizeof(struct rfuse_req) == 432);
+static_assert(offsetof(struct rfuse_req, latency_shared_ns) == 368);
+static_assert(offsetof(struct rfuse_req, latency_done_mask) == 424);
 
 
 struct rfuse_interrupt_entry{

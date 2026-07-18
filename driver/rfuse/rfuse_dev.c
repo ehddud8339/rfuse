@@ -20,6 +20,7 @@
 #include <linux/cpumask.h>
 #include <linux/nodemask.h>
 #include <linux/vmalloc.h>
+#include <linux/ktime.h>
 #include <asm/atomic.h>
 
 #define RFUSE_INT_REQ_BIT (1ULL << 0)
@@ -37,6 +38,7 @@
 #define PAYLOAD_AWARE 1
 
 atomic_t rr_id = ATOMIC_INIT(0);
+static atomic_t numa_group_cursor[NUM_NUMA_GROUPS];
 
 static const int numa_group[NUM_NUMA_GROUPS][NUM_NUMA_NODES] = {
 	{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29 },
@@ -699,6 +701,7 @@ int rfuse_import_sbuf(struct rfuse_req *r_req)
 	struct rfuse_iqueue *riq;
 	char *src;
 	unsigned int i;
+	u64 latency_start_ns;
 	size_t actual;
 	size_t requested;
 	size_t page_capacity;
@@ -729,7 +732,7 @@ int rfuse_import_sbuf(struct rfuse_req *r_req)
 	riq = rfuse_get_specific_iqueue(r_req->fm->fc, r_req->riq_id);
 	src = (char *)riq->sbuf.kaddr + r_req->sbuf_offset;
 	r_req->sbuf_len = remaining;
-
+	latency_start_ns = ktime_get_ns();
 	for (i = 0; i < rp->num_pages && remaining; i++) {
 		unsigned int offset = rp->descs[i].offset;
 		unsigned int count = min_t(size_t, remaining, rp->descs[i].length);
@@ -741,7 +744,8 @@ int rfuse_import_sbuf(struct rfuse_req *r_req)
 		src += count;
 		remaining -= count;
 	}
-
+	rfuse_latency_record_request(r_req, RFUSE_LATENCY_COPY_TO_CACHE,
+				     ktime_get_ns() - latency_start_ns);
 	if (remaining)
 		return -EIO;
 	if (r_req->page_zeroing && r_req->sbuf_len < requested)
@@ -1358,21 +1362,16 @@ static int select_numa_aware_v2(struct fuse_conn *fc,
 		if (riq_id >= 0 && riq_id < RFUSE_NUM_IQUEUE)
 			riq = fc->riq[riq_id];
 
+    
 		if (nodeid && riq) {
 			u64 old = READ_ONCE(riq->stream_hint);
 
-			/* LDY: riq별 stream_hint는 최근 file stream의 nodeid를 기억한다.
-			 * 현재 CPU riq의 hint와 현재 요청 fi->nodeid가 다르면 short-flow의
-			 * 첫 요청으로 보고 local wake latency를 줄이기 위해 current riq를
-			 * 선택한다. 같으면 streaming 요청으로 보고 app/daemon runqueue 경쟁을
-			 * 피하기 위해 current riq를 제외한 기존 remote 선택 경로로 보낸다.
-			 */
 			if (old != nodeid) {
 				WRITE_ONCE(riq->stream_hint, nodeid);
 				return riq_id;
 			}
 		}
-
+    
 		for (offset = 1; offset < NUM_NUMA_NODES; offset++) {
 			idx = (start_idx + offset) % NUM_NUMA_NODES;
 			riq_id = numa_group[numa_id][idx];
@@ -1385,6 +1384,77 @@ static int select_numa_aware_v2(struct fuse_conn *fc,
 
 			if ((READ_ONCE(riq->num_background) <= READ_ONCE(riq->congestion_threshold)) ||
 			    (READ_ONCE(riq->sbuf_max_free_hint) >= requested_pages))
+				return riq_id;
+		}
+		cond_resched();
+	}
+
+	return cpu_id;
+}
+
+static int select_numa_v3(struct fuse_conn *fc,
+			  struct fuse_inode *fi, size_t len)
+{
+	int cpu_id = task_cpu(current);
+	int start_idx;
+	int numa_id;
+	int rr_start;
+	int offset;
+	int i;
+	unsigned int requested_pages = DIV_ROUND_UP(len, PAGE_SIZE);
+	u64 nodeid = 0;
+
+	numa_id = find_numa_group_and_index(cpu_id, &start_idx);
+	if (numa_id < 0)
+		return cpu_id;
+
+	if (fi)
+		nodeid = READ_ONCE(fi->nodeid);
+
+	/*
+	 * Keep v2's local short-flow fast path, but rotate the sibling scan
+	 * start per NUMA group so repeated submissions do not always hit the
+	 * first eligible riq after current CPU.
+	 */
+	rr_start = (unsigned int)atomic_inc_return(
+		&numa_group_cursor[numa_id]) - 1;
+	rr_start %= NUM_NUMA_NODES - 1;
+
+	for (i = 0; i < 3; i++) {
+		int idx = start_idx;
+		int riq_id = numa_group[numa_id][idx];
+		struct rfuse_iqueue *riq = NULL;
+
+		if (riq_id >= 0 && riq_id < RFUSE_NUM_IQUEUE)
+			riq = fc->riq[riq_id];
+
+		if (nodeid && riq) {
+			u64 old = READ_ONCE(riq->stream_hint);
+
+			if (old != nodeid) {
+				WRITE_ONCE(riq->stream_hint, nodeid);
+				return riq_id;
+			}
+		}
+
+		for (offset = 0; offset < NUM_NUMA_NODES - 1; offset++) {
+			int scan_offset;
+
+			scan_offset = ((rr_start + offset) %
+				       (NUM_NUMA_NODES - 1)) + 1;
+			idx = (start_idx + scan_offset) % NUM_NUMA_NODES;
+			riq_id = numa_group[numa_id][idx];
+			if (riq_id < 0 || riq_id >= RFUSE_NUM_IQUEUE)
+				continue;
+
+			riq = fc->riq[riq_id];
+			if (!riq)
+				continue;
+
+			if ((READ_ONCE(riq->num_background) <=
+			     READ_ONCE(riq->congestion_threshold)) ||
+			    (READ_ONCE(riq->sbuf_max_free_hint) >=
+			     requested_pages))
 				return riq_id;
 		}
 		cond_resched();
@@ -1495,7 +1565,8 @@ struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc,
 	int id;
 
 	id = select_numa_aware_v2(fc, fi, sbuf_len);
-
+  // id = select_round_robin(fc);
+  // id = (select_cpu_id() + 1) % RFUSE_NUM_IQUEUE;
 	return fc->riq[id];
 }
 
@@ -2224,9 +2295,12 @@ static int rfuse_queue_request(struct rfuse_req *r_req)
 	entry->request = r_req->index;				// fill entry
 	if(!test_bit(FR_BACKGROUND, &r_req->flags)) // only increase the reference count for synchronous requests
 		__rfuse_get_request(r_req);
+	if (r_req->in.opcode == FUSE_READ || r_req->in.opcode == FUSE_WRITE)
+		WRITE_ONCE(r_req->latency_shared_ns[
+			RFUSE_LATENCY_SHARED_ENQUEUE_TO_DEQUEUE], ktime_get_ns());
 	rfuse_submit_pending_tail(riq);				// Commit entry
 	spin_unlock(&riq->lock);					// unlock
-		if(waitqueue_active(&riq->idle_user_waitq)){
+	if(waitqueue_active(&riq->idle_user_waitq)){
 			wake_up(&riq->idle_user_waitq);		// Wake up idle user thread
 	}
 	return 0;
@@ -2236,12 +2310,26 @@ static int rfuse_queue_request(struct rfuse_req *r_req)
 ssize_t rfuse_simple_request(struct rfuse_req *r_req){
 	ssize_t ret=0;
 	int err;
+	u64 latency_start_ns;
+	u64 now_ns;
 
 	err = rfuse_queue_request(r_req);
 	if (err)
 		return err;
+	latency_start_ns = READ_ONCE(r_req->latency_shared_ns[
+		RFUSE_LATENCY_SHARED_SUBMIT_REQUEST]);
+	if (latency_start_ns) {
+		now_ns = ktime_get_ns();
+		if (now_ns >= latency_start_ns)
+			rfuse_latency_record_request(
+				r_req, RFUSE_LATENCY_SUBMIT_REQUEST,
+				now_ns - latency_start_ns);
+		WRITE_ONCE(r_req->latency_shared_ns[
+			RFUSE_LATENCY_SHARED_SUBMIT_REQUEST], 0);
+	}
 	rfuse_request_wait_answer(r_req);
 	smp_rmb();
+	rfuse_latency_finish_request(r_req);
 
 	ret = r_req->out.error;
 	if (!ret && r_req->out_argvar) {
@@ -2353,7 +2441,19 @@ void rfuse_request_end(struct rfuse_req *r_req){
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
 	LIST_HEAD(to_queue);
+	enum rfuse_latency_op latency_op;
+	u64 release_start_ns = ktime_get_ns();
+	u64 sbp_start_ns;
+	bool record_latency = true;
 
+	if (r_req->in.opcode == FUSE_READ)
+		latency_op = RFUSE_LATENCY_OP_READ;
+	else if (r_req->in.opcode == FUSE_WRITE)
+		latency_op = RFUSE_LATENCY_OP_WRITE;
+	else
+		record_latency = false;
+
+	rfuse_latency_finish_request(r_req);
 	if(test_bit(FR_BACKGROUND, &r_req->flags)){
 		spin_lock(&riq->bg_lock);
 		clear_bit(FR_BACKGROUND, &r_req->flags);
@@ -2384,7 +2484,10 @@ void rfuse_request_end(struct rfuse_req *r_req){
 	{
 		int err;
 
+		sbp_start_ns = ktime_get_ns();
 		err = rfuse_import_sbuf(r_req);
+		rfuse_latency_record_request(r_req, RFUSE_LATENCY_RELEASE_SBP,
+					     ktime_get_ns() - sbp_start_ns);
 		if (err && !r_req->out.error)
 			r_req->out.error = err;
 	}
@@ -2394,6 +2497,9 @@ void rfuse_request_end(struct rfuse_req *r_req){
 	}
 
 	rfuse_put_request(r_req);
+	if (record_latency)
+		rfuse_latency_record(latency_op, RFUSE_LATENCY_RELEASE_REQUEST,
+				     ktime_get_ns() - release_start_ns);
 }
 
 
