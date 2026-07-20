@@ -944,11 +944,15 @@ static void fuse_send_readpages(struct fuse_io_args *ia, struct file *file)
 	if (fm->fc->async_read) {
 		ia->ff = fuse_file_get(ff);
 		ap->args.end = fuse_readpages_end;
+		/* LDY: submit_request (read, start) */
 		err = fuse_simple_background(fm, &ap->args, GFP_KERNEL);
+		/* LDY: submit_request (read, end) */
 		if (!err)
 			return;
 	} else {
+		/* LDY: request_lifetime (read, start) */
 		res = fuse_simple_request(fm, &ap->args);
+		/* LDY: request_lifetime (read, end) */
 		err = res < 0 ? res : 0;
 	}
 	fuse_readpages_end(fm, &ap->args, err);
@@ -1109,7 +1113,9 @@ static ssize_t fuse_send_write_pages(struct fuse_io_args *ia,
 	if (fm->fc->handle_killpriv_v2 && !capable(CAP_FSETID))
 		ia->write.in.write_flags |= FUSE_WRITE_KILL_SUIDGID;
 
+	/* LDY: request_lifetime (write, start) */
 	err = fuse_simple_request(fm, &ap->args);
+	/* LDY: request_lifetime (write, end) */
 	if (!err && ia->write.out.size > count)
 		err = -EIO;
 
@@ -1239,16 +1245,19 @@ static ssize_t fuse_perform_write(struct kiocb *iocb,
 		ssize_t count;
 		struct fuse_io_args ia = {};
 		struct fuse_args_pages *ap = &ia.ap;
+		/* LDY: prepare_cache (write, start) */
 		unsigned int nr_pages = fuse_wr_pages(pos, iov_iter_count(ii),
 						      fc->max_pages);
 
 		ap->pages = fuse_pages_alloc(nr_pages, GFP_KERNEL, &ap->descs);
 		if (!ap->pages) {
+			/* LDY: prepare_cache (write, end; allocation failure) */
 			err = -ENOMEM;
 			break;
 		}
 
 		count = fuse_fill_write_pages(&ia, mapping, ii, pos, nr_pages);
+		/* LDY: prepare_cache (write, end) */
 		if (count <= 0) {
 			err = count;
 		} else {

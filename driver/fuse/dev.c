@@ -259,8 +259,10 @@ __releases(fiq->lock)
 	req->in.h.len = sizeof(struct fuse_in_header) +
 		fuse_len_args(req->args->in_numargs,
 			      (struct fuse_arg *) req->args->in_args);
+	/* LDY: enqueue_to_dequeue (read/write, start) */
 	list_add_tail(&req->list, &fiq->pending);
 	fiq->ops->wake_pending_and_unlock(fiq);
+	/* LDY: submit_request (read/write, end) */
 }
 
 void fuse_queue_forget(struct fuse_conn *fc, struct fuse_forget_link *forget,
@@ -463,6 +465,7 @@ static void __fuse_request_send(struct fuse_req *req)
 	struct fuse_iqueue *fiq = &req->fm->fc->iq;
 
 	BUG_ON(test_bit(FR_BACKGROUND, &req->flags));
+	/* LDY: submit_request (read/write, start) */
 	spin_lock(&fiq->lock);
 	if (!fiq->connected) {
 		spin_unlock(&fiq->lock);
@@ -538,6 +541,7 @@ ssize_t fuse_simple_request(struct fuse_mount *fm, struct fuse_args *args)
 	struct fuse_req *req;
 	ssize_t ret;
 
+	/* LDY: get_request (read/write, start) */
 	if (args->force) {
 		atomic_inc(&fc->num_waiting);
 		req = fuse_request_alloc(fm, GFP_KERNEL | __GFP_NOFAIL);
@@ -553,6 +557,7 @@ ssize_t fuse_simple_request(struct fuse_mount *fm, struct fuse_args *args)
 		if (IS_ERR(req))
 			return PTR_ERR(req);
 	}
+	/* LDY: get_request (read/write, end) */
 
 	/* Needs to be done after fuse_get_req() so that fc->minor is valid */
 	fuse_adjust_compat(fc, args);
@@ -606,6 +611,7 @@ int fuse_simple_background(struct fuse_mount *fm, struct fuse_args *args,
 {
 	struct fuse_req *req;
 
+	/* LDY: get_request (read/write, start) */
 	if (args->force) {
 		WARN_ON(!args->nocreds);
 		req = fuse_request_alloc(fm, gfp_flags);
@@ -618,9 +624,11 @@ int fuse_simple_background(struct fuse_mount *fm, struct fuse_args *args,
 		if (IS_ERR(req))
 			return PTR_ERR(req);
 	}
+	/* LDY: get_request (read/write, end) */
 
 	fuse_args_to_req(req, args);
 
+	/* LDY: submit_request (read/write, start) */
 	if (!fuse_request_queue_background(req)) {
 		fuse_put_request(req);
 		return -ENOTCONN;
@@ -1308,6 +1316,7 @@ static ssize_t fuse_dev_do_read(struct fuse_dev *fud, struct file *file,
 	req = list_entry(fiq->pending.next, struct fuse_req, list);
 	clear_bit(FR_PENDING, &req->flags);
 	list_del_init(&req->list);
+	/* LDY: enqueue_to_dequeue (read/write, end) */
 	spin_unlock(&fiq->lock);
 
 	args = req->args;
@@ -1336,12 +1345,14 @@ static ssize_t fuse_dev_do_read(struct fuse_dev *fud, struct file *file,
 	spin_unlock(&fpq->lock);
 	cs->req = req;
 
+	/* LDY: copy_request_to_userspace (read/write, start) */
 	GET_TIMESTAMPS(3)
 	err = fuse_copy_one(cs, &req->in.h, sizeof(req->in.h));
 	if (!err)
 		err = fuse_copy_args(cs, args->in_numargs, args->in_pages,
 				     (struct fuse_arg *) args->in_args, 0);
 	GET_TIMESTAMPS(4)
+	/* LDY: copy_request_to_userspace (read/write, end) */
 
 	fuse_copy_finish(cs);
 	spin_lock(&fpq->lock);
@@ -1882,6 +1893,7 @@ static int copy_out_args(struct fuse_copy_state *cs, struct fuse_args *args,
 			return -EINVAL;
 		lastarg->size -= diffsize;
 	}
+	/* LDY: copy_to_cache is included here when out_pages is set. */
 	return fuse_copy_args(cs, args->out_numargs, args->out_pages,
 			      args->out_args, args->page_zeroing);
 }
@@ -1964,12 +1976,17 @@ static ssize_t fuse_dev_do_write(struct fuse_dev *fud,
 	cs->req = req;
 	if (!req->args->page_replace)
 		cs->move_pages = 0;
+	/* LDY: copy_reply_to_kernel (read/write, start) */
 	GET_TIMESTAMPS(11)
 	if (oh.error)
 		err = nbytes != sizeof(oh) ? -EINVAL : 0;
-	else
+	else {
+		/* LDY: copy_to_cache (read, start; out_pages path only) */
 		err = copy_out_args(cs, req->args, nbytes);
+		/* LDY: copy_to_cache (read, end; out_pages path only) */
+	}
 	GET_TIMESTAMPS(12)
+	/* LDY: copy_reply_to_kernel (read/write, end) */
 	fuse_copy_finish(cs);
 
 	spin_lock(&fpq->lock);
@@ -1981,8 +1998,10 @@ static ssize_t fuse_dev_do_write(struct fuse_dev *fud,
 	if (!test_bit(FR_PRIVATE, &req->flags))
 		list_del_init(&req->list);
 	spin_unlock(&fpq->lock);
-
+	/* LDY: reply_completion (read/write, end) */
+	/* LDY: release_request (read/write, start) */
 	fuse_request_end(req);
+	/* LDY: release_request (read/write, end) */
 out:
 	return err ? err : nbytes;
 
@@ -2003,6 +2022,7 @@ static ssize_t fuse_dev_write(struct kiocb *iocb, struct iov_iter *from)
 		return -EINVAL;
 
 	fuse_copy_init(&cs, 0, from);
+	/* LDY: reply_completion (read/write, start) */
 	GET_TIMESTAMPS(10)
 	return fuse_dev_do_write(fud, &cs, iov_iter_count(from));
 }
@@ -2085,6 +2105,7 @@ static ssize_t fuse_dev_splice_write(struct pipe_inode_info *pipe,
 	if (flags & SPLICE_F_MOVE)
 		cs.move_pages = 1;
 
+	/* LDY: reply_completion (read, start; splice path) */
 	ret = fuse_dev_do_write(fud, &cs, len);
 
 	pipe_lock(pipe);

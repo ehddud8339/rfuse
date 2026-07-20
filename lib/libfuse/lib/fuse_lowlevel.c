@@ -196,10 +196,10 @@ static int fuse_send_msg(struct fuse_session *se, struct fuse_chan *ch,
 	}
 
 	GET_TIMESTAMPS(9)
-
+	/* LDY: dev_fuse_writev (read/write, start) */
 	ssize_t res = writev(ch ? ch->fd : se->fd,
 			     iov, count);
-
+	/* LDY: dev_fuse_writev (read/write, end) */
 #ifdef DEBUG
 	/* print timestamps */
 	for(int i = 6; i <= 9; i++)
@@ -241,7 +241,8 @@ static int send_reply_iov(fuse_req_t req, int error, struct iovec *iov,
 			  int count)
 {
 	int res;
-	
+
+	/* LDY: backend (read/write, end) */
 	GET_TIMESTAMPS(8)
 
 	res = fuse_send_reply_iov_nofree(req, error, iov, count);
@@ -834,8 +835,10 @@ static int fuse_send_data_iov(struct fuse_session *se, struct fuse_chan *ch,
 	    (se->conn.want & FUSE_CAP_SPLICE_MOVE))
 		splice_flags |= SPLICE_F_MOVE;
 
+	/* LDY: dev_fuse_write (read, start; splice path) */
 	res = splice(llp->pipe[0], NULL, ch ? ch->fd : se->fd,
 		     NULL, out->len, splice_flags);
+	/* LDY: dev_fuse_write (read, end; splice path) */
 	if (res == -1) {
 		res = -errno;
 		perror("fuse: splice from pipe");
@@ -881,6 +884,7 @@ int fuse_reply_data(fuse_req_t req, struct fuse_bufvec *bufv,
 	out.unique = req->unique;
 	out.error = 0;
 
+	/* LDY: backend (read, end; fuse_reply_data path) */
 	res = fuse_send_data_iov(req->se, req->ch, iov, 1, bufv, flags);
 	if (res <= 0) {
 		fuse_free_req(req);
@@ -1363,6 +1367,7 @@ static void do_read(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 			fi.lock_owner = arg->lock_owner;
 			fi.flags = arg->flags;
 		}
+		/* LDY: backend (read, start) */
 		req->se->op.read(req, nodeid, arg->size, arg->offset, &fi);
 	} else
 		fuse_reply_err(req, ENOSYS);
@@ -1385,7 +1390,7 @@ static void do_write(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 		fi.flags = arg->flags;
 		param = PARAM(arg);
 	}
-
+	/* LDY: backend (write, start) */
 	if (req->se->op.write)
 		req->se->op.write(req, nodeid, param, arg->size,
 				 arg->offset, &fi);
@@ -1429,6 +1434,7 @@ static void do_write_buf(fuse_req_t req, fuse_ino_t nodeid, const void *inarg,
 	}
 	bufv.buf[0].size = arg->size;
 
+	/* LDY: backend (write, start) */
 	se->op.write_buf(req, nodeid, &bufv, arg->offset, &fi);
 
 out:
@@ -2572,6 +2578,7 @@ void fuse_session_process_buf_int(struct fuse_session *se,
 	int err;
 	int res;
 
+	/* LDY: prepare_libfuse_request (read/write, start) */
 	if (buf->flags & FUSE_BUF_IS_FD) {
 		if (buf->size < tmpbuf.buf[0].size)
 			tmpbuf.buf[0].size = buf->size;
@@ -2682,7 +2689,7 @@ void fuse_session_process_buf_int(struct fuse_session *se,
 	}
 
 	GET_TIMESTAMPS(7)
-
+	/* LDY: prepare_libfuse_request (read/write, end) */
 	inarg = (void *) &in[1];
 	if (in->opcode == FUSE_WRITE && se->op.write_buf)
 		do_write_buf(req, in->nodeid, inarg, buf);
@@ -2796,8 +2803,10 @@ int fuse_session_receive_buf_int(struct fuse_session *se, struct fuse_buf *buf,
 			goto fallback;
 	}
 
+	/* LDY: dev_fuse_read (read/write, start; splice path) */
 	res = splice(ch ? ch->fd : se->fd,
 		     NULL, llp->pipe[1], NULL, bufsize, 0);
+	/* LDY: dev_fuse_read (read/write, end; splice path) */
 	err = errno;
 
 	if (fuse_session_exited(se))
@@ -2885,7 +2894,9 @@ fallback:
 	}
 
 restart:
+	/* LDY: dev_fuse_read (read/write, start) */
 	res = read(ch ? ch->fd : se->fd, buf->mem, se->bufsize);
+	/* LDY: dev_fuse_read (read/write, end) */
 
 	GET_TIMESTAMPS(6)
 
