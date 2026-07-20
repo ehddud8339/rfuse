@@ -43,15 +43,112 @@
 			const typeof( ((type *)0)->member ) *__mptr = (ptr); \
 			(type *)( (char *)__mptr - offsetof(type,member) );})
 
-static struct timespec temp_time;
-static long timestamps[14] = {0, }; 
+struct fuse_receive_latency {
+	struct fuse_session *se;
+	uint64_t end_ns;
+	uint64_t duration_ns;
+	enum fuse_latency_id id;
+	int valid;
+};
 
-#ifdef DEBUG
-	#define GET_TIMESTAMPS(i)  clock_gettime(CLOCK_MONOTONIC, &temp_time); \
-				   timestamps[i] = temp_time.tv_sec * 1000000000 + temp_time.tv_nsec;
-#else
-	#define GET_TIMESTAMPS(i) ;
-#endif
+static __thread struct fuse_receive_latency fuse_receive_latency;
+
+static uint64_t fuse_latency_now_ns(void)
+{
+	struct timespec now;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+		return 0;
+
+	return (uint64_t)now.tv_sec * 1000000000ULL + now.tv_nsec;
+}
+
+static int fuse_latency_opcode_to_op(uint32_t opcode,
+				     enum fuse_latency_op *op)
+{
+	if (opcode == FUSE_READ) {
+		*op = FUSE_LATENCY_OP_READ;
+		return 1;
+	}
+	if (opcode == FUSE_WRITE) {
+		*op = FUSE_LATENCY_OP_WRITE;
+		return 1;
+	}
+
+	return 0;
+}
+
+static void fuse_latency_record(struct fuse_session *se,
+				enum fuse_latency_op op,
+				enum fuse_latency_id id,
+				uint64_t duration_ns)
+{
+	struct fuse_latency_shard *shard;
+	struct fuse_latency_stat *stat;
+	uintptr_t thread_id;
+
+	if (!se || op >= FUSE_LATENCY_OP_MAX || id >= FUSE_LATENCY_MAX)
+		return;
+
+	thread_id = (uintptr_t)pthread_self();
+	shard = &se->latency_shards[(thread_id >> 3) % FUSE_LATENCY_SHARDS];
+	pthread_mutex_lock(&shard->lock);
+	stat = &shard->stats[op][id];
+	stat->count++;
+	stat->total_ns += duration_ns;
+	if (stat->count == 1 || duration_ns < stat->min_ns)
+		stat->min_ns = duration_ns;
+	if (duration_ns > stat->max_ns)
+		stat->max_ns = duration_ns;
+	pthread_mutex_unlock(&shard->lock);
+}
+
+static void fuse_latency_record_opcode(struct fuse_session *se,
+				       uint32_t opcode,
+				       enum fuse_latency_id id,
+				       uint64_t duration_ns)
+{
+	enum fuse_latency_op op;
+
+	if (fuse_latency_opcode_to_op(opcode, &op))
+		fuse_latency_record(se, op, id, duration_ns);
+}
+
+static void fuse_latency_reply_start(fuse_req_t req)
+{
+	enum fuse_latency_op op;
+	uint64_t now_ns;
+
+	if (!req || !fuse_latency_opcode_to_op(req->opcode, &op))
+		return;
+
+	now_ns = fuse_latency_now_ns();
+	if (!req->latency_backend_done && req->backend_start_ns &&
+	    now_ns >= req->backend_start_ns) {
+		fuse_latency_record_opcode(req->se, req->opcode,
+					   FUSE_LATENCY_BACKEND,
+					   now_ns - req->backend_start_ns);
+		req->latency_backend_done = 1;
+		now_ns = fuse_latency_now_ns();
+	}
+	if (!req->latency_prepare_reply_started) {
+		req->prepare_reply_start_ns = now_ns;
+		req->latency_prepare_reply_started = 1;
+	}
+}
+
+static void fuse_latency_prepare_reply_complete(fuse_req_t req,
+						uint64_t now_ns)
+{
+	if (!req || !req->latency_prepare_reply_started ||
+	    !req->prepare_reply_start_ns || now_ns < req->prepare_reply_start_ns)
+		return;
+
+	fuse_latency_record_opcode(req->se, req->opcode,
+				   FUSE_LATENCY_PREPARE_REPLY,
+				   now_ns - req->prepare_reply_start_ns);
+	req->latency_prepare_reply_started = 0;
+}
 
 struct fuse_pollhandle {
 	uint64_t kh;
@@ -173,9 +270,12 @@ static struct fuse_req *fuse_ll_alloc_req(struct fuse_session *se)
 
 /* Send data. If *ch* is NULL, send via session master fd */
 static int fuse_send_msg(struct fuse_session *se, struct fuse_chan *ch,
-			 struct iovec *iov, int count)
+			 struct iovec *iov, int count, fuse_req_t req)
 {
 	struct fuse_out_header *out = iov[0].iov_base;
+	uint64_t write_start_ns;
+	ssize_t res;
+	int err;
 
 	assert(se != NULL);
 	out->len = iov_length(iov, count);
@@ -195,18 +295,20 @@ static int fuse_send_msg(struct fuse_session *se, struct fuse_chan *ch,
 		}
 	}
 
-	GET_TIMESTAMPS(9)
-	/* LDY: dev_fuse_writev (read/write, start) */
-	ssize_t res = writev(ch ? ch->fd : se->fd,
-			     iov, count);
-	/* LDY: dev_fuse_writev (read/write, end) */
-#ifdef DEBUG
-	/* print timestamps */
-	for(int i = 6; i <= 9; i++)
-		printf("fuse experiment [%d]: %lu nsec\n", i, timestamps[i]);
-#endif
+	if (req) {
+		uint64_t now_ns;
 
-	int err = errno;
+		fuse_latency_reply_start(req);
+		now_ns = fuse_latency_now_ns();
+		fuse_latency_prepare_reply_complete(req, now_ns);
+	}
+	write_start_ns = fuse_latency_now_ns();
+	res = writev(ch ? ch->fd : se->fd, iov, count);
+	err = errno;
+	if (req)
+		fuse_latency_record_opcode(req->se, req->opcode,
+					   FUSE_LATENCY_DEV_FUSE_WRITEV,
+					   fuse_latency_now_ns() - write_start_ns);
 	if (res == -1) {
 		/* ENOENT means the operation was interrupted */
 		if (!fuse_session_exited(se) && err != ENOENT)
@@ -234,16 +336,14 @@ int fuse_send_reply_iov_nofree(fuse_req_t req, int error, struct iovec *iov,
 	iov[0].iov_base = &out;
 	iov[0].iov_len = sizeof(struct fuse_out_header);
 
-	return fuse_send_msg(req->se, req->ch, iov, count);
+	fuse_latency_reply_start(req);
+	return fuse_send_msg(req->se, req->ch, iov, count, req);
 }
 
 static int send_reply_iov(fuse_req_t req, int error, struct iovec *iov,
 			  int count)
 {
 	int res;
-
-	/* LDY: backend (read/write, end) */
-	GET_TIMESTAMPS(8)
 
 	res = fuse_send_reply_iov_nofree(req, error, iov, count);
 	fuse_free_req(req);
@@ -268,6 +368,7 @@ int fuse_reply_iov(fuse_req_t req, const struct iovec *iov, int count)
 	int res;
 	struct iovec *padded_iov;
 
+	fuse_latency_reply_start(req);
 	padded_iov = malloc((count + 1) * sizeof(struct iovec));
 	if (padded_iov == NULL)
 		return fuse_reply_err(req, ENOMEM);
@@ -331,6 +432,7 @@ static int send_reply_ok(fuse_req_t req, const void *arg, size_t argsize)
 
 int fuse_reply_err(fuse_req_t req, int err)
 {
+	fuse_latency_reply_start(req);
 	return send_reply(req, -err, NULL, 0);
 }
 
@@ -483,6 +585,7 @@ int fuse_reply_write(fuse_req_t req, size_t count)
 {
 	struct fuse_write_out arg;
 
+	fuse_latency_reply_start(req);
 	memset(&arg, 0, sizeof(arg));
 	arg.size = count;
 
@@ -491,6 +594,7 @@ int fuse_reply_write(fuse_req_t req, size_t count)
 
 int fuse_reply_buf(fuse_req_t req, const char *buf, size_t size)
 {
+	fuse_latency_reply_start(req);
 	return send_reply_ok(req, buf, size);
 }
 
@@ -498,7 +602,7 @@ static int fuse_send_data_iov_fallback(struct fuse_session *se,
 				       struct fuse_chan *ch,
 				       struct iovec *iov, int iov_count,
 				       struct fuse_bufvec *buf,
-				       size_t len)
+				       size_t len, fuse_req_t req)
 {
 	struct fuse_bufvec mem_buf = FUSE_BUFVEC_INIT(len);
 	void *mbuf;
@@ -513,7 +617,7 @@ static int fuse_send_data_iov_fallback(struct fuse_session *se,
 		iov[iov_count].iov_base = buf->buf[0].mem;
 		iov[iov_count].iov_len = len;
 		iov_count++;
-		return fuse_send_msg(se, ch, iov, iov_count);
+		return fuse_send_msg(se, ch, iov, iov_count, req);
 	}
 
 	res = posix_memalign(&mbuf, pagesize, len);
@@ -531,7 +635,7 @@ static int fuse_send_data_iov_fallback(struct fuse_session *se,
 	iov[iov_count].iov_base = mbuf;
 	iov[iov_count].iov_len = len;
 	iov_count++;
-	res = fuse_send_msg(se, ch, iov, iov_count);
+	res = fuse_send_msg(se, ch, iov, iov_count, req);
 	free(mbuf);
 
 	return res;
@@ -662,9 +766,11 @@ static int grow_pipe_to_max(int pipefd)
 
 static int fuse_send_data_iov(struct fuse_session *se, struct fuse_chan *ch,
 			       struct iovec *iov, int iov_count,
-			       struct fuse_bufvec *buf, unsigned int flags)
+			       struct fuse_bufvec *buf, unsigned int flags,
+			       fuse_req_t req)
 {
 	int res;
+	int splice_errno;
 	size_t len = fuse_buf_size(buf);
 	struct fuse_out_header *out = iov[0].iov_base;
 	struct fuse_ll_pipe *llp;
@@ -814,7 +920,7 @@ static int fuse_send_data_iov(struct fuse_session *se, struct fuse_chan *ch,
 			iov[iov_count].iov_base = mbuf;
 			iov[iov_count].iov_len = len;
 			iov_count++;
-			res = fuse_send_msg(se, ch, iov, iov_count);
+			res = fuse_send_msg(se, ch, iov, iov_count, req);
 			free(mbuf);
 			return res;
 		}
@@ -835,12 +941,23 @@ static int fuse_send_data_iov(struct fuse_session *se, struct fuse_chan *ch,
 	    (se->conn.want & FUSE_CAP_SPLICE_MOVE))
 		splice_flags |= SPLICE_F_MOVE;
 
-	/* LDY: dev_fuse_write (read, start; splice path) */
+	if (req) {
+		fuse_latency_reply_start(req);
+		fuse_latency_prepare_reply_complete(req, fuse_latency_now_ns());
+	}
+	{
+		uint64_t splice_start_ns = fuse_latency_now_ns();
+
 	res = splice(llp->pipe[0], NULL, ch ? ch->fd : se->fd,
 		     NULL, out->len, splice_flags);
-	/* LDY: dev_fuse_write (read, end; splice path) */
+	splice_errno = errno;
+	if (req)
+		fuse_latency_record_opcode(
+			req->se, req->opcode, FUSE_LATENCY_DEV_FUSE_SPLICE_WRITE,
+			fuse_latency_now_ns() - splice_start_ns);
+	}
 	if (res == -1) {
-		res = -errno;
+		res = -splice_errno;
 		perror("fuse: splice from pipe");
 		goto clear_pipe;
 	}
@@ -857,17 +974,20 @@ clear_pipe:
 	return res;
 
 fallback:
-	return fuse_send_data_iov_fallback(se, ch, iov, iov_count, buf, len);
+	return fuse_send_data_iov_fallback(se, ch, iov, iov_count, buf, len,
+					   req);
 }
 #else
 static int fuse_send_data_iov(struct fuse_session *se, struct fuse_chan *ch,
 			       struct iovec *iov, int iov_count,
-			       struct fuse_bufvec *buf, unsigned int flags)
+			       struct fuse_bufvec *buf, unsigned int flags,
+			       fuse_req_t req)
 {
 	size_t len = fuse_buf_size(buf);
 	(void) flags;
 
-	return fuse_send_data_iov_fallback(se, ch, iov, iov_count, buf, len);
+	return fuse_send_data_iov_fallback(se, ch, iov, iov_count, buf, len,
+					   req);
 }
 #endif
 
@@ -884,8 +1004,8 @@ int fuse_reply_data(fuse_req_t req, struct fuse_bufvec *bufv,
 	out.unique = req->unique;
 	out.error = 0;
 
-	/* LDY: backend (read, end; fuse_reply_data path) */
-	res = fuse_send_data_iov(req->se, req->ch, iov, 1, bufv, flags);
+	fuse_latency_reply_start(req);
+	res = fuse_send_data_iov(req->se, req->ch, iov, 1, bufv, flags, req);
 	if (res <= 0) {
 		fuse_free_req(req);
 		return res;
@@ -1367,7 +1487,7 @@ static void do_read(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 			fi.lock_owner = arg->lock_owner;
 			fi.flags = arg->flags;
 		}
-		/* LDY: backend (read, start) */
+		req->backend_start_ns = fuse_latency_now_ns();
 		req->se->op.read(req, nodeid, arg->size, arg->offset, &fi);
 	} else
 		fuse_reply_err(req, ENOSYS);
@@ -1390,12 +1510,13 @@ static void do_write(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 		fi.flags = arg->flags;
 		param = PARAM(arg);
 	}
-	/* LDY: backend (write, start) */
-	if (req->se->op.write)
+	if (req->se->op.write) {
+		req->backend_start_ns = fuse_latency_now_ns();
 		req->se->op.write(req, nodeid, param, arg->size,
 				 arg->offset, &fi);
-	else
+	} else {
 		fuse_reply_err(req, ENOSYS);
+	}
 }
 
 static void do_write_buf(fuse_req_t req, fuse_ino_t nodeid, const void *inarg,
@@ -1434,7 +1555,7 @@ static void do_write_buf(fuse_req_t req, fuse_ino_t nodeid, const void *inarg,
 	}
 	bufv.buf[0].size = arg->size;
 
-	/* LDY: backend (write, start) */
+	req->backend_start_ns = fuse_latency_now_ns();
 	se->op.write_buf(req, nodeid, &bufv, arg->offset, &fi);
 
 out:
@@ -2230,7 +2351,7 @@ static int send_notify_iov(struct fuse_session *se, int notify_code,
 	iov[0].iov_base = &out;
 	iov[0].iov_len = sizeof(struct fuse_out_header);
 
-	return fuse_send_msg(se, NULL, iov, count);
+	return fuse_send_msg(se, NULL, iov, count, NULL);
 }
 
 int fuse_lowlevel_notify_poll(struct fuse_pollhandle *ph)
@@ -2351,7 +2472,7 @@ int fuse_lowlevel_notify_store(struct fuse_session *se, fuse_ino_t ino,
 	iov[1].iov_base = &outarg;
 	iov[1].iov_len = sizeof(outarg);
 
-	res = fuse_send_data_iov(se, NULL, iov, 2, bufv, flags);
+	res = fuse_send_data_iov(se, NULL, iov, 2, bufv, flags, NULL);
 	if (res > 0)
 		res = -res;
 
@@ -2575,10 +2696,10 @@ void fuse_session_process_buf_int(struct fuse_session *se,
 	const void *inarg;
 	struct fuse_req *req;
 	void *mbuf = NULL;
+	uint64_t prepare_start_ns = fuse_latency_now_ns();
 	int err;
 	int res;
 
-	/* LDY: prepare_libfuse_request (read/write, start) */
 	if (buf->flags & FUSE_BUF_IS_FD) {
 		if (buf->size < tmpbuf.buf[0].size)
 			tmpbuf.buf[0].size = buf->size;
@@ -2597,7 +2718,15 @@ void fuse_session_process_buf_int(struct fuse_session *se,
 		in = mbuf;
 	} else {
 		in = buf->mem;
-	}	
+	}
+
+	if (fuse_receive_latency.valid && fuse_receive_latency.se == se) {
+		fuse_latency_record_opcode(
+			se, in->opcode, fuse_receive_latency.id,
+			fuse_receive_latency.duration_ns);
+		prepare_start_ns = fuse_receive_latency.end_ns;
+		fuse_receive_latency.valid = 0;
+	}
 
 #ifdef DEBUG
 	printf("fuse experiment opcode: %s (%i)\n", opname((enum fuse_opcode) in->opcode), in->opcode);
@@ -2622,11 +2751,12 @@ void fuse_session_process_buf_int(struct fuse_session *se,
 			.iov_len = sizeof(struct fuse_out_header),
 		};
 
-		fuse_send_msg(se, ch, &iov, 1);
+		fuse_send_msg(se, ch, &iov, 1, NULL);
 		goto clear_pipe;
 	}
 
 	req->unique = in->unique;
+	req->opcode = in->opcode;
 	req->ctx.uid = in->uid;
 	req->ctx.gid = in->gid;
 	req->ctx.pid = in->pid;
@@ -2688,8 +2818,9 @@ void fuse_session_process_buf_int(struct fuse_session *se,
 		in = mbuf;
 	}
 
-	GET_TIMESTAMPS(7)
-	/* LDY: prepare_libfuse_request (read/write, end) */
+	fuse_latency_record_opcode(
+		se, in->opcode, FUSE_LATENCY_PREPARE_LIBFUSE_REQUEST,
+		fuse_latency_now_ns() - prepare_start_ns);
 	inarg = (void *) &in[1];
 	if (in->opcode == FUSE_WRITE && se->op.write_buf)
 		do_write_buf(req, in->nodeid, inarg, buf);
@@ -2738,9 +2869,92 @@ void fuse_lowlevel_help(void)
 "    -o auto_unmount        auto unmount on process termination\n");
 }
 
+int fuse_session_latency_snapshot_and_reset(struct fuse_session *se, int fd)
+{
+	static const char * const op_names[] = { "[read]", "[write]" };
+	static const char * const names[FUSE_LATENCY_MAX][FUSE_LATENCY_OP_MAX] = {
+		[FUSE_LATENCY_DEV_FUSE_READ] = {
+			"dev_fuse_read", "dev_fuse_read" },
+		[FUSE_LATENCY_DEV_FUSE_SPLICE_READ] = {
+			"dev_fuse_splice_read", "dev_fuse_splice_read" },
+		[FUSE_LATENCY_PREPARE_LIBFUSE_REQUEST] = {
+			"prepare_libfuse_request", "prepare_libfuse_request" },
+		[FUSE_LATENCY_BACKEND] = { "backend_read", "backend_write" },
+		[FUSE_LATENCY_PREPARE_REPLY] = {
+			"prepare_reply", "prepare_reply" },
+		[FUSE_LATENCY_DEV_FUSE_WRITEV] = {
+			"dev_fuse_writev", "dev_fuse_writev" },
+		[FUSE_LATENCY_DEV_FUSE_SPLICE_WRITE] = {
+			"dev_fuse_splice_write", "dev_fuse_splice_write" },
+	};
+	struct fuse_latency_stat snapshot[FUSE_LATENCY_OP_MAX][FUSE_LATENCY_MAX];
+	int shard_id;
+	int op;
+	int id;
+
+	if (!se || fd < 0)
+		return -EINVAL;
+
+	memset(snapshot, 0, sizeof(snapshot));
+	for (shard_id = 0; shard_id < FUSE_LATENCY_SHARDS; shard_id++) {
+		struct fuse_latency_shard *shard = &se->latency_shards[shard_id];
+
+		pthread_mutex_lock(&shard->lock);
+		for (op = 0; op < FUSE_LATENCY_OP_MAX; op++) {
+			for (id = 0; id < FUSE_LATENCY_MAX; id++) {
+				struct fuse_latency_stat *src = &shard->stats[op][id];
+				struct fuse_latency_stat *dst = &snapshot[op][id];
+
+				if (src->count) {
+					if (!dst->count || src->min_ns < dst->min_ns)
+						dst->min_ns = src->min_ns;
+					if (src->max_ns > dst->max_ns)
+						dst->max_ns = src->max_ns;
+				}
+				dst->count += src->count;
+				dst->total_ns += src->total_ns;
+			}
+		}
+		memset(shard->stats, 0, sizeof(shard->stats));
+		pthread_mutex_unlock(&shard->lock);
+	}
+
+	if (dprintf(fd,
+		    "# unit: ns\n"
+		    "%-7s %-28s %20s %20s %20s %20s %20s\n",
+		    "op", "name", "count", "avg_ns", "min_ns", "max_ns",
+		    "total_ns") < 0)
+		return -errno;
+
+	for (op = 0; op < FUSE_LATENCY_OP_MAX; op++) {
+		for (id = 0; id < FUSE_LATENCY_MAX; id++) {
+			struct fuse_latency_stat *stat = &snapshot[op][id];
+			uint64_t avg_ns = stat->count ?
+				stat->total_ns / stat->count : 0;
+
+			if (!names[id][op])
+				continue;
+			if (dprintf(fd,
+				    "%-7s %-28s %20llu %20llu %20llu %20llu %20llu\n",
+				    op_names[op], names[id][op],
+				    (unsigned long long)stat->count,
+				    (unsigned long long)avg_ns,
+				    (unsigned long long)(stat->count ?
+							 stat->min_ns : 0),
+				    (unsigned long long)(stat->count ?
+							 stat->max_ns : 0),
+				    (unsigned long long)stat->total_ns) < 0)
+				return -errno;
+		}
+	}
+
+	return 0;
+}
+
 void fuse_session_destroy(struct fuse_session *se)
 {
 	struct fuse_ll_pipe *llp;
+	int shard_id;
 
 	if (se->got_init && !se->got_destroy) {
 		if (se->op.destroy)
@@ -2750,6 +2964,8 @@ void fuse_session_destroy(struct fuse_session *se)
 	if (llp != NULL)
 		fuse_ll_pipe_free(llp);
 	pthread_key_delete(se->pipe_key);
+	for (shard_id = 0; shard_id < FUSE_LATENCY_SHARDS; shard_id++)
+		pthread_mutex_destroy(&se->latency_shards[shard_id].lock);
 	pthread_mutex_destroy(&se->lock);
 	free(se->cuse_data);
 	if (se->fd != -1)
@@ -2775,6 +2991,9 @@ int fuse_session_receive_buf_int(struct fuse_session *se, struct fuse_buf *buf,
 {
 	int err;
 	ssize_t res;
+	uint64_t receive_start_ns;
+
+	fuse_receive_latency.valid = 0;
 #ifdef HAVE_SPLICE
 	size_t bufsize = se->bufsize;
 	struct fuse_ll_pipe *llp;
@@ -2803,11 +3022,18 @@ int fuse_session_receive_buf_int(struct fuse_session *se, struct fuse_buf *buf,
 			goto fallback;
 	}
 
-	/* LDY: dev_fuse_read (read/write, start; splice path) */
+	receive_start_ns = fuse_latency_now_ns();
 	res = splice(ch ? ch->fd : se->fd,
 		     NULL, llp->pipe[1], NULL, bufsize, 0);
-	/* LDY: dev_fuse_read (read/write, end; splice path) */
 	err = errno;
+	if (res >= 0) {
+		fuse_receive_latency.se = se;
+		fuse_receive_latency.end_ns = fuse_latency_now_ns();
+		fuse_receive_latency.duration_ns =
+			fuse_receive_latency.end_ns - receive_start_ns;
+		fuse_receive_latency.id = FUSE_LATENCY_DEV_FUSE_SPLICE_READ;
+		fuse_receive_latency.valid = 1;
+	}
 
 	if (fuse_session_exited(se))
 		return 0;
@@ -2878,8 +3104,6 @@ int fuse_session_receive_buf_int(struct fuse_session *se, struct fuse_buf *buf,
 	}
 	buf->size = tmpbuf.size;
 
-	GET_TIMESTAMPS(6)
-
 	return res;
 
 fallback:
@@ -2894,13 +3118,17 @@ fallback:
 	}
 
 restart:
-	/* LDY: dev_fuse_read (read/write, start) */
+	receive_start_ns = fuse_latency_now_ns();
 	res = read(ch ? ch->fd : se->fd, buf->mem, se->bufsize);
-	/* LDY: dev_fuse_read (read/write, end) */
-
-	GET_TIMESTAMPS(6)
-
 	err = errno;
+	if (res >= 0) {
+		fuse_receive_latency.se = se;
+		fuse_receive_latency.end_ns = fuse_latency_now_ns();
+		fuse_receive_latency.duration_ns =
+			fuse_receive_latency.end_ns - receive_start_ns;
+		fuse_receive_latency.id = FUSE_LATENCY_DEV_FUSE_READ;
+		fuse_receive_latency.valid = 1;
+	}
 
 	if (fuse_session_exited(se))
 		return 0;
@@ -2938,6 +3166,7 @@ struct fuse_session *fuse_session_new(struct fuse_args *args,
 				      size_t op_size, void *userdata)
 {
 	int err;
+	int shard_id;
 	struct fuse_session *se;
 	struct mount_opts *mo;
 
@@ -3001,6 +3230,8 @@ struct fuse_session *fuse_session_new(struct fuse_args *args,
 	list_init_nreq(&se->notify_list);
 	se->notify_ctr = 1;
 	pthread_mutex_init(&se->lock, NULL);
+	for (shard_id = 0; shard_id < FUSE_LATENCY_SHARDS; shard_id++)
+		pthread_mutex_init(&se->latency_shards[shard_id].lock, NULL);
 
 	err = pthread_key_create(&se->pipe_key, fuse_ll_pipe_destructor);
 	if (err) {
@@ -3017,6 +3248,8 @@ struct fuse_session *fuse_session_new(struct fuse_args *args,
 	return se;
 
 out5:
+	for (shard_id = 0; shard_id < FUSE_LATENCY_SHARDS; shard_id++)
+		pthread_mutex_destroy(&se->latency_shards[shard_id].lock);
 	pthread_mutex_destroy(&se->lock);
 out4:
 	fuse_opt_free_args(args);

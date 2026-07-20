@@ -329,6 +329,32 @@ enum fuse_req_flag {
 	FR_ASYNC,
 };
 
+enum fuse_latency_op {
+	FUSE_LATENCY_OP_READ = 0,
+	FUSE_LATENCY_OP_WRITE,
+	FUSE_LATENCY_OP_MAX,
+};
+
+enum fuse_latency_id {
+	FUSE_LATENCY_GET_REQUEST = 0,
+	FUSE_LATENCY_PREPARE_CACHE,
+	FUSE_LATENCY_SUBMIT_REQUEST_SYNC,
+	FUSE_LATENCY_SUBMIT_REQUEST_ASYNC,
+	FUSE_LATENCY_ENQUEUE_TO_DEQUEUE,
+	FUSE_LATENCY_COPY_REQUEST_TO_USERSPACE,
+	FUSE_LATENCY_COPY_REPLY_TO_KERNEL,
+	FUSE_LATENCY_REPLY_COMPLETION,
+	FUSE_LATENCY_RELEASE_REQUEST,
+	FUSE_LATENCY_MAX,
+};
+
+enum fuse_latency_request_id {
+	FUSE_LATENCY_REQUEST_SUBMIT_SYNC = 0,
+	FUSE_LATENCY_REQUEST_ENQUEUE,
+	FUSE_LATENCY_REQUEST_REPLY_COMPLETION,
+	FUSE_LATENCY_REQUEST_MAX,
+};
+
 /**
  * A request to the client
  *
@@ -365,6 +391,9 @@ struct fuse_req {
 
 	/** Used to wake up the task waiting for completion of request*/
 	wait_queue_head_t waitq;
+
+	/* Per-request latency start timestamps. */
+	u64 latency_start_ns[FUSE_LATENCY_REQUEST_MAX];
 
 #if IS_ENABLED(CONFIG_VIRTIO_FS)
 	/** virtio-fs's physically contiguous buffer for in and out args */
@@ -1042,6 +1071,13 @@ int fuse_dev_init(void);
  * Cleanup the client device
  */
 void fuse_dev_cleanup(void);
+
+void fuse_latency_record(enum fuse_latency_op op,
+			 enum fuse_latency_id id, u64 duration_ns);
+void fuse_latency_record_opcode(unsigned int opcode,
+				enum fuse_latency_id id, u64 duration_ns);
+void fuse_latency_record_request(struct fuse_req *req,
+				 enum fuse_latency_id id, u64 duration_ns);
 
 int fuse_ctl_init(void);
 void __exit fuse_ctl_cleanup(void);

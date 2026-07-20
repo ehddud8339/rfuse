@@ -11,6 +11,38 @@
 
 struct mount_opts;
 
+enum fuse_latency_op {
+	FUSE_LATENCY_OP_READ = 0,
+	FUSE_LATENCY_OP_WRITE,
+	FUSE_LATENCY_OP_MAX,
+};
+
+enum fuse_latency_id {
+	FUSE_LATENCY_DEV_FUSE_READ = 0,
+	FUSE_LATENCY_DEV_FUSE_SPLICE_READ,
+	FUSE_LATENCY_PREPARE_LIBFUSE_REQUEST,
+	FUSE_LATENCY_BACKEND,
+	FUSE_LATENCY_PREPARE_REPLY,
+	FUSE_LATENCY_DEV_FUSE_WRITEV,
+	FUSE_LATENCY_DEV_FUSE_SPLICE_WRITE,
+	FUSE_LATENCY_MAX,
+};
+
+struct fuse_latency_stat {
+	uint64_t count;
+	uint64_t total_ns;
+	uint64_t min_ns;
+	uint64_t max_ns;
+};
+
+#define FUSE_LATENCY_SHARDS 64
+
+struct fuse_latency_shard {
+	pthread_mutex_t lock;
+	struct fuse_latency_stat
+		stats[FUSE_LATENCY_OP_MAX][FUSE_LATENCY_MAX];
+};
+
 struct fuse_req {
 	struct fuse_session *se;
 	uint64_t unique;
@@ -19,6 +51,11 @@ struct fuse_req {
 	struct fuse_ctx ctx;
 	struct fuse_chan *ch;
 	int interrupted;
+	uint32_t opcode;
+	uint64_t backend_start_ns;
+	uint64_t prepare_reply_start_ns;
+	unsigned int latency_backend_done : 1;
+	unsigned int latency_prepare_reply_started : 1;
 	unsigned int ioctl_64bit : 1;
 	union {
 		struct {
@@ -64,6 +101,7 @@ struct fuse_session {
 	struct fuse_notify_req notify_list;
 	size_t bufsize;
 	int error;
+	struct fuse_latency_shard latency_shards[FUSE_LATENCY_SHARDS];
 };
 
 struct fuse_chan {
@@ -136,4 +174,3 @@ int fuse_session_loop_mt_32(struct fuse_session *se, struct fuse_loop_config *co
 
 /* room needed in buffer to accommodate header */
 #define FUSE_BUFFER_HEADER_SIZE 0x1000
-

@@ -21,10 +21,11 @@
 #include <linux/swap.h>
 #include <linux/splice.h>
 #include <linux/sched.h>
-
+#include <linux/cpu.h>
+#include <linux/debugfs.h>
 #include <linux/ktime.h>
-#include <linux/time.h>
-#include <linux/timekeeping.h>
+#include <linux/percpu.h>
+#include <linux/uaccess.h>
 
 MODULE_ALIAS_MISCDEV(FUSE_MINOR);
 MODULE_ALIAS("devname:fuse");
@@ -34,32 +35,226 @@ MODULE_ALIAS("devname:fuse");
 #define FUSE_REQ_ID_STEP (1ULL << 1)
 
 static struct kmem_cache *fuse_req_cachep;
+static struct dentry *fuse_debugfs_dir;
 
+struct fuse_latency_stat {
+	u64 count;
+	u64 total_ns;
+	u64 min_ns;
+	u64 max_ns;
+};
 
-/* -1: (App) user syscall start 
-   0: request opcode (exception, not timestamps) 
-   1: enqueue complet, wait start
-   2: fuse daemon dequeued a request 
-   3: start args copy
-   4: end args copy
-   5: kernel -> user switch start
-   6: (libfuse) kernel->user switch end 
-   7: (userfs) ops start
-   8: (userfs) ops end
-   9: (libfuse) user -> kernel switch start 
-   10: user -> kernel switch end 
-   11: start return args copy
-   12: end return args copy
-   13: wake up app thread
-   14: (App) user syscall end
-*/
+struct fuse_latency_cpu_stats {
+	spinlock_t lock;
+	struct fuse_latency_stat stats[FUSE_LATENCY_OP_MAX][FUSE_LATENCY_MAX];
+};
 
-static u64 timestamps[14] = {0, };
-#ifdef DEBUG
-	#define GET_TIMESTAMPS(i) timestamps[i] = ktime_get_ns(); 
-#else 
-	#define GET_TIMESTAMPS(i) ;
-#endif
+struct fuse_latency_name {
+	const char *name[FUSE_LATENCY_OP_MAX];
+};
+
+struct fuse_latency_file {
+	char *buf;
+	size_t len;
+	struct fuse_latency_stat snapshot[FUSE_LATENCY_OP_MAX][FUSE_LATENCY_MAX];
+};
+
+static DEFINE_PER_CPU(struct fuse_latency_cpu_stats, fuse_latency_stats);
+
+static const struct fuse_latency_name fuse_latency_names[FUSE_LATENCY_MAX] = {
+	[FUSE_LATENCY_GET_REQUEST] = {
+		.name = { "get_request", "get_request" },
+	},
+	[FUSE_LATENCY_PREPARE_CACHE] = {
+		.name = { NULL, "prepare_cache" },
+	},
+	[FUSE_LATENCY_SUBMIT_REQUEST_SYNC] = {
+		.name = { "submit_request_sync", "submit_request_sync" },
+	},
+	[FUSE_LATENCY_SUBMIT_REQUEST_ASYNC] = {
+		.name = { "submit_request_async", "submit_request_async" },
+	},
+	[FUSE_LATENCY_ENQUEUE_TO_DEQUEUE] = {
+		.name = { "enqueue_to_dequeue", "enqueue_to_dequeue" },
+	},
+	[FUSE_LATENCY_COPY_REQUEST_TO_USERSPACE] = {
+		.name = { "copy_request_to_userspace", "copy_request_to_userspace" },
+	},
+	[FUSE_LATENCY_COPY_REPLY_TO_KERNEL] = {
+		.name = { "copy_reply_to_kernel", "copy_reply_to_kernel" },
+	},
+	[FUSE_LATENCY_REPLY_COMPLETION] = {
+		.name = { "reply_completion", "reply_completion" },
+	},
+	[FUSE_LATENCY_RELEASE_REQUEST] = {
+		.name = { "release_request", "release_request" },
+	},
+};
+
+#define FUSE_LATENCY_OUTPUT_SIZE	(PAGE_SIZE * 2)
+
+static bool fuse_latency_opcode_to_op(unsigned int opcode,
+				      enum fuse_latency_op *op)
+{
+	if (opcode == FUSE_READ) {
+		*op = FUSE_LATENCY_OP_READ;
+		return true;
+	}
+	if (opcode == FUSE_WRITE) {
+		*op = FUSE_LATENCY_OP_WRITE;
+		return true;
+	}
+
+	return false;
+}
+
+void fuse_latency_record(enum fuse_latency_op op,
+			 enum fuse_latency_id id, u64 duration_ns)
+{
+	struct fuse_latency_cpu_stats *cpu_stats;
+	struct fuse_latency_stat *stat;
+
+	if (op >= FUSE_LATENCY_OP_MAX || id >= FUSE_LATENCY_MAX)
+		return;
+
+	preempt_disable();
+	cpu_stats = this_cpu_ptr(&fuse_latency_stats);
+	spin_lock(&cpu_stats->lock);
+	stat = &cpu_stats->stats[op][id];
+	stat->count++;
+	stat->total_ns += duration_ns;
+	if (stat->count == 1 || duration_ns < stat->min_ns)
+		stat->min_ns = duration_ns;
+	if (duration_ns > stat->max_ns)
+		stat->max_ns = duration_ns;
+	spin_unlock(&cpu_stats->lock);
+	preempt_enable();
+}
+
+void fuse_latency_record_opcode(unsigned int opcode,
+				enum fuse_latency_id id, u64 duration_ns)
+{
+	enum fuse_latency_op op;
+
+	if (fuse_latency_opcode_to_op(opcode, &op))
+		fuse_latency_record(op, id, duration_ns);
+}
+
+void fuse_latency_record_request(struct fuse_req *req,
+				 enum fuse_latency_id id, u64 duration_ns)
+{
+	fuse_latency_record_opcode(req->in.h.opcode, id, duration_ns);
+}
+
+static void fuse_latency_snapshot_and_reset(
+	struct fuse_latency_stat snapshot[FUSE_LATENCY_OP_MAX][FUSE_LATENCY_MAX])
+{
+	int cpu;
+	int op;
+	int id;
+
+	memset(snapshot, 0, sizeof(struct fuse_latency_stat) *
+	       FUSE_LATENCY_OP_MAX * FUSE_LATENCY_MAX);
+
+	for_each_possible_cpu(cpu) {
+		struct fuse_latency_cpu_stats *cpu_stats;
+
+		cpu_stats = per_cpu_ptr(&fuse_latency_stats, cpu);
+		spin_lock(&cpu_stats->lock);
+		for (op = 0; op < FUSE_LATENCY_OP_MAX; op++) {
+			for (id = 0; id < FUSE_LATENCY_MAX; id++) {
+				struct fuse_latency_stat *src =
+					&cpu_stats->stats[op][id];
+				struct fuse_latency_stat *dst = &snapshot[op][id];
+
+				if (src->count) {
+					if (!dst->count || src->min_ns < dst->min_ns)
+						dst->min_ns = src->min_ns;
+					if (src->max_ns > dst->max_ns)
+						dst->max_ns = src->max_ns;
+				}
+				dst->count += src->count;
+				dst->total_ns += src->total_ns;
+			}
+		}
+		memset(cpu_stats->stats, 0, sizeof(cpu_stats->stats));
+		spin_unlock(&cpu_stats->lock);
+	}
+}
+
+static int fuse_latency_open(struct inode *inode, struct file *file)
+{
+	static const char * const op_names[] = { "[read]", "[write]" };
+	struct fuse_latency_file *latency_file;
+	int op;
+	int id;
+
+	latency_file = kzalloc(sizeof(*latency_file), GFP_KERNEL);
+	if (!latency_file)
+		return -ENOMEM;
+	latency_file->buf = kzalloc(FUSE_LATENCY_OUTPUT_SIZE, GFP_KERNEL);
+	if (!latency_file->buf) {
+		kfree(latency_file);
+		return -ENOMEM;
+	}
+
+	fuse_latency_snapshot_and_reset(latency_file->snapshot);
+	latency_file->len = scnprintf(
+		latency_file->buf, FUSE_LATENCY_OUTPUT_SIZE,
+		"# unit: ns\n"
+		"%-7s %-28s %20s %20s %20s %20s %20s\n",
+		"op", "name", "count", "avg_ns", "min_ns", "max_ns",
+		"total_ns");
+	for (op = 0; op < FUSE_LATENCY_OP_MAX; op++) {
+		for (id = 0; id < FUSE_LATENCY_MAX; id++) {
+			struct fuse_latency_stat *stat =
+				&latency_file->snapshot[op][id];
+			const char *name = fuse_latency_names[id].name[op];
+			u64 avg_ns;
+
+			if (!name)
+				continue;
+			avg_ns = stat->count ? stat->total_ns / stat->count : 0;
+			latency_file->len += scnprintf(
+				latency_file->buf + latency_file->len,
+				FUSE_LATENCY_OUTPUT_SIZE - latency_file->len,
+				"%-7s %-28s %20llu %20llu %20llu %20llu %20llu\n",
+				op_names[op], name, stat->count, avg_ns,
+				stat->count ? stat->min_ns : 0,
+				stat->count ? stat->max_ns : 0,
+				stat->total_ns);
+		}
+	}
+	file->private_data = latency_file;
+
+	return 0;
+}
+
+static ssize_t fuse_latency_read(struct file *file, char __user *buf,
+				 size_t count, loff_t *ppos)
+{
+	struct fuse_latency_file *latency_file = file->private_data;
+
+	return simple_read_from_buffer(buf, count, ppos, latency_file->buf,
+				       latency_file->len);
+}
+
+static int fuse_latency_release(struct inode *inode, struct file *file)
+{
+	struct fuse_latency_file *latency_file = file->private_data;
+
+	kfree(latency_file->buf);
+	kfree(latency_file);
+	return 0;
+}
+
+static const struct file_operations fuse_latency_fops = {
+	.owner = THIS_MODULE,
+	.open = fuse_latency_open,
+	.read = fuse_latency_read,
+	.release = fuse_latency_release,
+	.llseek = default_llseek,
+};
 
 static struct fuse_dev *fuse_get_dev(struct file *file)
 {
@@ -256,13 +451,23 @@ static void queue_request_and_unlock(struct fuse_iqueue *fiq,
 				     struct fuse_req *req)
 __releases(fiq->lock)
 {
+	u64 submit_duration_ns = 0;
+
 	req->in.h.len = sizeof(struct fuse_in_header) +
 		fuse_len_args(req->args->in_numargs,
 			      (struct fuse_arg *) req->args->in_args);
-	/* LDY: enqueue_to_dequeue (read/write, start) */
+	if (req->latency_start_ns[FUSE_LATENCY_REQUEST_SUBMIT_SYNC]) {
+		submit_duration_ns = ktime_get_ns() - req->latency_start_ns[
+			FUSE_LATENCY_REQUEST_SUBMIT_SYNC];
+		req->latency_start_ns[FUSE_LATENCY_REQUEST_SUBMIT_SYNC] = 0;
+	}
+	req->latency_start_ns[FUSE_LATENCY_REQUEST_ENQUEUE] = ktime_get_ns();
 	list_add_tail(&req->list, &fiq->pending);
 	fiq->ops->wake_pending_and_unlock(fiq);
-	/* LDY: submit_request (read/write, end) */
+	if (submit_duration_ns)
+		fuse_latency_record_request(
+			req, FUSE_LATENCY_SUBMIT_REQUEST_SYNC,
+			submit_duration_ns);
 }
 
 void fuse_queue_forget(struct fuse_conn *fc, struct fuse_forget_link *forget,
@@ -403,27 +608,10 @@ static void request_wait_answer(struct fuse_req *req)
 	struct fuse_iqueue *fiq = &fc->iq;
 	int err;
 
-#ifdef DEBUG
-	int i = 0;
-#endif
-
 	if (!fc->no_interrupt) {
 		/* Any signal may interrupt this */
-		GET_TIMESTAMPS(1)
 		err = wait_event_interruptible(req->waitq,
 					test_bit(FR_FINISHED, &req->flags));
-		GET_TIMESTAMPS(13)
-		
-#ifdef DEBUG
-		/* print all */
-		for(i = 0; i < 14; i++) {
-			if (i == 0) 
-				printk("fuse experiment opcode: %llu\n", timestamps[i]);
-			else if (i < 6 || i > 9)
-				printk("fuse experiment [%d]: %llu nsec\n", i, timestamps[i]);
-		}
-
-#endif
 		if (!err)
 			return;
 
@@ -465,7 +653,6 @@ static void __fuse_request_send(struct fuse_req *req)
 	struct fuse_iqueue *fiq = &req->fm->fc->iq;
 
 	BUG_ON(test_bit(FR_BACKGROUND, &req->flags));
-	/* LDY: submit_request (read/write, start) */
 	spin_lock(&fiq->lock);
 	if (!fiq->connected) {
 		spin_unlock(&fiq->lock);
@@ -527,7 +714,6 @@ static void fuse_force_creds(struct fuse_req *req)
 
 static void fuse_args_to_req(struct fuse_req *req, struct fuse_args *args)
 {
-	timestamps[0] = args->opcode;
 	req->in.h.opcode = args->opcode;
 	req->in.h.nodeid = args->nodeid;
 	req->args = args;
@@ -539,9 +725,10 @@ ssize_t fuse_simple_request(struct fuse_mount *fm, struct fuse_args *args)
 {
 	struct fuse_conn *fc = fm->fc;
 	struct fuse_req *req;
+	u64 get_request_start_ns;
 	ssize_t ret;
 
-	/* LDY: get_request (read/write, start) */
+	get_request_start_ns = ktime_get_ns();
 	if (args->force) {
 		atomic_inc(&fc->num_waiting);
 		req = fuse_request_alloc(fm, GFP_KERNEL | __GFP_NOFAIL);
@@ -557,11 +744,14 @@ ssize_t fuse_simple_request(struct fuse_mount *fm, struct fuse_args *args)
 		if (IS_ERR(req))
 			return PTR_ERR(req);
 	}
-	/* LDY: get_request (read/write, end) */
+	fuse_latency_record_opcode(args->opcode, FUSE_LATENCY_GET_REQUEST,
+				   ktime_get_ns() - get_request_start_ns);
 
 	/* Needs to be done after fuse_get_req() so that fc->minor is valid */
 	fuse_adjust_compat(fc, args);
 	fuse_args_to_req(req, args);
+	req->latency_start_ns[FUSE_LATENCY_REQUEST_SUBMIT_SYNC] =
+		ktime_get_ns();
 
 	if (!args->noreply)
 		__set_bit(FR_ISREPLY, &req->flags);
@@ -610,8 +800,10 @@ int fuse_simple_background(struct fuse_mount *fm, struct fuse_args *args,
 			    gfp_t gfp_flags)
 {
 	struct fuse_req *req;
+	u64 get_request_start_ns;
+	u64 submit_start_ns = ktime_get_ns();
 
-	/* LDY: get_request (read/write, start) */
+	get_request_start_ns = ktime_get_ns();
 	if (args->force) {
 		WARN_ON(!args->nocreds);
 		req = fuse_request_alloc(fm, gfp_flags);
@@ -624,15 +816,18 @@ int fuse_simple_background(struct fuse_mount *fm, struct fuse_args *args,
 		if (IS_ERR(req))
 			return PTR_ERR(req);
 	}
-	/* LDY: get_request (read/write, end) */
+	fuse_latency_record_opcode(args->opcode, FUSE_LATENCY_GET_REQUEST,
+				   ktime_get_ns() - get_request_start_ns);
 
 	fuse_args_to_req(req, args);
 
-	/* LDY: submit_request (read/write, start) */
 	if (!fuse_request_queue_background(req)) {
 		fuse_put_request(req);
 		return -ENOTCONN;
 	}
+	fuse_latency_record_opcode(args->opcode,
+				   FUSE_LATENCY_SUBMIT_REQUEST_ASYNC,
+				   ktime_get_ns() - submit_start_ns);
 
 	return 0;
 }
@@ -1255,6 +1450,7 @@ static ssize_t fuse_dev_do_read(struct fuse_dev *fud, struct file *file,
 	struct fuse_pqueue *fpq = &fud->pq;
 	struct fuse_req *req;
 	struct fuse_args *args;
+	u64 dequeue_duration_ns = 0;
 	unsigned reqsize;
 	unsigned int hash;
 
@@ -1288,8 +1484,6 @@ static ssize_t fuse_dev_do_read(struct fuse_dev *fud, struct file *file,
 		err = wait_event_interruptible_exclusive(fiq->waitq,
 				!fiq->connected || request_pending(fiq));
 
-		GET_TIMESTAMPS(2)
-
 		if (err)
 			return err;
 	}
@@ -1316,8 +1510,16 @@ static ssize_t fuse_dev_do_read(struct fuse_dev *fud, struct file *file,
 	req = list_entry(fiq->pending.next, struct fuse_req, list);
 	clear_bit(FR_PENDING, &req->flags);
 	list_del_init(&req->list);
-	/* LDY: enqueue_to_dequeue (read/write, end) */
+	dequeue_duration_ns = 0;
+	if (req->latency_start_ns[FUSE_LATENCY_REQUEST_ENQUEUE])
+		dequeue_duration_ns = ktime_get_ns() - req->latency_start_ns[
+			FUSE_LATENCY_REQUEST_ENQUEUE];
+	req->latency_start_ns[FUSE_LATENCY_REQUEST_ENQUEUE] = 0;
 	spin_unlock(&fiq->lock);
+	if (dequeue_duration_ns)
+		fuse_latency_record_request(
+			req, FUSE_LATENCY_ENQUEUE_TO_DEQUEUE,
+			dequeue_duration_ns);
 
 	args = req->args;
 	reqsize = req->in.h.len;
@@ -1345,14 +1547,17 @@ static ssize_t fuse_dev_do_read(struct fuse_dev *fud, struct file *file,
 	spin_unlock(&fpq->lock);
 	cs->req = req;
 
-	/* LDY: copy_request_to_userspace (read/write, start) */
-	GET_TIMESTAMPS(3)
-	err = fuse_copy_one(cs, &req->in.h, sizeof(req->in.h));
-	if (!err)
-		err = fuse_copy_args(cs, args->in_numargs, args->in_pages,
-				     (struct fuse_arg *) args->in_args, 0);
-	GET_TIMESTAMPS(4)
-	/* LDY: copy_request_to_userspace (read/write, end) */
+	{
+		u64 copy_start_ns = ktime_get_ns();
+
+		err = fuse_copy_one(cs, &req->in.h, sizeof(req->in.h));
+		if (!err)
+			err = fuse_copy_args(cs, args->in_numargs, args->in_pages,
+					     (struct fuse_arg *) args->in_args, 0);
+		fuse_latency_record_request(
+			req, FUSE_LATENCY_COPY_REQUEST_TO_USERSPACE,
+			ktime_get_ns() - copy_start_ns);
+	}
 
 	fuse_copy_finish(cs);
 	spin_lock(&fpq->lock);
@@ -1379,8 +1584,6 @@ static ssize_t fuse_dev_do_read(struct fuse_dev *fud, struct file *file,
 	if (test_bit(FR_INTERRUPTED, &req->flags))
 		queue_interrupt(req);
 	fuse_put_request(req);
-
-	GET_TIMESTAMPS(5)
 
 	return reqsize;
 
@@ -1893,7 +2096,6 @@ static int copy_out_args(struct fuse_copy_state *cs, struct fuse_args *args,
 			return -EINVAL;
 		lastarg->size -= diffsize;
 	}
-	/* LDY: copy_to_cache is included here when out_pages is set. */
 	return fuse_copy_args(cs, args->out_numargs, args->out_pages,
 			      args->out_args, args->page_zeroing);
 }
@@ -1909,6 +2111,7 @@ static ssize_t fuse_dev_do_write(struct fuse_dev *fud,
 				 struct fuse_copy_state *cs, size_t nbytes)
 {
 	int err;
+	u64 completion_start_ns;
 	struct fuse_conn *fc = fud->fc;
 	struct fuse_pqueue *fpq = &fud->pq;
 	struct fuse_req *req;
@@ -1976,17 +2179,17 @@ static ssize_t fuse_dev_do_write(struct fuse_dev *fud,
 	cs->req = req;
 	if (!req->args->page_replace)
 		cs->move_pages = 0;
-	/* LDY: copy_reply_to_kernel (read/write, start) */
-	GET_TIMESTAMPS(11)
-	if (oh.error)
+	if (oh.error) {
 		err = nbytes != sizeof(oh) ? -EINVAL : 0;
-	else {
-		/* LDY: copy_to_cache (read, start; out_pages path only) */
+	} else {
+		u64 copy_start_ns = ktime_get_ns();
+
 		err = copy_out_args(cs, req->args, nbytes);
-		/* LDY: copy_to_cache (read, end; out_pages path only) */
+		fuse_latency_record_request(
+			req, FUSE_LATENCY_COPY_REPLY_TO_KERNEL,
+			ktime_get_ns() - copy_start_ns);
 	}
-	GET_TIMESTAMPS(12)
-	/* LDY: copy_reply_to_kernel (read/write, end) */
+	completion_start_ns = ktime_get_ns();
 	fuse_copy_finish(cs);
 
 	spin_lock(&fpq->lock);
@@ -1998,10 +2201,16 @@ static ssize_t fuse_dev_do_write(struct fuse_dev *fud,
 	if (!test_bit(FR_PRIVATE, &req->flags))
 		list_del_init(&req->list);
 	spin_unlock(&fpq->lock);
-	/* LDY: reply_completion (read/write, end) */
-	/* LDY: release_request (read/write, start) */
-	fuse_request_end(req);
-	/* LDY: release_request (read/write, end) */
+	fuse_latency_record_request(req, FUSE_LATENCY_REPLY_COMPLETION,
+				    ktime_get_ns() - completion_start_ns);
+	{
+		unsigned int opcode = req->in.h.opcode;
+		u64 release_start_ns = ktime_get_ns();
+
+		fuse_request_end(req);
+		fuse_latency_record_opcode(opcode, FUSE_LATENCY_RELEASE_REQUEST,
+					   ktime_get_ns() - release_start_ns);
+	}
 out:
 	return err ? err : nbytes;
 
@@ -2022,8 +2231,6 @@ static ssize_t fuse_dev_write(struct kiocb *iocb, struct iov_iter *from)
 		return -EINVAL;
 
 	fuse_copy_init(&cs, 0, from);
-	/* LDY: reply_completion (read/write, start) */
-	GET_TIMESTAMPS(10)
 	return fuse_dev_do_write(fud, &cs, iov_iter_count(from));
 }
 
@@ -2105,7 +2312,6 @@ static ssize_t fuse_dev_splice_write(struct pipe_inode_info *pipe,
 	if (flags & SPLICE_F_MOVE)
 		cs.move_pages = 1;
 
-	/* LDY: reply_completion (read, start; splice path) */
 	ret = fuse_dev_do_write(fud, &cs, len);
 
 	pipe_lock(pipe);
@@ -2378,19 +2584,45 @@ static struct miscdevice fuse_miscdevice = {
 
 int __init fuse_dev_init(void)
 {
+	struct dentry *file;
+	int cpu;
 	int err = -ENOMEM;
+
 	fuse_req_cachep = kmem_cache_create("fuse_request",
 					    sizeof(struct fuse_req),
 					    0, 0, NULL);
 	if (!fuse_req_cachep)
 		goto out;
 
+	for_each_possible_cpu(cpu) {
+		struct fuse_latency_cpu_stats *cpu_stats;
+
+		cpu_stats = per_cpu_ptr(&fuse_latency_stats, cpu);
+		spin_lock_init(&cpu_stats->lock);
+	}
 	err = misc_register(&fuse_miscdevice);
 	if (err)
 		goto out_cache_clean;
 
+	fuse_debugfs_dir = debugfs_create_dir("fuse", NULL);
+	if (IS_ERR_OR_NULL(fuse_debugfs_dir)) {
+		err = fuse_debugfs_dir ? PTR_ERR(fuse_debugfs_dir) : -ENOMEM;
+		goto out_misc_deregister;
+	}
+	file = debugfs_create_file("latency_breakdown", 0400,
+				   fuse_debugfs_dir, NULL, &fuse_latency_fops);
+	if (IS_ERR_OR_NULL(file)) {
+		err = file ? PTR_ERR(file) : -ENOMEM;
+		goto out_debugfs_remove;
+	}
+
 	return 0;
 
+ out_debugfs_remove:
+	debugfs_remove_recursive(fuse_debugfs_dir);
+	fuse_debugfs_dir = NULL;
+ out_misc_deregister:
+	misc_deregister(&fuse_miscdevice);
  out_cache_clean:
 	kmem_cache_destroy(fuse_req_cachep);
  out:
@@ -2399,6 +2631,8 @@ int __init fuse_dev_init(void)
 
 void fuse_dev_cleanup(void)
 {
+	debugfs_remove_recursive(fuse_debugfs_dir);
+	fuse_debugfs_dir = NULL;
 	misc_deregister(&fuse_miscdevice);
 	kmem_cache_destroy(fuse_req_cachep);
 }

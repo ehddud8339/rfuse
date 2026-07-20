@@ -2049,6 +2049,15 @@ void fuse_session_unmount(struct fuse_session *se);
  */
 void fuse_session_destroy(struct fuse_session *se);
 
+/**
+ * Write a latency snapshot to a file descriptor and reset the counters.
+ *
+ * @param se the session
+ * @param fd output file descriptor
+ * @return 0 on success, -errno on failure
+ */
+int fuse_session_latency_snapshot_and_reset(struct fuse_session *se, int fd);
+
 /* ----------------------------------------------------------- *
  * Custom event loop support                                   *
  * ----------------------------------------------------------- */
