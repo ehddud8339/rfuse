@@ -1058,8 +1058,8 @@ static bool rfuse_block_alloc(struct fuse_conn *fc, bool for_background, int riq
 
 static bool rfuse_background_submission_available(struct rfuse_iqueue *riq)
 {
-  return true;	
-  // return riq->active_background < riq->max_background;
+  // return true;	
+  return riq->active_background < riq->max_background;
 }
 
 // Get a unique request number 
@@ -1349,46 +1349,41 @@ static int select_numa_aware_v2(struct fuse_conn *fc,
 	if (fi)
 		nodeid = READ_ONCE(fi->nodeid);
 
-  for (i = 0; i < 3; i++) {
+  // for (i = 0; i < 3; i++) {
   // for (;;) {
-		int idx = start_idx;
-		int riq_id = numa_group[numa_id][idx];
-		struct rfuse_iqueue *riq = NULL;
+	int idx = start_idx;
+	int riq_id = numa_group[numa_id][idx];
+	struct rfuse_iqueue *riq = NULL;
 
-		if (riq_id >= 0 && riq_id < RFUSE_NUM_IQUEUE)
-			riq = fc->riq[riq_id];
+	if (riq_id >= 0 && riq_id < RFUSE_NUM_IQUEUE)
+		riq = fc->riq[riq_id];
 
-		if (nodeid && riq) {
-			u64 old = READ_ONCE(riq->stream_hint);
+    
+	if (nodeid && riq) {
+		u64 old = READ_ONCE(riq->stream_hint);
 
-			/* LDY: riq별 stream_hint는 최근 file stream의 nodeid를 기억한다.
-			 * 현재 CPU riq의 hint와 현재 요청 fi->nodeid가 다르면 short-flow의
-			 * 첫 요청으로 보고 local wake latency를 줄이기 위해 current riq를
-			 * 선택한다. 같으면 streaming 요청으로 보고 app/daemon runqueue 경쟁을
-			 * 피하기 위해 current riq를 제외한 기존 remote 선택 경로로 보낸다.
-			 */
-			if (old != nodeid) {
-				WRITE_ONCE(riq->stream_hint, nodeid);
-				return riq_id;
-			}
+		if (old != nodeid) {
+			WRITE_ONCE(riq->stream_hint, nodeid);
+			return riq_id;
 		}
-
-		for (offset = 1; offset < NUM_NUMA_NODES; offset++) {
-			idx = (start_idx + offset) % NUM_NUMA_NODES;
-			riq_id = numa_group[numa_id][idx];
-			if (riq_id < 0 || riq_id >= RFUSE_NUM_IQUEUE)
-				continue;
-
-			riq = fc->riq[riq_id];
-			if (!riq)
-				continue;
-
-			if ((READ_ONCE(riq->num_background) <= READ_ONCE(riq->congestion_threshold)) ||
-			    (READ_ONCE(riq->sbuf_max_free_hint) >= requested_pages))
-				return riq_id;
-		}
-		cond_resched();
 	}
+    
+	for (offset = 1; offset < NUM_NUMA_NODES; offset++) {
+		idx = (start_idx + offset) % NUM_NUMA_NODES;
+		riq_id = numa_group[numa_id][idx];
+		if (riq_id < 0 || riq_id >= RFUSE_NUM_IQUEUE)
+			continue;
+
+		riq = fc->riq[riq_id];
+		if (!riq)
+			continue;
+
+		if ((READ_ONCE(riq->num_background) <= READ_ONCE(riq->congestion_threshold)) ||
+			  (READ_ONCE(riq->sbuf_max_free_hint) >= requested_pages))
+			return riq_id;
+	}
+		// cond_resched();
+	// }
 
 	return cpu_id;
 }
@@ -1400,6 +1395,7 @@ struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc,
 	int id;
 
 	id = select_numa_aware_v2(fc, fi, sbuf_len);
+  // id = select_round_robin(fc);
 
 	return fc->riq[id];
 }
@@ -2131,8 +2127,8 @@ static int rfuse_queue_request(struct rfuse_req *r_req)
 		__rfuse_get_request(r_req);
 	rfuse_submit_pending_tail(riq);				// Commit entry
 	spin_unlock(&riq->lock);					// unlock
-		if(waitqueue_active(&riq->idle_user_waitq)){
-			wake_up(&riq->idle_user_waitq);		// Wake up idle user thread
+	if(waitqueue_active(&riq->idle_user_waitq)){
+		wake_up(&riq->idle_user_waitq);		// Wake up idle user thread
 	}
 	return 0;
 }
