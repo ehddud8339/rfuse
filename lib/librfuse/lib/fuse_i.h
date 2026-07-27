@@ -176,7 +176,9 @@ int old_fuse_session_loop_mt_32(struct fuse_session *se, struct fuse_loop_config
 
 
 // RFUSE
-bool rfuse_read_queue(struct rfuse_worker *w, struct rfuse_mt *mt, struct fuse_chan *ch, int forget);
+bool rfuse_read_queue(struct rfuse_worker *w, struct rfuse_mt *mt,
+		      struct fuse_chan *ch, int forget,
+		      uint64_t mt_lock_wait_ns);
 
 struct fuse_chan *rfuse_chan_get(struct fuse_chan *ch);
 void rfuse_chan_put(struct fuse_chan *ch);

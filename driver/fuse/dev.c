@@ -452,6 +452,7 @@ static void queue_request_and_unlock(struct fuse_iqueue *fiq,
 __releases(fiq->lock)
 {
 	u64 submit_duration_ns = 0;
+	unsigned int opcode = req->in.h.opcode;
 
 	req->in.h.len = sizeof(struct fuse_in_header) +
 		fuse_len_args(req->args->in_numargs,
@@ -465,9 +466,8 @@ __releases(fiq->lock)
 	list_add_tail(&req->list, &fiq->pending);
 	fiq->ops->wake_pending_and_unlock(fiq);
 	if (submit_duration_ns)
-		fuse_latency_record_request(
-			req, FUSE_LATENCY_SUBMIT_REQUEST_SYNC,
-			submit_duration_ns);
+		fuse_latency_record_opcode(opcode,
+			FUSE_LATENCY_SUBMIT_REQUEST_SYNC, submit_duration_ns);
 }
 
 void fuse_queue_forget(struct fuse_conn *fc, struct fuse_forget_link *forget,
@@ -725,10 +725,9 @@ ssize_t fuse_simple_request(struct fuse_mount *fm, struct fuse_args *args)
 {
 	struct fuse_conn *fc = fm->fc;
 	struct fuse_req *req;
-	u64 get_request_start_ns;
+	u64 submit_start_ns = ktime_get_ns();
 	ssize_t ret;
 
-	get_request_start_ns = ktime_get_ns();
 	if (args->force) {
 		atomic_inc(&fc->num_waiting);
 		req = fuse_request_alloc(fm, GFP_KERNEL | __GFP_NOFAIL);
@@ -745,13 +744,13 @@ ssize_t fuse_simple_request(struct fuse_mount *fm, struct fuse_args *args)
 			return PTR_ERR(req);
 	}
 	fuse_latency_record_opcode(args->opcode, FUSE_LATENCY_GET_REQUEST,
-				   ktime_get_ns() - get_request_start_ns);
+				   ktime_get_ns() - submit_start_ns);
 
 	/* Needs to be done after fuse_get_req() so that fc->minor is valid */
 	fuse_adjust_compat(fc, args);
 	fuse_args_to_req(req, args);
 	req->latency_start_ns[FUSE_LATENCY_REQUEST_SUBMIT_SYNC] =
-		ktime_get_ns();
+		submit_start_ns;
 
 	if (!args->noreply)
 		__set_bit(FR_ISREPLY, &req->flags);

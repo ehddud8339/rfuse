@@ -46,9 +46,23 @@ struct rfuse_latency_stat {
 	u64 max_ns;
 };
 
+enum rfuse_readahead_mode {
+	RFUSE_READAHEAD_SYNC = 0,
+	RFUSE_READAHEAD_ASYNC,
+	RFUSE_READAHEAD_MODE_MAX,
+};
+
+struct rfuse_readahead_count {
+	u64 requests;
+	u64 pages;
+	u64 bytes;
+};
+
 struct rfuse_latency_cpu_stats {
 	spinlock_t lock;
 	struct rfuse_latency_stat stats[RFUSE_LATENCY_OP_MAX][RFUSE_LATENCY_MAX];
+	u64 enqueue_waitqueue_count[RFUSE_LATENCY_OP_MAX][2];
+	struct rfuse_readahead_count readahead[RFUSE_READAHEAD_MODE_MAX];
 };
 
 struct rfuse_latency_name {
@@ -59,6 +73,8 @@ struct rfuse_latency_file {
 	char *buf;
 	size_t len;
 	struct rfuse_latency_stat snapshot[RFUSE_LATENCY_OP_MAX][RFUSE_LATENCY_MAX];
+	u64 enqueue_waitqueue_snapshot[RFUSE_LATENCY_OP_MAX][2];
+	struct rfuse_readahead_count readahead[RFUSE_READAHEAD_MODE_MAX];
 };
 
 static DEFINE_PER_CPU(struct rfuse_latency_cpu_stats, rfuse_latency_stats);
@@ -87,6 +103,18 @@ static const struct rfuse_latency_name rfuse_latency_names[RFUSE_LATENCY_MAX] = 
 	},
 	[RFUSE_LATENCY_ENQUEUE_TO_DEQUEUE] = {
 		.name = { "enqueue_to_dequeue", "enqueue_to_dequeue" },
+	},
+	[RFUSE_LATENCY_MT_LOCK_WAIT] = {
+		.name = {
+			"pre_dequeue_mt_lock_wait",
+			"pre_dequeue_mt_lock_wait",
+		},
+	},
+	[RFUSE_LATENCY_RIQ_LOCK_WAIT] = {
+		.name = {
+			"pending_riq_lock_wait",
+			"pending_riq_lock_wait",
+		},
 	},
 	[RFUSE_LATENCY_PREPARE_LIBRFUSE_CACHE] = {
 		.name = { NULL, "prepare_librfuse_cache" },
@@ -154,6 +182,25 @@ void rfuse_latency_record(enum rfuse_latency_op op,
 	preempt_enable();
 }
 
+void rfuse_readahead_count_record(bool is_async, unsigned int pages,
+				  size_t bytes)
+{
+	struct rfuse_latency_cpu_stats *cpu_stats;
+	struct rfuse_readahead_count *count;
+	enum rfuse_readahead_mode mode;
+
+	mode = is_async ? RFUSE_READAHEAD_ASYNC : RFUSE_READAHEAD_SYNC;
+	preempt_disable();
+	cpu_stats = this_cpu_ptr(&rfuse_latency_stats);
+	spin_lock(&cpu_stats->lock);
+	count = &cpu_stats->readahead[mode];
+	count->requests++;
+	count->pages += pages;
+	count->bytes += bytes;
+	spin_unlock(&cpu_stats->lock);
+	preempt_enable();
+}
+
 void rfuse_latency_record_request(struct rfuse_req *r_req,
 				  enum rfuse_latency_id id,
 				  u64 duration_ns)
@@ -162,6 +209,22 @@ void rfuse_latency_record_request(struct rfuse_req *r_req,
 
 	if (rfuse_latency_request_op(r_req, &op))
 		rfuse_latency_record(op, id, duration_ns);
+}
+
+void rfuse_enqueue_waitqueue_record(struct rfuse_req *r_req, bool active)
+{
+	struct rfuse_latency_cpu_stats *cpu_stats;
+	enum rfuse_latency_op op;
+
+	if (!rfuse_latency_request_op(r_req, &op))
+		return;
+
+	preempt_disable();
+	cpu_stats = this_cpu_ptr(&rfuse_latency_stats);
+	spin_lock(&cpu_stats->lock);
+	cpu_stats->enqueue_waitqueue_count[op][active]++;
+	spin_unlock(&cpu_stats->lock);
+	preempt_enable();
 }
 
 void rfuse_latency_finish_request(struct rfuse_req *r_req)
@@ -178,12 +241,26 @@ void rfuse_latency_finish_request(struct rfuse_req *r_req)
 			RFUSE_LATENCY_DEV_RFUSE_PWRITE,
 	};
 	u64 done_mask;
+	u64 lock_wait_ns;
 	u64 now_ns;
 	int id;
 
 	done_mask = xchg(&r_req->latency_done_mask, 0);
 	if (!done_mask)
 		return;
+
+	lock_wait_ns = (done_mask >> RFUSE_LATENCY_MT_LOCK_WAIT_SHIFT) &
+		       RFUSE_LATENCY_LOCK_WAIT_MASK;
+	if (lock_wait_ns)
+		rfuse_latency_record_request(
+			r_req, RFUSE_LATENCY_MT_LOCK_WAIT,
+			lock_wait_ns);
+	lock_wait_ns = (done_mask >> RFUSE_LATENCY_RIQ_LOCK_WAIT_SHIFT) &
+		       RFUSE_LATENCY_LOCK_WAIT_MASK;
+	if (lock_wait_ns)
+		rfuse_latency_record_request(
+			r_req, RFUSE_LATENCY_RIQ_LOCK_WAIT,
+			lock_wait_ns);
 
 	for (id = RFUSE_LATENCY_SHARED_ENQUEUE_TO_DEQUEUE;
 	     id < RFUSE_LATENCY_SHARED_REPLY_COMPLETION; id++) {
@@ -210,15 +287,22 @@ void rfuse_latency_finish_request(struct rfuse_req *r_req)
 }
 
 static void rfuse_latency_snapshot_and_reset(
-	struct rfuse_latency_stat snapshot[RFUSE_LATENCY_OP_MAX][RFUSE_LATENCY_MAX])
+	struct rfuse_latency_stat snapshot[RFUSE_LATENCY_OP_MAX][RFUSE_LATENCY_MAX],
+	u64 enqueue_waitqueue_snapshot[RFUSE_LATENCY_OP_MAX][2],
+	struct rfuse_readahead_count readahead[RFUSE_READAHEAD_MODE_MAX])
 {
 	int cpu;
 	int op;
 	int id;
+	int mode;
 
 	memset(snapshot, 0,
 	       sizeof(struct rfuse_latency_stat) * RFUSE_LATENCY_OP_MAX *
 	       RFUSE_LATENCY_MAX);
+	memset(enqueue_waitqueue_snapshot, 0,
+	       sizeof(u64) * RFUSE_LATENCY_OP_MAX * 2);
+	memset(readahead, 0,
+	       sizeof(struct rfuse_readahead_count) * RFUSE_READAHEAD_MODE_MAX);
 
 	for_each_possible_cpu(cpu) {
 		struct rfuse_latency_cpu_stats *cpu_stats;
@@ -241,8 +325,21 @@ static void rfuse_latency_snapshot_and_reset(
 				dst->count += src->count;
 				dst->total_ns += src->total_ns;
 			}
+			enqueue_waitqueue_snapshot[op][0] +=
+				cpu_stats->enqueue_waitqueue_count[op][0];
+			enqueue_waitqueue_snapshot[op][1] +=
+				cpu_stats->enqueue_waitqueue_count[op][1];
+		}
+		for (mode = 0; mode < RFUSE_READAHEAD_MODE_MAX; mode++) {
+			readahead[mode].requests +=
+				cpu_stats->readahead[mode].requests;
+			readahead[mode].pages += cpu_stats->readahead[mode].pages;
+			readahead[mode].bytes += cpu_stats->readahead[mode].bytes;
 		}
 		memset(cpu_stats->stats, 0, sizeof(cpu_stats->stats));
+		memset(cpu_stats->enqueue_waitqueue_count, 0,
+		       sizeof(cpu_stats->enqueue_waitqueue_count));
+		memset(cpu_stats->readahead, 0, sizeof(cpu_stats->readahead));
 		spin_unlock(&cpu_stats->lock);
 	}
 }
@@ -257,6 +354,9 @@ static void rfuse_latency_reset(void)
 		cpu_stats = per_cpu_ptr(&rfuse_latency_stats, cpu);
 		spin_lock(&cpu_stats->lock);
 		memset(cpu_stats->stats, 0, sizeof(cpu_stats->stats));
+		memset(cpu_stats->enqueue_waitqueue_count, 0,
+		       sizeof(cpu_stats->enqueue_waitqueue_count));
+		memset(cpu_stats->readahead, 0, sizeof(cpu_stats->readahead));
 		spin_unlock(&cpu_stats->lock);
 	}
 }
@@ -264,9 +364,11 @@ static void rfuse_latency_reset(void)
 static int rfuse_latency_open(struct inode *inode, struct file *file)
 {
 	static const char * const op_names[] = { "[read]", "[write]" };
+	static const char * const readahead_mode_names[] = { "sync", "async" };
 	struct rfuse_latency_file *latency_file;
 	int op;
 	int id;
+	int mode;
 
 	latency_file = kzalloc(sizeof(*latency_file), GFP_KERNEL);
 	if (!latency_file)
@@ -277,10 +379,15 @@ static int rfuse_latency_open(struct inode *inode, struct file *file)
 		return -ENOMEM;
 	}
 
-	rfuse_latency_snapshot_and_reset(latency_file->snapshot);
+	rfuse_latency_snapshot_and_reset(
+		latency_file->snapshot,
+		latency_file->enqueue_waitqueue_snapshot,
+		latency_file->readahead);
 	latency_file->len = scnprintf(
 		latency_file->buf, RFUSE_LATENCY_OUTPUT_SIZE,
 		"# unit: ns\n"
+		"# *_lock_wait count includes contended acquisitions only\n"
+		"# *_lock_wait duration saturates at 268435455 ns\n"
 		"%-7s %-28s %20s %20s %20s %20s %20s\n",
 		"op", "name", "count", "avg_ns", "min_ns", "max_ns",
 		"total_ns");
@@ -303,6 +410,39 @@ static int rfuse_latency_open(struct inode *inode, struct file *file)
 				stat->count ? stat->max_ns : 0,
 				stat->total_ns);
 		}
+	}
+	latency_file->len += scnprintf(
+		latency_file->buf + latency_file->len,
+		RFUSE_LATENCY_OUTPUT_SIZE - latency_file->len,
+		"\n# idle_user_waitq state observed at enqueue\n"
+		"%-7s %20s %20s %20s\n",
+		"op", "inactive", "active", "total");
+	for (op = 0; op < RFUSE_LATENCY_OP_MAX; op++) {
+		u64 inactive = latency_file->enqueue_waitqueue_snapshot[op][0];
+		u64 active = latency_file->enqueue_waitqueue_snapshot[op][1];
+
+		latency_file->len += scnprintf(
+			latency_file->buf + latency_file->len,
+			RFUSE_LATENCY_OUTPUT_SIZE - latency_file->len,
+			"%-7s %20llu %20llu %20llu\n",
+			op_names[op], inactive, active, inactive + active);
+	}
+	latency_file->len += scnprintf(
+		latency_file->buf + latency_file->len,
+		RFUSE_LATENCY_OUTPUT_SIZE - latency_file->len,
+		"\n# readahead submit counts\n"
+		"%-7s %20s %20s %20s\n",
+		"mode", "requests", "pages", "bytes");
+	for (mode = 0; mode < RFUSE_READAHEAD_MODE_MAX; mode++) {
+		struct rfuse_readahead_count *count =
+			&latency_file->readahead[mode];
+
+		latency_file->len += scnprintf(
+			latency_file->buf + latency_file->len,
+			RFUSE_LATENCY_OUTPUT_SIZE - latency_file->len,
+			"%-7s %20llu %20llu %20llu\n",
+			readahead_mode_names[mode], count->requests, count->pages,
+			count->bytes);
 	}
 	file->private_data = latency_file;
 

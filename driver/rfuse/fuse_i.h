@@ -1467,9 +1467,12 @@ void rfuse_release_sbuf(struct rfuse_req *r_req);
 
 void rfuse_latency_record(enum rfuse_latency_op op,
 			  enum rfuse_latency_id id, u64 duration_ns);
+void rfuse_readahead_count_record(bool is_async, unsigned int pages,
+				  size_t bytes);
 void rfuse_latency_record_request(struct rfuse_req *r_req,
 				  enum rfuse_latency_id id,
 				  u64 duration_ns);
+void rfuse_enqueue_waitqueue_record(struct rfuse_req *r_req, bool active);
 void rfuse_latency_finish_request(struct rfuse_req *r_req);
 
 // Queue into the forget queue

@@ -1677,6 +1677,7 @@ static ssize_t rfuse_send_write_sync(struct kiocb *iocb,
 	ssize_t copied = 0;
 	ssize_t outsize;
 	int err;
+	u64 latency_start_ns;
 
 	in = (struct fuse_write_in *)&r_req->args;
 	in->fh = ff->fh;
@@ -1687,12 +1688,18 @@ static ssize_t rfuse_send_write_sync(struct kiocb *iocb,
 
 	r_req->in.opcode = FUSE_WRITE;
 	r_req->in.nodeid = ff->nodeid;
-
+	latency_start_ns = ktime_get_ns();
 	err = rfuse_reserve_sbuf(r_req, count, RFUSE_PAYLOAD_IN, true);
+	rfuse_latency_record(RFUSE_LATENCY_OP_WRITE, RFUSE_LATENCY_PREPARE_SBP,
+			     ktime_get_ns() - latency_start_ns);
 	if (err)
 		goto out_put_req;
 
+	latency_start_ns = ktime_get_ns();
 	copied = rfuse_sbuf_copy_from_iter(r_req, ii, count);
+	rfuse_latency_record(RFUSE_LATENCY_OP_WRITE,
+			     RFUSE_LATENCY_COPY_FROM_ITER,
+			     ktime_get_ns() - latency_start_ns);
 	if (copied < 0) {
 		err = copied;
 		goto out_put_req;
@@ -1701,24 +1708,29 @@ static ssize_t rfuse_send_write_sync(struct kiocb *iocb,
 		err = -EFAULT;
 		goto out_put_req;
 	}
-
 	in->size = copied;
 	r_req->in.arglen[0] = copied;
 
+	if (LDY_NO_PAGE_CACHE) {
+		int apply_err;
+
+		latency_start_ns = ktime_get_ns();
+		apply_err = rfuse_apply_to_page(file->f_mapping, r_req, pos,
+						pos + copied - 1, copied);
+		rfuse_latency_record(RFUSE_LATENCY_OP_WRITE,
+				     RFUSE_LATENCY_COPY_TO_CACHE,
+				     ktime_get_ns() - latency_start_ns);
+		if (apply_err)
+			mapping_set_error(file->f_mapping, apply_err);
+	}
+
+	WRITE_ONCE(r_req->latency_shared_ns[
+		RFUSE_LATENCY_SHARED_SUBMIT_REQUEST], ktime_get_ns());
 	err = rfuse_simple_request(r_req);
 	out = (struct fuse_write_out *)&r_req->args;
 	if (!err && out->size > copied)
 		err = -EIO;
 	outsize = out->size;
-
-	if (!err && LDY_NO_PAGE_CACHE && outsize > 0) {
-		int apply_err;
-
-		apply_err = rfuse_apply_to_page(file->f_mapping, r_req, pos,
-						pos + outsize - 1, outsize);
-		if (apply_err)
-			mapping_set_error(file->f_mapping, apply_err);
-	}
 
 	rfuse_put_request(r_req);
 
@@ -1751,7 +1763,8 @@ static ssize_t rfuse_perform_write_sbuf(struct kiocb *iocb,
 	struct fuse_mount *fm = get_fuse_mount(inode);
 	struct fuse_inode *fi = get_fuse_inode(inode);
 	size_t write_count = iov_iter_count(ii);
-	bool use_async = rfuse_async_allowed(iocb);
+	// bool use_async = rfuse_async_allowed(iocb);
+  bool use_async = false;
 	bool async_used = false;
 	int err = 0;
 	ssize_t res = 0;
@@ -1802,18 +1815,22 @@ static ssize_t rfuse_perform_write_sbuf(struct kiocb *iocb,
 		 * chunk 단위로 rfuse_send_write_sync()에 전달한다. page cache/fallback
 		 * 경로는 사용하지 않는다.
 		 */
-		do {
+			do {
 			struct rfuse_req *r_req;
 			ssize_t count;
+			u64 latency_start_ns;
 			size_t bytes = min_t(size_t, iov_iter_count(ii),
 					     fc->max_write);
 
+			latency_start_ns = ktime_get_ns();
 			r_req = rfuse_get_req(fm, false, false, bytes, fi);
+			rfuse_latency_record(RFUSE_LATENCY_OP_WRITE,
+					     RFUSE_LATENCY_GET_REQUEST,
+					     ktime_get_ns() - latency_start_ns);
 			if (IS_ERR(r_req)) {
 				err = PTR_ERR(r_req);
 				break;
 			}
-
 			count = rfuse_send_write_sync(iocb, r_req, ii, pos, bytes);
 			if (count <= 0) {
 				err = count;
@@ -2818,9 +2835,9 @@ static void rfuse_readpages_end(struct fuse_mount *fm, struct rfuse_req *r_req, 
  * - "fuse_readahead" is called through the address_space_operation ".readahead"
  * - This is used in the generic_file_read_iter
  **/
-
-static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file,
-				 int is_async){
+/*
+static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file)
+{
 	struct fuse_file *ff = file->private_data;
 	struct fuse_mount *fm = ff->fm;
 	struct fuse_inode *fi = get_fuse_inode(file_inode(file));
@@ -2828,28 +2845,20 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file,
 	loff_t pos = page_offset(rp->pages[0]);
 	size_t count = rp->num_pages << PAGE_SHIFT;
 	struct rfuse_req *r_req;
-
+	bool is_async = true;
 	ssize_t res;
 	int err;
+	int i;
 	u64 latency_start_ns;
 
 	latency_start_ns = ktime_get_ns();
-	rfuse_wait_async_write(file_inode(file), pos, count);
-	rfuse_latency_record(RFUSE_LATENCY_OP_READ,
-			     RFUSE_LATENCY_WAIT_ASYNC_WRITE,
-			     ktime_get_ns() - latency_start_ns);
-	latency_start_ns = ktime_get_ns();	
-	//if (fm->fc->async_read)
-  if (is_async)
+	if (is_async)
 		r_req = try_rfuse_get_req(fm, true, false, count, fi, NULL);
 	else
 		r_req = rfuse_get_req(fm, false, false, count, fi);
 	rfuse_latency_record(RFUSE_LATENCY_OP_READ, RFUSE_LATENCY_GET_REQUEST,
 			     ktime_get_ns() - latency_start_ns);
 	if (IS_ERR(r_req)) {
-		int i;
-
-		err = PTR_ERR(r_req);
 		for (i = 0; i < rp->num_pages; i++) {
 			struct page *page = rp->pages[i];
 
@@ -2860,21 +2869,22 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file,
 		rfuse_io_free(ria);
 		return;
 	}
-		
 	ria->r_req = r_req;
 
 	r_req->out_pages = true;
 	r_req->page_zeroing = true;
 	r_req->page_replace = true;
 
-	/* Don't overflow end offset */
 	if (pos + (count - 1) == LLONG_MAX) {
 		count--;
 		rp->descs[rp->num_pages - 1].length--;
 	}
-	WARN_ON((loff_t) (pos + count) < 0);
+	WARN_ON((loff_t)(pos + count) < 0);
 
+	latency_start_ns = ktime_get_ns();
 	rfuse_read_args_fill(ria, file, pos, count, FUSE_READ);
+	rfuse_latency_record(RFUSE_LATENCY_OP_READ, RFUSE_LATENCY_PREPARE_CACHE,
+			     ktime_get_ns() - latency_start_ns);
 	ria->read.attr_ver = fuse_get_attr_version(fm->fc);
 
 	latency_start_ns = ktime_get_ns();
@@ -2891,8 +2901,8 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file,
 #endif
 	rfuse_latency_record(RFUSE_LATENCY_OP_READ, RFUSE_LATENCY_PREPARE_SBP,
 			     ktime_get_ns() - latency_start_ns);
+
 	if (is_async) {
-	// if (fm->fc->async_read) {
 		ria->ff = rfuse_file_get(ff);
 		r_req->end = rfuse_readpages_end;
 		latency_start_ns = ktime_get_ns();
@@ -2914,13 +2924,151 @@ static void rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file,
 	rfuse_readpages_end(fm, r_req, err);
 	rfuse_put_request(r_req);
 }
+*/
+
+static int rfuse_send_readpages(struct rfuse_io_args *ria, struct file *file,
+				 bool is_async, bool defer_on_sbuf_full){
+	struct fuse_file *ff = file->private_data;
+	struct fuse_mount *fm = ff->fm;
+	struct fuse_inode *fi = get_fuse_inode(file_inode(file));
+	struct rfuse_pages *rp = &ria->rp;
+	loff_t pos = page_offset(rp->pages[0]);
+	size_t count = 0;
+	struct rfuse_req *r_req;
+
+	ssize_t res;
+  unsigned int i;
+	unsigned int submitted_pages;
+	int err;
+	u64 latency_start_ns;
+
+  for (i = 0; i < rp->num_pages; i++)
+    count += rp->descs[i].length;
+	submitted_pages = rp->num_pages;
+
+	latency_start_ns = ktime_get_ns();
+	rfuse_wait_async_write(file_inode(file), pos, count);
+	rfuse_latency_record(RFUSE_LATENCY_OP_READ,
+			     RFUSE_LATENCY_WAIT_ASYNC_WRITE,
+			     ktime_get_ns() - latency_start_ns);
+	latency_start_ns = ktime_get_ns();	
+	//if (fm->fc->async_read)
+  if (is_async)
+		r_req = try_rfuse_get_req(fm, true, false, count, fi, NULL);
+	else
+		r_req = rfuse_get_req(fm, false, false, count, fi);
+	rfuse_latency_record(RFUSE_LATENCY_OP_READ, RFUSE_LATENCY_GET_REQUEST,
+			     ktime_get_ns() - latency_start_ns);
+	if (IS_ERR(r_req)) {
+		err = PTR_ERR(r_req);
+		for (i = 0; i < rp->num_pages; i++) {
+			struct page *page = rp->pages[i];
+
+			SetPageError(page);
+			unlock_page(page);
+			put_page(page);
+		}
+		rfuse_io_free(ria);
+		return err;
+	}
+		
+	ria->r_req = r_req;
+
+	r_req->out_pages = true;
+	r_req->page_zeroing = true;
+	r_req->page_replace = true;
+
+	// Don't overflow end offset
+	if (pos + (count - 1) == LLONG_MAX) {
+		count--;
+		rp->descs[rp->num_pages - 1].length--;
+	}
+	WARN_ON((loff_t) (pos + count) < 0);
+
+	rfuse_read_args_fill(ria, file, pos, count, FUSE_READ);
+	ria->read.attr_ver = fuse_get_attr_version(fm->fc);
+
+	latency_start_ns = ktime_get_ns();
+#if !LDY_NO_PAYLOAD
+	err = rfuse_reserve_sbuf(r_req, count, RFUSE_PAYLOAD_OUT, !is_async);
+	if (err) {
+		rfuse_latency_record(RFUSE_LATENCY_OP_READ,
+				     RFUSE_LATENCY_PREPARE_SBP,
+				     ktime_get_ns() - latency_start_ns);
+    if (is_async && defer_on_sbuf_full && err == -EAGAIN) {
+      ria->r_req = NULL;
+      rfuse_put_request(r_req);
+      return err;
+    }
+		rfuse_readpages_end(fm, r_req, err);
+		rfuse_put_request(r_req);
+		return err;
+	}
+#endif
+	rfuse_latency_record(RFUSE_LATENCY_OP_READ, RFUSE_LATENCY_PREPARE_SBP,
+			     ktime_get_ns() - latency_start_ns);
+	if (is_async) {
+	// if (fm->fc->async_read) {
+		ria->ff = rfuse_file_get(ff);
+		r_req->end = rfuse_readpages_end;
+		latency_start_ns = ktime_get_ns();
+		err = rfuse_simple_background(fm, r_req);
+		rfuse_latency_record(RFUSE_LATENCY_OP_READ,
+				     RFUSE_LATENCY_SUBMIT_REQUEST,
+				     ktime_get_ns() - latency_start_ns);
+		if (!err) {
+			rfuse_readahead_count_record(true, submitted_pages, count);
+			return 0 ;
+		}
+	} else {
+		WRITE_ONCE(r_req->latency_shared_ns[
+			RFUSE_LATENCY_SHARED_SUBMIT_REQUEST], ktime_get_ns());
+		res = rfuse_simple_request(r_req);
+		rfuse_readahead_count_record(false, submitted_pages, count);
+		err = res < 0 ? res : 0;
+		rfuse_readpages_end(fm, r_req, err);
+		rfuse_put_request(r_req);
+		return err;
+	}
+	rfuse_readpages_end(fm, r_req, err);
+	rfuse_put_request(r_req);
+  return err;
+}
+
+/*
+static size_t rfuse_readahead_bytes(const struct rfuse_io_args *ria)
+{
+	const struct rfuse_pages *rp = &ria->rp;
+	size_t count = 0;
+	unsigned int i;
+
+	for (i = 0; i < rp->num_pages; i++)
+		count += rp->descs[i].length;
+
+	return count;
+}
+*/
 
 void rfuse_readahead(struct readahead_control *rac)
 {
 	struct inode *inode = rac->mapping->host;
 	struct fuse_conn *fc = get_fuse_conn(inode);
+	struct rfuse_readahead_batch {
+		struct list_head entry;
+		struct rfuse_io_args *ria;
+	};
+	struct rfuse_readahead_batch *batch;
+	struct rfuse_readahead_batch *next;
+	LIST_HEAD(sync_batches);
+	  LIST_HEAD(deferred_async_batches);
 	unsigned int i, max_pages, nr_pages = 0;
 	unsigned int total_pages, async_pages, needed_pages, submitted_pages = 0;
+	u64 size_bytes = rac->ra ? (u64)rac->ra->size << PAGE_SHIFT : 0;
+	u64 async_size_bytes =
+		rac->ra ? (u64)rac->ra->async_size << PAGE_SHIFT : 0;
+
+	pr_info("RFUSE_READAHEAD_ENTER size_bytes=%llu async_size_bytes=%llu\n",
+		size_bytes, async_size_bytes);
 
 	if (fuse_is_bad(inode))
 		return;
@@ -2928,22 +3076,23 @@ void rfuse_readahead(struct readahead_control *rac)
 	total_pages = readahead_count(rac);
 	async_pages = rac->ra ? min(rac->ra->async_size, total_pages) : 0;
 	needed_pages = total_pages - async_pages;
-	// pr_info("RFUSE_READAHEAD total=%u async=%u needed=%u index=%lu\n",
-		// total_pages, async_pages, needed_pages, readahead_index(rac));
 	max_pages = min_t(unsigned int, fc->max_pages,
 			fc->max_read / PAGE_SIZE);
 
 	for (;;) {
 		struct rfuse_io_args *ria;
 		struct rfuse_pages *rp;
+		struct rfuse_readahead_batch *pending;
 		unsigned int segment_pages;
 		bool is_async;
+    int err;
 
 		nr_pages = readahead_count(rac) - nr_pages;
 		if (nr_pages > max_pages)
 			nr_pages = max_pages;
 		if (nr_pages == 0)
 			break;
+
 		if (submitted_pages < needed_pages) {
 			is_async = false;
 			segment_pages = needed_pages - submitted_pages;
@@ -2951,25 +3100,136 @@ void rfuse_readahead(struct readahead_control *rac)
 			is_async = true;
 			segment_pages = total_pages - submitted_pages;
 		}
+
 		if (segment_pages == 0)
 			break;
 		if (nr_pages > segment_pages)
 			nr_pages = segment_pages;
+
+		pending = kmalloc(sizeof(*pending), GFP_KERNEL);
+		if (!pending)
+			goto submit_sync;
+
 		ria = rfuse_io_alloc(NULL, nr_pages);
-		if (!ria)
-			return;
+		if (!ria) {
+			kfree(pending);
+			goto submit_sync;
+		}
+
 		rp = &ria->rp;
 		nr_pages = __readahead_batch(rac, rp->pages, nr_pages);
+		if (!nr_pages) {
+			kfree(pending);
+			rfuse_io_free(ria);
+			break;
+		}
+
 		for (i = 0; i < nr_pages; i++) {
 			rfuse_wait_on_page_writeback(inode,
 						    readahead_index(rac) + i);
 			rp->descs[i].length = PAGE_SIZE;
 		}
+
 		rp->num_pages = nr_pages;
 		submitted_pages += nr_pages;
-		rfuse_send_readpages(ria, rac->file, is_async);
+    pending->ria = ria;
+
+		if (is_async) {
+			/*
+			pr_info("RFUSE_READAHEAD_ASYNC attempt=initial async_size=%u effective_async_pages=%u submit_pages=%u submit_bytes=%zu\n",
+				rac->ra ? rac->ra->async_size : 0,
+				async_pages, rp->num_pages,
+				rfuse_readahead_bytes(ria));
+			*/
+			err = rfuse_send_readpages(ria, rac->file, true, true);
+      if (err == -EAGAIN)
+        list_add_tail(&pending->entry, &deferred_async_batches);
+      else
+        kfree(pending);
+		} else {
+			list_add_tail(&pending->entry, &sync_batches);
+		}
 	}
+
+submit_sync:
+	list_for_each_entry_safe(batch, next, &sync_batches, entry) {
+		list_del(&batch->entry);
+		/*
+		pr_info("RFUSE_READAHEAD_SYNC sync_size=%u submit_pages=%u submit_bytes=%zu\n",
+			needed_pages, batch->ria->rp.num_pages,
+			rfuse_readahead_bytes(batch->ria));
+		*/
+		rfuse_send_readpages(batch->ria, rac->file, false, false);
+		kfree(batch);
+	}
+
+  list_for_each_entry_safe(batch, next, &deferred_async_batches, entry) {
+    list_del(&batch->entry);
+    /*
+    pr_info("RFUSE_READAHEAD_ASYNC attempt=deferred async_size=%u effective_async_pages=%u submit_pages=%u submit_bytes=%zu\n",
+	    rac->ra ? rac->ra->async_size : 0, async_pages,
+	    batch->ria->rp.num_pages,
+	    rfuse_readahead_bytes(batch->ria));
+    */
+    rfuse_send_readpages(batch->ria, rac->file, true, false);
+    kfree(batch);
+  }
 }
+
+/*
+void rfuse_readahead(struct readahead_control *rac)
+{
+  struct inode *inode = rac->mapping->host;
+  struct fuse_conn *fc = get_fuse_conn(inode);
+  unsigned int i, max_pages, nr_pages = 0;
+  unsigned int total_pages, async_pages, needed_pages, submitted_pages = 0;
+
+  if (fuse_is_bad(inode))
+    return;
+
+  total_pages = readahead_count(rac);
+  async_pages = rac->ra ? min(rac->ra->async_size, total_pages) : 0;
+  needed_pages = total_pages - async_pages;
+  max_pages = min_t(unsigned int, fc->max_pages,
+                    fc->max_read / PAGE_SIZE);
+  for (;;) {
+    struct rfuse_io_args *ria;
+    struct rfuse_pages *rp;
+    unsigned int segment_pages;
+    bool is_async;
+
+    nr_pages = readahead_count(rac) - nr_pages;
+    if (nr_pages > max_pages)
+      nr_pages = max_pages;
+    if (nr_pages == 0)
+      break;
+    if (submitted_pages < needed_pages) {
+      is_async = false;
+      segment_pages = needed_pages - submitted_pages;
+    } else {
+      is_async = true;
+      segment_pages = total_pages - submitted_pages;
+    }
+    if (segment_pages == 0)
+      break;
+    if (nr_pages > segment_pages)
+      nr_pages = segment_pages;
+    ria = rfuse_io_alloc(NULL, nr_pages);
+    if (!ria)
+      return;
+    rp = &ria->rp;
+    nr_pages = __readahead_batch(rac, rp->pages, nr_pages);
+    for (i = 0; i < nr_pages; i++) {
+      rfuse_wait_on_page_writeback(inode,
+                                   readahead_index(rac) + i);
+      rp->descs[i].length = PAGE_SIZE;
+    }
+    rp->num_pages = nr_pages;
+    submitted_pages += nr_pages;
+    rfuse_send_readpages(ria, rac->file);
+  }
+}
+*/
 /*
 void rfuse_readahead(struct readahead_control *rac)
 {

@@ -41,6 +41,8 @@ enum rfuse_latency_id {
 	RFUSE_LATENCY_REGISTER_INTERVAL_TREE,
 	RFUSE_LATENCY_SUBMIT_REQUEST,
 	RFUSE_LATENCY_ENQUEUE_TO_DEQUEUE,
+	RFUSE_LATENCY_MT_LOCK_WAIT,
+	RFUSE_LATENCY_RIQ_LOCK_WAIT,
 	RFUSE_LATENCY_PREPARE_LIBRFUSE_CACHE,
 	RFUSE_LATENCY_DEV_RFUSE_PREAD,
 	RFUSE_LATENCY_BACKEND,
@@ -62,6 +64,12 @@ enum rfuse_latency_shared_id {
 	RFUSE_LATENCY_SHARED_REPLY_COMPLETION,
 	RFUSE_LATENCY_SHARED_MAX,
 };
+
+#define RFUSE_LATENCY_LOCK_WAIT_BITS		28
+#define RFUSE_LATENCY_LOCK_WAIT_MASK		\
+	((1ULL << RFUSE_LATENCY_LOCK_WAIT_BITS) - 1)
+#define RFUSE_LATENCY_MT_LOCK_WAIT_SHIFT	8
+#define RFUSE_LATENCY_RIQ_LOCK_WAIT_SHIFT	36
 
 #define RFUSE_RIQ_ID_MASK    0x00ff0000ULL
 #define RFUSE_QUEUE_MAP_MASK 0xff000000ULL
@@ -168,6 +176,13 @@ struct rfuse_req{
 static_assert(sizeof(struct rfuse_req) == 432);
 static_assert(offsetof(struct rfuse_req, latency_shared_ns) == 368);
 static_assert(offsetof(struct rfuse_req, latency_done_mask) == 424);
+static_assert(RFUSE_LATENCY_SHARED_MAX <=
+	      RFUSE_LATENCY_MT_LOCK_WAIT_SHIFT);
+static_assert(RFUSE_LATENCY_MT_LOCK_WAIT_SHIFT +
+	      RFUSE_LATENCY_LOCK_WAIT_BITS <=
+	      RFUSE_LATENCY_RIQ_LOCK_WAIT_SHIFT);
+static_assert(RFUSE_LATENCY_RIQ_LOCK_WAIT_SHIFT +
+	      RFUSE_LATENCY_LOCK_WAIT_BITS <= 64);
 
 
 struct rfuse_interrupt_entry{

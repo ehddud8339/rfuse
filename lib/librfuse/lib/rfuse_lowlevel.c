@@ -62,6 +62,28 @@ static void rfuse_latency_shared_complete_started(
 		r_req, id, RFUSE_READ_ONCE(r_req->latency_shared_ns[id]));
 }
 
+static void rfuse_latency_shared_publish_lock_waits(
+	struct rfuse_req *r_req, uint64_t mt_lock_wait_ns,
+	uint64_t riq_lock_wait_ns)
+{
+	uint64_t packed_waits = 0;
+
+	if (mt_lock_wait_ns > RFUSE_LATENCY_LOCK_WAIT_MASK)
+		mt_lock_wait_ns = RFUSE_LATENCY_LOCK_WAIT_MASK;
+	if (riq_lock_wait_ns > RFUSE_LATENCY_LOCK_WAIT_MASK)
+		riq_lock_wait_ns = RFUSE_LATENCY_LOCK_WAIT_MASK;
+
+	packed_waits |= mt_lock_wait_ns <<
+			RFUSE_LATENCY_MT_LOCK_WAIT_SHIFT;
+	packed_waits |= riq_lock_wait_ns <<
+			RFUSE_LATENCY_RIQ_LOCK_WAIT_SHIFT;
+	if (!packed_waits)
+		return;
+
+	__atomic_fetch_or(&r_req->latency_done_mask, packed_waits,
+			  __ATOMIC_RELEASE);
+}
+
 static void rfuse_latency_shared_publish_start(
 	struct rfuse_req *r_req, enum rfuse_latency_shared_id id)
 {
@@ -73,6 +95,34 @@ static void rfuse_latency_shared_publish_start(
 	RFUSE_WRITE_ONCE(r_req->latency_shared_ns[id], start_ns);
 	__atomic_fetch_or(&r_req->latency_done_mask, 1ULL << id,
 			  __ATOMIC_RELEASE);
+}
+
+static uint64_t rfuse_mutex_lock_wait_ns(pthread_mutex_t *lock)
+{
+	uint64_t start_ns;
+	uint64_t end_ns;
+	int err;
+
+	err = pthread_mutex_trylock(lock);
+	if (err == 0)
+		return 0;
+	if (err != EBUSY) {
+		pthread_mutex_lock(lock);
+		return 0;
+	}
+
+	start_ns = rfuse_latency_now_ns();
+	if (!start_ns) {
+		pthread_mutex_lock(lock);
+		return 0;
+	}
+
+	pthread_mutex_lock(lock);
+	end_ns = rfuse_latency_now_ns();
+	if (!end_ns || end_ns < start_ns)
+		return 0;
+
+	return end_ns - start_ns;
 }
 
 static void rfuse_count_syscall_fd(int fd, enum rfuse_syscall_count_type type)
@@ -1913,7 +1963,9 @@ static const char *rfuse_opname(enum fuse_opcode  opcode)
 }
 #endif
 
-bool rfuse_read_queue(struct rfuse_worker *w, struct rfuse_mt *mt, struct fuse_chan *ch, int forget) {
+bool rfuse_read_queue(struct rfuse_worker *w, struct rfuse_mt *mt,
+		      struct fuse_chan *ch, int forget,
+		      uint64_t mt_lock_wait_ns) {
 /**
  * This function reads an request(or interrupt, forget) from the shared 
  * memory space, and calls the corresponding functions to process it.
@@ -1934,6 +1986,7 @@ bool rfuse_read_queue(struct rfuse_worker *w, struct rfuse_mt *mt, struct fuse_c
 	struct rfuse_req *r_req;
 	int err;
 	uint64_t nodeid;
+	uint64_t riq_lock_wait_ns = 0;
 	bool processed = false;
 
 	if(riq->connected == 0){
@@ -1965,25 +2018,36 @@ bool rfuse_read_queue(struct rfuse_worker *w, struct rfuse_mt *mt, struct fuse_c
 	}
 	else{
 		// 2. Pending Requests
-		pthread_mutex_lock(&se->riq_lock[riq_id]);
+		riq_lock_wait_ns =
+			rfuse_mutex_lock_wait_ns(&se->riq_lock[riq_id]);
+    // read head
 		target_entry = rfuse_read_pending_head(riq);
 		if(!target_entry){
 			pthread_mutex_unlock(&se->riq_lock[riq_id]);
 			// rfuse_free_req(u_req);
 			goto out;
 		}
+    // read head
+    // alloc req
 		u_req = rfuse_ll_alloc_req(se, riq_id);
 		u_req->index = target_entry->request;
+    // alloc req
+    // extract head
 		rfuse_extract_pending_head(riq);
 		r_req = &riq->ureq[u_req->index];
 		assert(r_req->riq_id == u_req->riq_id);
 		u_req->w = w;
+    // extract head
+    // add req to list
 		rfuse_list_add_req(u_req, &se->rfuse_list[riq_id]);
+    // add req to list
 		pthread_mutex_unlock(&se->riq_lock[riq_id]);
 		processed = true;
 	}
 	rfuse_latency_shared_complete_started(
 		r_req, RFUSE_LATENCY_SHARED_ENQUEUE_TO_DEQUEUE);
+	rfuse_latency_shared_publish_lock_waits(
+		r_req, mt_lock_wait_ns, riq_lock_wait_ns);
 	u_req->unique = r_req->in.unique;
 	u_req->ctx.uid = r_req->in.uid;
 	u_req->ctx.gid = r_req->in.gid;

@@ -173,6 +173,12 @@ enum rfuse_latency_shared_id {
 	RFUSE_LATENCY_SHARED_MAX,
 };
 
+#define RFUSE_LATENCY_LOCK_WAIT_BITS		28
+#define RFUSE_LATENCY_LOCK_WAIT_MASK		\
+	((1ULL << RFUSE_LATENCY_LOCK_WAIT_BITS) - 1)
+#define RFUSE_LATENCY_MT_LOCK_WAIT_SHIFT	8
+#define RFUSE_LATENCY_RIQ_LOCK_WAIT_SHIFT	36
+
 struct rfuse_pages;
 struct fuse_mount;
 
@@ -272,6 +278,15 @@ struct rfuse_req{
 	static_assert(offsetof(struct rfuse_req, end) == 360, "rfuse_req end offset drift");
 	static_assert(offsetof(struct rfuse_req, latency_shared_ns) == 368, "rfuse_req latency offset drift");
 	static_assert(offsetof(struct rfuse_req, latency_done_mask) == 424, "rfuse_req latency mask offset drift");
+	static_assert(RFUSE_LATENCY_SHARED_MAX <= RFUSE_LATENCY_MT_LOCK_WAIT_SHIFT,
+		      "rfuse_req latency mask bit overlap");
+	static_assert(RFUSE_LATENCY_MT_LOCK_WAIT_SHIFT +
+		      RFUSE_LATENCY_LOCK_WAIT_BITS <=
+		      RFUSE_LATENCY_RIQ_LOCK_WAIT_SHIFT,
+		      "rfuse_req lock-wait fields overlap");
+	static_assert(RFUSE_LATENCY_RIQ_LOCK_WAIT_SHIFT +
+		      RFUSE_LATENCY_LOCK_WAIT_BITS <= 64,
+		      "rfuse_req latency mask overflow");
 #else
 	_Static_assert(sizeof(struct rfuse_req) == 432, "rfuse_req ABI drift");
 	_Static_assert(offsetof(struct rfuse_req, riq_id) == 68, "rfuse_req riq_id offset drift");
@@ -283,6 +298,15 @@ struct rfuse_req{
 	_Static_assert(offsetof(struct rfuse_req, end) == 360, "rfuse_req end offset drift");
 	_Static_assert(offsetof(struct rfuse_req, latency_shared_ns) == 368, "rfuse_req latency offset drift");
 	_Static_assert(offsetof(struct rfuse_req, latency_done_mask) == 424, "rfuse_req latency mask offset drift");
+	_Static_assert(RFUSE_LATENCY_SHARED_MAX <= RFUSE_LATENCY_MT_LOCK_WAIT_SHIFT,
+		       "rfuse_req latency mask bit overlap");
+	_Static_assert(RFUSE_LATENCY_MT_LOCK_WAIT_SHIFT +
+		       RFUSE_LATENCY_LOCK_WAIT_BITS <=
+		       RFUSE_LATENCY_RIQ_LOCK_WAIT_SHIFT,
+		       "rfuse_req lock-wait fields overlap");
+	_Static_assert(RFUSE_LATENCY_RIQ_LOCK_WAIT_SHIFT +
+		       RFUSE_LATENCY_LOCK_WAIT_BITS <= 64,
+		       "rfuse_req latency mask overflow");
 #endif
 
 struct rfuse_interrupt_entry{

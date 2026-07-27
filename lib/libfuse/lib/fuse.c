@@ -4524,6 +4524,7 @@ static int fuse_session_loop_remember(struct fuse *f)
 	struct fuse_buf fbuf = {
 		.mem = NULL,
 	};
+	struct fuse_receive_latency latency = { 0 };
 
 	curr_time(&now);
 	next_clean = now.tv_sec;
@@ -4543,14 +4544,16 @@ static int fuse_session_loop_remember(struct fuse *f)
 			else
 				break;
 		} else if (res > 0) {
-			res = fuse_session_receive_buf_int(se, &fbuf, NULL);
+			res = fuse_session_receive_buf_int(se, &fbuf, NULL,
+						   &latency);
 
 			if (res == -EINTR)
 				continue;
 			if (res <= 0)
 				break;
 
-			fuse_session_process_buf_int(se, &fbuf, NULL);
+			fuse_session_process_buf_int(se, &fbuf, NULL,
+						   &latency);
 		} else {
 			timeout = fuse_clean_cache(f);
 			curr_time(&now);

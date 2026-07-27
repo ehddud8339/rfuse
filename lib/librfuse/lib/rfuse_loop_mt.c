@@ -20,10 +20,37 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <sched.h>
+#include <time.h>
 
 /* Environment var controlling the thread stack size */
 #define ENVNAME_THREAD_STACK "FUSE_THREAD_STACK"
 
+static uint64_t rfuse_mutex_lock_wait_ns(pthread_mutex_t *lock)
+{
+	struct timespec start;
+	struct timespec end;
+	int err;
+
+	err = pthread_mutex_trylock(lock);
+	if (err == 0)
+		return 0;
+	if (err != EBUSY) {
+		pthread_mutex_lock(lock);
+		return 0;
+	}
+
+	if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) {
+		pthread_mutex_lock(lock);
+		return 0;
+	}
+
+	pthread_mutex_lock(lock);
+	if (clock_gettime(CLOCK_MONOTONIC, &end) != 0)
+		return 0;
+
+	return (uint64_t)(end.tv_sec - start.tv_sec) * 1000000000ULL +
+	       end.tv_nsec - start.tv_nsec;
+}
 
 static struct fuse_chan *rfuse_chan_new(int fd)
 {
@@ -116,7 +143,7 @@ retry_read_queue:
 			rfuse_loop_start_thread(mt);
 		pthread_mutex_unlock(&mt->lock);
 
-		processed = rfuse_read_queue(w, mt, NULL, isforget);
+		processed = rfuse_read_queue(w, mt, NULL, isforget, 0);
 
 		pthread_mutex_lock(&mt->lock);
 		if (counted_general)
@@ -183,6 +210,7 @@ static void *rfuse_do_work(void *data)
 	_Atomic int isforget = 0;
 	bool counted_general;
 	bool processed = false;
+	uint64_t mt_lock_wait_ns;
 
 	while (!fuse_session_exited(mt->se)) {
 		 // Currently We check the forget queue once and general queue once.
@@ -190,7 +218,11 @@ static void *rfuse_do_work(void *data)
 		 // isforget == 0 : handle general request
 		 // isforget == 1 : handle forget request
 
-		pthread_mutex_lock(&mt->lock);
+		mt_lock_wait_ns = 0;
+		if (isforget == 0)
+			mt_lock_wait_ns = rfuse_mutex_lock_wait_ns(&mt->lock);
+		else
+			pthread_mutex_lock(&mt->lock);
 		if (mt->exit) {
 			pthread_mutex_unlock(&mt->lock);
 			return NULL;
@@ -203,7 +235,8 @@ static void *rfuse_do_work(void *data)
 			rfuse_loop_start_thread(mt);
 		pthread_mutex_unlock(&mt->lock);
 
-		processed = rfuse_read_queue(w, mt, NULL, isforget);
+		processed = rfuse_read_queue(w, mt, NULL, isforget,
+					     mt_lock_wait_ns);
 
 		pthread_mutex_lock(&mt->lock);
 		if (counted_general)

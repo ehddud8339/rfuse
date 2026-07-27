@@ -14,6 +14,15 @@ td += executable('readdir_inode', 'readdir_inode.c',
                  include_directories: include_dirs,
                  install: false)
 
+latency_breakdown_test = executable('test_latency_breakdown',
+                                    'test_latency_breakdown.c',
+                                    include_directories: include_dirs,
+                                    link_with: [ libfuse ],
+                                    dependencies: thread_dep,
+                                    c_args: [ '-DFUSE_USE_VERSION=35' ],
+                                    install: false)
+test('latency_breakdown', latency_breakdown_test)
+
 test_scripts = [ 'conftest.py', 'pytest.ini', 'test_examples.py',
                  'util.py', 'test_ctests.py' ]
 td += custom_target('test_scripts', input: test_scripts,

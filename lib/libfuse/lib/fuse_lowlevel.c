@@ -38,20 +38,11 @@
 
 #define PARAM(inarg) (((char *)(inarg)) + sizeof(*(inarg)))
 #define OFFSET_MAX 0x7fffffffffffffffLL
+#define FUSE_LATENCY_BREAKDOWN_NAME ".breakdown"
 
 #define container_of(ptr, type, member) ({				\
 			const typeof( ((type *)0)->member ) *__mptr = (ptr); \
 			(type *)( (char *)__mptr - offsetof(type,member) );})
-
-struct fuse_receive_latency {
-	struct fuse_session *se;
-	uint64_t end_ns;
-	uint64_t duration_ns;
-	enum fuse_latency_id id;
-	int valid;
-};
-
-static __thread struct fuse_receive_latency fuse_receive_latency;
 
 static uint64_t fuse_latency_now_ns(void)
 {
@@ -1442,18 +1433,31 @@ static void do_link(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 static void do_create(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 {
 	struct fuse_create_in *arg = (struct fuse_create_in *) inarg;
+	char *name = PARAM(arg);
+
+	if (req->se->conn.proto_minor < 12)
+		name = (char *)inarg + sizeof(struct fuse_open_in);
+
+	if (nodeid == FUSE_ROOT_ID &&
+	    strcmp(name, FUSE_LATENCY_BREAKDOWN_NAME) == 0) {
+		int err;
+
+		err = fuse_session_latency_snapshot_and_reset(req->se,
+							      STDOUT_FILENO);
+		if (err)
+			fuse_log(FUSE_LOG_ERR,
+				 "fuse: failed to write latency breakdown: %s\n",
+				 strerror(-err));
+	}
 
 	if (req->se->op.create) {
 		struct fuse_file_info fi;
-		char *name = PARAM(arg);
 
 		memset(&fi, 0, sizeof(fi));
 		fi.flags = arg->flags;
 
 		if (req->se->conn.proto_minor >= 12)
 			req->ctx.umask = arg->umask;
-		else
-			name = (char *) inarg + sizeof(struct fuse_open_in);
 
 		req->se->op.create(req, nodeid, name, arg->mode, &fi);
 	} else
@@ -2682,11 +2686,12 @@ static int fuse_ll_copy_from_pipe(struct fuse_bufvec *dst,
 void fuse_session_process_buf(struct fuse_session *se,
 			      const struct fuse_buf *buf)
 {
-	fuse_session_process_buf_int(se, buf, NULL);
+	fuse_session_process_buf_int(se, buf, NULL, NULL);
 }
 
 void fuse_session_process_buf_int(struct fuse_session *se,
-				  const struct fuse_buf *buf, struct fuse_chan *ch)
+				  const struct fuse_buf *buf, struct fuse_chan *ch,
+				  struct fuse_receive_latency *latency)
 {
 	const size_t write_header_size = sizeof(struct fuse_in_header) +
 		sizeof(struct fuse_write_in);
@@ -2720,12 +2725,11 @@ void fuse_session_process_buf_int(struct fuse_session *se,
 		in = buf->mem;
 	}
 
-	if (fuse_receive_latency.valid && fuse_receive_latency.se == se) {
+	if (latency && latency->valid) {
 		fuse_latency_record_opcode(
-			se, in->opcode, fuse_receive_latency.id,
-			fuse_receive_latency.duration_ns);
-		prepare_start_ns = fuse_receive_latency.end_ns;
-		fuse_receive_latency.valid = 0;
+			se, in->opcode, latency->id, latency->duration_ns);
+		prepare_start_ns = latency->end_ns;
+		latency->valid = 0;
 	}
 
 #ifdef DEBUG
@@ -2983,23 +2987,28 @@ static void fuse_ll_pipe_destructor(void *data)
 
 int fuse_session_receive_buf(struct fuse_session *se, struct fuse_buf *buf)
 {
-	return fuse_session_receive_buf_int(se, buf, NULL);
+	return fuse_session_receive_buf_int(se, buf, NULL, NULL);
 }
 
 int fuse_session_receive_buf_int(struct fuse_session *se, struct fuse_buf *buf,
-				 struct fuse_chan *ch)
+				 struct fuse_chan *ch,
+				 struct fuse_receive_latency *latency)
 {
 	int err;
 	ssize_t res;
+	uint64_t receive_end_ns;
 	uint64_t receive_start_ns;
 
-	fuse_receive_latency.valid = 0;
+	if (latency)
+		latency->valid = 0;
 #ifdef HAVE_SPLICE
 	size_t bufsize = se->bufsize;
 	struct fuse_ll_pipe *llp;
 	struct fuse_buf tmpbuf;
 
-	if (se->conn.proto_minor < 14 || !(se->conn.want & FUSE_CAP_SPLICE_READ))
+	/* Public receive/process calls cannot carry private timing metadata. */
+	if (!latency || se->conn.proto_minor < 14 ||
+	    !(se->conn.want & FUSE_CAP_SPLICE_READ))
 		goto fallback;
 
 	llp = fuse_ll_get_pipe(se);
@@ -3026,14 +3035,7 @@ int fuse_session_receive_buf_int(struct fuse_session *se, struct fuse_buf *buf,
 	res = splice(ch ? ch->fd : se->fd,
 		     NULL, llp->pipe[1], NULL, bufsize, 0);
 	err = errno;
-	if (res >= 0) {
-		fuse_receive_latency.se = se;
-		fuse_receive_latency.end_ns = fuse_latency_now_ns();
-		fuse_receive_latency.duration_ns =
-			fuse_receive_latency.end_ns - receive_start_ns;
-		fuse_receive_latency.id = FUSE_LATENCY_DEV_FUSE_SPLICE_READ;
-		fuse_receive_latency.valid = 1;
-	}
+	receive_end_ns = fuse_latency_now_ns();
 
 	if (fuse_session_exited(se))
 		return 0;
@@ -3103,6 +3105,10 @@ int fuse_session_receive_buf_int(struct fuse_session *se, struct fuse_buf *buf,
 		buf->flags = tmpbuf.flags;
 	}
 	buf->size = tmpbuf.size;
+	latency->end_ns = receive_end_ns;
+	latency->duration_ns = receive_end_ns - receive_start_ns;
+	latency->id = FUSE_LATENCY_DEV_FUSE_SPLICE_READ;
+	latency->valid = 1;
 
 	return res;
 
@@ -3121,14 +3127,7 @@ restart:
 	receive_start_ns = fuse_latency_now_ns();
 	res = read(ch ? ch->fd : se->fd, buf->mem, se->bufsize);
 	err = errno;
-	if (res >= 0) {
-		fuse_receive_latency.se = se;
-		fuse_receive_latency.end_ns = fuse_latency_now_ns();
-		fuse_receive_latency.duration_ns =
-			fuse_receive_latency.end_ns - receive_start_ns;
-		fuse_receive_latency.id = FUSE_LATENCY_DEV_FUSE_READ;
-		fuse_receive_latency.valid = 1;
-	}
+	receive_end_ns = fuse_latency_now_ns();
 
 	if (fuse_session_exited(se))
 		return 0;
@@ -3157,6 +3156,18 @@ restart:
 	}
 
 	buf->size = res;
+	if (latency) {
+		latency->end_ns = receive_end_ns;
+		latency->duration_ns = receive_end_ns - receive_start_ns;
+		latency->id = FUSE_LATENCY_DEV_FUSE_READ;
+		latency->valid = 1;
+	} else {
+		const struct fuse_in_header *in = buf->mem;
+
+		fuse_latency_record_opcode(se, in->opcode,
+					   FUSE_LATENCY_DEV_FUSE_READ,
+					   receive_end_ns - receive_start_ns);
+	}
 
 	return res;
 }

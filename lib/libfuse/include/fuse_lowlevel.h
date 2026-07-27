@@ -2051,6 +2051,8 @@ void fuse_session_destroy(struct fuse_session *se);
 
 /**
  * Write a latency snapshot to a file descriptor and reset the counters.
+ * Creating a file named `.breakdown` in the mount root writes the same
+ * snapshot to the filesystem process's standard output and resets it.
  *
  * @param se the session
  * @param fd output file descriptor
