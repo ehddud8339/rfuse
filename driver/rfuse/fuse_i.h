@@ -120,15 +120,7 @@ struct fuse_inode {
 			/* Waitq for writepage completion */
 			wait_queue_head_t page_waitq;
 
-			/*
-			 * Half-sync buffered writes complete to the caller before
-			 * daemon completion.  These fields track daemon-side
-			 * inflight ranges so flush/fsync/read paths can drain or
-			 * wait on overlapping writes.
-			 */
-			int async_writectr;
-			atomic64_t async_range_wait_count;
-			struct rb_root_cached async_write_ranges;
+			/* sbuf 쓰기는 반환 전에 완료하여 비동기 범위 추적이 필요 없다. */
 
 			/* List of writepage requestst (pending or sent) */
 			struct rb_root writepages;
@@ -1230,8 +1222,8 @@ void fuse_flush_writepages(struct inode *inode);
 
 void fuse_set_nowrite(struct inode *inode);
 void fuse_release_nowrite(struct inode *inode);
-void __rfuse_release_nowrite_async(struct inode *inode);
-void rfuse_release_nowrite_async(struct inode *inode);
+void __rfuse_release_nowrite(struct inode *inode);
+void rfuse_release_nowrite(struct inode *inode);
 
 /**
  * Scan all fuse_mounts belonging to fc to find the first where
@@ -1421,7 +1413,6 @@ int rfuse_launder_page(struct page *page);
 
 int rfuse_flush_times(struct inode *inode, struct fuse_file *ff);
 int rfuse_write_inode(struct inode *inode, struct writeback_control *wbc);
-void rfuse_wait_async_writes(struct inode *inode);
 
 int rfuse_rename_common(struct inode *olddir, struct dentry *oldent, struct inode *newdir, struct dentry *newent, unsigned int flags, int opcode, size_t argsize);
 

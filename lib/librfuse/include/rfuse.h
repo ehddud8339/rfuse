@@ -151,23 +151,6 @@ extern "C" {
 struct rfuse_pages;
 struct fuse_mount;
 
-struct rfuse_async_write_range {
-	uint64_t no_touch_parent_color;
-	uint64_t no_touch_right;
-	uint64_t no_touch_left;
-	int64_t start;
-	int64_t last;
-	int64_t subtree_last;
-};
-
-struct rfuse_async_wrt_ctx {
-	struct rfuse_async_write_range range;
-	void *no_touch_inode;
-	void *no_touch_ff;
-	size_t count;
-	bool range_registered;
-};
-
 struct rfuse_req{
 	/** Request input header **/
 	struct{
@@ -228,8 +211,8 @@ struct rfuse_req{
 	bool sbuf_reserved:1;
 
 	struct rfuse_pages *rp;
-	struct rfuse_async_wrt_ctx wrt_ctx;
-	bool has_wrt_ctx;
+	/* 비동기 쓰기 상태를 제거하되 공유 request ABI 크기는 유지한다. */
+	uint64_t reserved_write_state[11];
 	void (*end)(struct fuse_mount *fm, struct rfuse_req *r_req, int error);
 };
 
@@ -239,8 +222,7 @@ struct rfuse_req{
 	static_assert(offsetof(struct rfuse_req, sbuf_page_index) == 232, "rfuse_req sbuf page index offset drift");
 	static_assert(offsetof(struct rfuse_req, sbuf_offset) == 240, "rfuse_req sbuf offset drift");
 	static_assert(offsetof(struct rfuse_req, rp) == 264, "rfuse_req rp offset drift");
-	static_assert(offsetof(struct rfuse_req, wrt_ctx) == 272, "rfuse_req wrt_ctx offset drift");
-	static_assert(offsetof(struct rfuse_req, has_wrt_ctx) == 352, "rfuse_req has_wrt_ctx offset drift");
+	static_assert(offsetof(struct rfuse_req, reserved_write_state) == 272, "rfuse_req reserved offset drift");
 	static_assert(offsetof(struct rfuse_req, end) == 360, "rfuse_req end offset drift");
 #else
 	_Static_assert(sizeof(struct rfuse_req) == 368, "rfuse_req ABI drift");
@@ -248,8 +230,7 @@ struct rfuse_req{
 	_Static_assert(offsetof(struct rfuse_req, sbuf_page_index) == 232, "rfuse_req sbuf page index offset drift");
 	_Static_assert(offsetof(struct rfuse_req, sbuf_offset) == 240, "rfuse_req sbuf offset drift");
 	_Static_assert(offsetof(struct rfuse_req, rp) == 264, "rfuse_req rp offset drift");
-	_Static_assert(offsetof(struct rfuse_req, wrt_ctx) == 272, "rfuse_req wrt_ctx offset drift");
-	_Static_assert(offsetof(struct rfuse_req, has_wrt_ctx) == 352, "rfuse_req has_wrt_ctx offset drift");
+	_Static_assert(offsetof(struct rfuse_req, reserved_write_state) == 272, "rfuse_req reserved offset drift");
 	_Static_assert(offsetof(struct rfuse_req, end) == 360, "rfuse_req end offset drift");
 #endif
 

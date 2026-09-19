@@ -47,21 +47,6 @@ enum rfuse_sched_mode {
 struct fuse_file;
 struct rfuse_pages;
 
-struct rfuse_async_write_range {
-	struct rb_node node;
-	loff_t start;
-	loff_t last;
-	loff_t subtree_last;
-};
-
-struct rfuse_async_wrt_ctx {
-	struct rfuse_async_write_range range;
-	struct inode *inode;
-	struct fuse_file *ff;
-	size_t count;
-	bool range_registered;
-};
-
 struct rfuse_req{
 	/** Request input header **/
 	struct{
@@ -119,10 +104,15 @@ struct rfuse_req{
 	bool sbuf_reserved:1;
 
 	struct rfuse_pages *rp;
-	struct rfuse_async_wrt_ctx wrt_ctx;
-	bool has_wrt_ctx;
+	/* 비동기 쓰기 상태를 제거하되 공유 request ABI 크기는 유지한다. */
+	uint64_t reserved_write_state[11];
 	void (*end)(struct fuse_mount *fm, struct rfuse_req *r_req, int error);
 };
+
+/* 커널/사용자 공간 request stride가 달라지는 실수를 빌드 시 검출한다. */
+static_assert(sizeof(struct rfuse_req) == 368);
+static_assert(offsetof(struct rfuse_req, reserved_write_state) == 272);
+static_assert(offsetof(struct rfuse_req, end) == 360);
 
 
 struct rfuse_interrupt_entry{

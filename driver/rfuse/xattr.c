@@ -1,3 +1,4 @@
+/* sbuf 쓰기는 동기 완료되므로 과거 비동기 쓰기 drain 호출을 제거했다. */
 /*
  * FUSE: Filesystem in Userspace
  * Copyright (C) 2001-2016  Miklos Szeredi <miklos@szeredi.hu>
@@ -37,7 +38,7 @@ int fuse_setxattr(struct inode *inode, const char *name, const void *value,
 	args.in_args[1].value = name;
 	args.in_args[2].size = size;
 	args.in_args[2].value = value;
-	rfuse_wait_async_writes(inode);
+
 	err = fuse_simple_request(fm, &args);
 	if (err == -ENOSYS) {
 		fm->fc->no_setxattr = 1;
@@ -144,7 +145,7 @@ ssize_t fuse_listxattr(struct dentry *entry, char *list, size_t size)
 		args.out_args[0].size = sizeof(outarg);
 		args.out_args[0].value = &outarg;
 	}
-	rfuse_wait_async_writes(inode);
+
 	ret = fuse_simple_request(fm, &args);
 	if (!ret && !size)
 		ret = min_t(ssize_t, outarg.size, XATTR_LIST_MAX);
@@ -171,7 +172,7 @@ int fuse_removexattr(struct inode *inode, const char *name)
 	args.in_numargs = 1;
 	args.in_args[0].size = strlen(name) + 1;
 	args.in_args[0].value = name;
-	rfuse_wait_async_writes(inode);
+
 	err = fuse_simple_request(fm, &args);
 	if (err == -ENOSYS) {
 		fm->fc->no_removexattr = 1;
