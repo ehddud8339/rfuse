@@ -1,1 +1,0 @@
-cmd_/home/noslab/src/rfuse/driver/rfuse/Module.symvers := sed 's/\.ko$$/\.o/' /home/noslab/src/rfuse/driver/rfuse/modules.order | scripts/mod/modpost    -o /home/noslab/src/rfuse/driver/rfuse/Module.symvers -e    -w -T -
