@@ -2143,7 +2143,7 @@ void rfuse_readahead(struct readahead_control *rac)
 			rp->descs[i].length = PAGE_SIZE;
 		}
 		rp->num_pages = nr_pages;
-		rfuse_send_readpages(ria, rac->file, rac->ra->async_size);
+		rfuse_send_readpages(ria, rac->file, true);
 	}
 }
 
