@@ -2121,6 +2121,8 @@ static int rfuse_queue_request(struct rfuse_req *r_req)
 // PENDING QUEUE INSERT
 ssize_t rfuse_simple_request(struct rfuse_req *r_req){
 	ssize_t ret=0;
+	bool adjust_nice;
+	int saved_nice = 0;
 	int err;
 	u64 latency_start_ns;
 	u64 now_ns;
@@ -2139,7 +2141,17 @@ ssize_t rfuse_simple_request(struct rfuse_req *r_req){
 		WRITE_ONCE(r_req->latency_shared_ns[
 			RFUSE_LATENCY_SHARED_SUBMIT_REQUEST], 0);
 	}
+	adjust_nice = r_req->sbuf_reserved && r_req->sbuf_capacity &&
+		r_req->sbuf_len >= (64U * 1024U) &&
+		!test_bit(FR_BACKGROUND, &r_req->flags) &&
+		!test_bit(FR_ASYNC, &r_req->flags);
+	if (adjust_nice) {
+		saved_nice = task_nice(current);
+		set_user_nice(current, 19);
+	}
 	rfuse_request_wait_answer(r_req);
+	if (adjust_nice)
+		set_user_nice(current, saved_nice);
 	smp_rmb();
 	rfuse_latency_finish_request(r_req);
 
