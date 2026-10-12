@@ -240,8 +240,6 @@ int fuse_open_common(struct inode *inode, struct file *file, bool isdir)
 		if (err)
 			goto out;
 	}
-	if (file->f_flags & O_TRUNC)
-		rfuse_wait_async_writes(inode);
 
 	err = fuse_do_open(fm, get_node_id(inode), file, isdir);
 	if (!err)
@@ -1805,7 +1803,6 @@ static int fuse_getlk(struct file *file, struct file_lock *fl)
 	args.out_numargs = 1;
 	args.out_args[0].size = sizeof(outarg);
 	args.out_args[0].value = &outarg;
-	rfuse_wait_async_writes(inode);
 	err = fuse_simple_request(fm, &args);
 	if (!err)
 		err = convert_fuse_file_lock(fm->fc, &outarg.lk, fl);
@@ -1834,7 +1831,6 @@ static int fuse_setlk(struct file *file, struct file_lock *fl, int flock)
 		return 0;
 
 	fuse_lk_fill(&args, file, fl, opcode, pid_nr, flock, &inarg);
-	rfuse_wait_async_writes(inode);
 	err = fuse_simple_request(fm, &args);
 
 	/* locking is restartable */
@@ -1909,7 +1905,6 @@ static sector_t fuse_bmap(struct address_space *mapping, sector_t block)
 	args.out_numargs = 1;
 	args.out_args[0].size = sizeof(outarg);
 	args.out_args[0].value = &outarg;
-	rfuse_wait_async_writes(inode);
 	err = fuse_simple_request(fm, &args);
 	if (err == -ENOSYS)
 		fm->fc->no_bmap = 1;
@@ -1942,7 +1937,6 @@ static loff_t fuse_lseek(struct file *file, loff_t offset, int whence)
 	args.out_numargs = 1;
 	args.out_args[0].size = sizeof(outarg);
 	args.out_args[0].value = &outarg;
-	rfuse_wait_async_writes(inode);
 	err = fuse_simple_request(fm, &args);
 	if (err) {
 		if (err == -ENOSYS) {
@@ -2076,7 +2070,6 @@ __poll_t fuse_file_poll(struct file *file, poll_table *wait)
 	args.out_numargs = 1;
 	args.out_args[0].size = sizeof(outarg);
 	args.out_args[0].value = &outarg;
-	rfuse_wait_async_writes(file_inode(file));
 	err = fuse_simple_request(fm, &args);
 
 	if (!err)
@@ -2124,8 +2117,6 @@ static int fuse_writeback_range(struct inode *inode, loff_t start, loff_t end)
 
 	if (!err)
 		fuse_sync_writes(inode);
-	if (!err)
-		rfuse_wait_async_writes(inode);
 
 	return err;
 }
@@ -2395,10 +2386,7 @@ void fuse_init_file_inode(struct inode *inode)
 	INIT_LIST_HEAD(&fi->write_files);
 	INIT_LIST_HEAD(&fi->queued_writes);
 	fi->writectr = 0;
-	fi->async_writectr = 0;
-	atomic64_set(&fi->async_range_wait_count, 0);
 	init_waitqueue_head(&fi->page_waitq);
-	fi->async_write_ranges = RB_ROOT_CACHED;
 	fi->writepages = RB_ROOT;
 
 	if (IS_ENABLED(CONFIG_FUSE_DAX))

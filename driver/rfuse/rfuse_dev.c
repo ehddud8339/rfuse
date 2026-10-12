@@ -1303,35 +1303,7 @@ static int select_cpu_id(void){
 	return (ret % RFUSE_NUM_IQUEUE);
 }
 
-static int select_numa_aware(struct fuse_conn *fc, size_t len)
-{
-	int cpu_id = task_cpu(current);
-	int start_idx;
-	int numa_id;
-	int offset;
-  int i;
-  unsigned int need_pages = DIV_ROUND_UP(len, PAGE_SIZE);
-
-	numa_id = find_numa_group_and_index(cpu_id, &start_idx);
-	if (numa_id < 0)
-		return cpu_id;
-
-  for (i = 0; i < 3; i++) {
-  	for (offset = 0; offset < NUM_NUMA_NODES; offset++) {
-	  	int idx = (start_idx + offset) % NUM_NUMA_NODES;
-		  int riq_id = numa_group[numa_id][idx];
-  		struct rfuse_iqueue *riq = fc->riq[riq_id];
-
-	  	if ((READ_ONCE(riq->num_background) <= READ_ONCE(riq->congestion_threshold)) ||
-          (READ_ONCE(riq->sbuf_max_free_hint) >= need_pages))
-		  	return riq_id;
-  	}
-    cond_resched();
-  }
-  return cpu_id;
-}
-
-static int select_numa_aware_v2(struct fuse_conn *fc,
+static int select_numa_aware(struct fuse_conn *fc,
 				struct fuse_inode *fi, size_t len)
 {
 	int cpu_id = task_cpu(current);
@@ -1349,8 +1321,6 @@ static int select_numa_aware_v2(struct fuse_conn *fc,
 	if (fi)
 		nodeid = READ_ONCE(fi->nodeid);
 
-  // for (i = 0; i < 3; i++) {
-  // for (;;) {
 	int idx = start_idx;
 	int riq_id = numa_group[numa_id][idx];
 	struct rfuse_iqueue *riq = NULL;
@@ -1358,7 +1328,6 @@ static int select_numa_aware_v2(struct fuse_conn *fc,
 	if (riq_id >= 0 && riq_id < RFUSE_NUM_IQUEUE)
 		riq = fc->riq[riq_id];
 
-    
 	if (nodeid && riq) {
 		u64 old = READ_ONCE(riq->stream_hint);
 
@@ -1367,7 +1336,7 @@ static int select_numa_aware_v2(struct fuse_conn *fc,
 			return riq_id;
 		}
 	}
-    
+
 	for (offset = 1; offset < NUM_NUMA_NODES; offset++) {
 		idx = (start_idx + offset) % NUM_NUMA_NODES;
 		riq_id = numa_group[numa_id][idx];
@@ -1382,8 +1351,6 @@ static int select_numa_aware_v2(struct fuse_conn *fc,
 			  (READ_ONCE(riq->sbuf_max_free_hint) >= requested_pages))
 			return riq_id;
 	}
-		// cond_resched();
-	// }
 
 	return cpu_id;
 }
@@ -1394,7 +1361,7 @@ struct rfuse_iqueue *rfuse_get_iqueue_for_async(struct fuse_conn *fc,
 {
 	int id;
 
-	id = select_numa_aware_v2(fc, fi, sbuf_len);
+	id = select_numa_aware(fc, fi, sbuf_len);
   // id = select_round_robin(fc);
 
 	return fc->riq[id];

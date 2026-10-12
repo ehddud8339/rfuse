@@ -16,11 +16,10 @@
 /*
  * Allow writes on inode
  *
- * RFUSE currently uses this only to pair fuse_set_nowrite() around async
- * write drains.  Do not flush queued writepages through the generic FUSE
- * writeback path here.
+ * Pair fuse_set_nowrite() for RFUSE writeback synchronization and truncate.
+ * Do not flush queued writepages through the generic FUSE writeback path.
  */
-void __rfuse_release_nowrite_async(struct inode *inode)
+void __rfuse_release_nowrite(struct inode *inode)
 {
 	struct fuse_inode *fi = get_fuse_inode(inode);
 
@@ -29,12 +28,12 @@ void __rfuse_release_nowrite_async(struct inode *inode)
 	WARN_ON_ONCE(!list_empty(&fi->queued_writes));
 }
 
-void rfuse_release_nowrite_async(struct inode *inode)
+void rfuse_release_nowrite(struct inode *inode)
 {
 	struct fuse_inode *fi = get_fuse_inode(inode);
 
 	spin_lock(&fi->lock);
-	__rfuse_release_nowrite_async(inode);
+	__rfuse_release_nowrite(inode);
 	spin_unlock(&fi->lock);
 }
 
@@ -231,7 +230,6 @@ int rfuse_do_getattr(struct inode *inode, struct kstat *stat, struct file *file)
 	r_req->in.nodeid = get_node_id(inode);
 	// NO ARGUMENT
 
-	rfuse_wait_async_writes(inode);
 	err = rfuse_simple_request(r_req);
 	
 	outarg = (struct fuse_attr_out*)(&r_req->args);
@@ -549,7 +547,7 @@ int rfuse_do_setattr(struct dentry *dentry, struct iattr *attr, struct file *fil
 			return err;
 
 		fuse_set_nowrite(inode);
-		rfuse_release_nowrite_async(inode);
+		rfuse_release_nowrite(inode);
 	}
 
 	if (is_truncate) {
@@ -558,8 +556,6 @@ int rfuse_do_setattr(struct dentry *dentry, struct iattr *attr, struct file *fil
 		if (trust_local_cmtime && attr->ia_size != inode->i_size)
 			attr->ia_valid |= ATTR_MTIME | ATTR_CTIME;
 	}
-
-	rfuse_wait_async_writes(inode);
 
 	r_req = rfuse_get_req(fm, false, false, 0, NULL);
 	if (IS_ERR(r_req)) {
@@ -628,7 +624,7 @@ int rfuse_do_setattr(struct dentry *dentry, struct iattr *attr, struct file *fil
 
 	if (is_truncate) {
 		/* NOTE: this may release/reacquire fi->lock */
-		__rfuse_release_nowrite_async(inode);
+		__rfuse_release_nowrite(inode);
 	}
 	spin_unlock(&fi->lock);
 
@@ -651,7 +647,7 @@ out:
 
 error:
 	if (is_truncate)
-		rfuse_release_nowrite_async(inode);
+		rfuse_release_nowrite(inode);
 
 	clear_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
 	rfuse_put_request(r_req); 
@@ -954,7 +950,6 @@ int rfuse_unlink(struct inode *dir, struct dentry *entry)
 	r_req->in.arg[0] = in_argument_index;
 	r_req->in.arglen[0] = entry->d_name.len + 1;
 	
-	rfuse_wait_async_writes(d_inode(entry));
 	err = rfuse_simple_request(r_req);
 
 	if (!err) {
@@ -1008,7 +1003,6 @@ int rfuse_access(struct inode *inode, int mask)
 //	r_req->in.arg[0] = inarg; //add
 //	r_req->in.arglen[0] = sizeof(*inarg); //add
 
-	rfuse_wait_async_writes(inode);
 	err = rfuse_simple_request(r_req);
 
 	if (err == -ENOSYS) {
@@ -1052,7 +1046,6 @@ int rfuse_flush_times(struct inode *inode, struct fuse_file *ff)
 	r_req->in.opcode = FUSE_SETATTR;
 	r_req->in.nodeid = get_node_id(inode);
 	// fuse_setattr_fill(fm->fc, &args, inode, &inarg, &outarg);
-	rfuse_wait_async_writes(inode);
 	res = rfuse_simple_request(r_req);
 	rfuse_put_request(r_req);
 
@@ -1098,9 +1091,6 @@ int rfuse_rename_common(struct inode *olddir, struct dentry *oldent,
 	r_req->in.arglen[1] = newent->d_name.len + 1;
 	memcpy(arg2, (char*)newent->d_name.name, newent->d_name.len + 1);
 
-	rfuse_wait_async_writes(d_inode(oldent));
-	if (d_really_is_positive(newent))
-		rfuse_wait_async_writes(d_inode(newent));
 	err = rfuse_simple_request(r_req);
 	if (!err) {
 		/* ctime changes */
@@ -1205,7 +1195,6 @@ int rfuse_link(struct dentry *entry, struct inode *newdir,
 	r_req->in.arglen[0] = newent->d_name.len + 1;
 	memcpy(arg1, (char*)newent->d_name.name, newent->d_name.len + 1);
 
-	rfuse_wait_async_writes(inode);
 	err = rfuse_create_new_entry(fm, r_req, newdir, newent, inode->i_mode);
 	/* Contrary to "normal" filesystems it can happen that link
 	   makes two "logical" inodes point to the same "physical"
