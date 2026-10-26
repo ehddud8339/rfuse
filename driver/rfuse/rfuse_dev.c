@@ -76,7 +76,6 @@ static struct fuse_dev *fuse_get_dev(struct file *file)
 
 #define RFUSE_PAYLOAD_UNIT_SIZE (FUSE_MAX_MAX_PAGES * PAGE_SIZE)
 #define RFUSE_PAYLOAD_POOL_SIZE (RFUSE_WORKER_PER_RING * RFUSE_PAYLOAD_UNIT_SIZE)
-#define RFUSE_PAYLOAD_POOL_PAGES (RFUSE_PAYLOAD_POOL_SIZE / PAGE_SIZE)
 
 enum rfuse_sbuf_alloc_reason {
 	RFUSE_PAYLOAD_REASON_NONE = 0,
@@ -233,24 +232,31 @@ static void rfuse_sbuf_reset_unreserved_req_locked(struct rfuse_req *r_req)
 	rfuse_sbuf_clear_req_locked(r_req);
 }
 
+/* sbuf.size is page-aligned and fixed after pool initialization. */
+static u32 rfuse_sbuf_pool_pages(const struct rfuse_iqueue *riq)
+{
+	return riq->sbuf.size >> PAGE_SHIFT;
+}
+
 static struct rfuse_sbuf_search
 rfuse_sbuf_find_run_locked(struct rfuse_iqueue *riq, u32 need_pages)
 {
+	u32 total_pages = rfuse_sbuf_pool_pages(riq);
 	struct rfuse_sbuf_search search = { 0 };
 	unsigned long pos;
 	u32 start;
 
-	if (!need_pages || need_pages > riq->sbuf_page_count)
+	if (!need_pages || need_pages > total_pages)
 		return search;
 
 	start = riq->sbuf_search_hint;
-	if (start >= riq->sbuf_page_count)
+	if (start >= total_pages)
 		start = 0;
 
 	pos = bitmap_find_next_zero_area(riq->sbuf_bitmap,
-					 riq->sbuf_page_count,
+					 total_pages,
 					 start, need_pages, 0);
-	if (pos < riq->sbuf_page_count) {
+	if (pos < total_pages) {
 		search.found = true;
 		search.page_index = pos;
 		return search;
@@ -260,9 +266,9 @@ rfuse_sbuf_find_run_locked(struct rfuse_iqueue *riq, u32 need_pages)
 		return search;
 
 	pos = bitmap_find_next_zero_area(riq->sbuf_bitmap,
-					 riq->sbuf_page_count,
+					 total_pages,
 					 0, need_pages, 0);
-	if (pos < riq->sbuf_page_count) {
+	if (pos < total_pages) {
 		search.found = true;
 		search.page_index = pos;
 	}
@@ -272,22 +278,23 @@ rfuse_sbuf_find_run_locked(struct rfuse_iqueue *riq, u32 need_pages)
 
 static u32 rfuse_sbuf_find_largest_free_run_locked(struct rfuse_iqueue *riq)
 {
+	u32 total_pages = rfuse_sbuf_pool_pages(riq);
 	unsigned long pos = 0;
 	u32 largest = 0;
 
-	while (pos < riq->sbuf_page_count) {
+	while (pos < total_pages) {
 		unsigned long used;
 		u32 run_len;
 
 		pos = find_next_zero_bit(riq->sbuf_bitmap,
-					 riq->sbuf_page_count, pos);
-		if (pos >= riq->sbuf_page_count)
+					 total_pages, pos);
+		if (pos >= total_pages)
 			break;
 
 		used = find_next_bit(riq->sbuf_bitmap,
-				     riq->sbuf_page_count, pos);
-		run_len = used >= riq->sbuf_page_count ?
-			  riq->sbuf_page_count - pos : used - pos;
+				     total_pages, pos);
+		run_len = used >= total_pages ?
+			  total_pages - pos : used - pos;
 		if (run_len > largest)
 			largest = run_len;
 
@@ -300,21 +307,22 @@ static u32 rfuse_sbuf_find_largest_free_run_locked(struct rfuse_iqueue *riq)
 static u32 rfuse_sbuf_measure_free_run_locked(struct rfuse_iqueue *riq,
 						 u32 page_index, u32 page_count)
 {
+	u32 total_pages = rfuse_sbuf_pool_pages(riq);
 	u32 left = page_index;
 	u32 right = page_index + page_count;
 
 	while (left > 0 && !test_bit(left - 1, riq->sbuf_bitmap))
 		left--;
-	while (right < riq->sbuf_page_count &&
+	while (right < total_pages &&
 	       !test_bit(right, riq->sbuf_bitmap))
 		right++;
 
 	return right - left;
 }
 
-static void rfuse_sbuf_refresh_max_free_hint_locked(struct rfuse_iqueue *riq)
+static void rfuse_sbuf_refresh_free_hint_locked(struct rfuse_iqueue *riq)
 {
-	WRITE_ONCE(riq->sbuf_max_free_hint,
+	WRITE_ONCE(riq->sbuf_free_hint,
 		   rfuse_sbuf_find_largest_free_run_locked(riq));
 }
 
@@ -338,14 +346,14 @@ static bool rfuse_sbuf_can_reserve(struct rfuse_iqueue *riq, u32 need_pages)
 }
 
 static enum rfuse_sbuf_alloc_reason
-rfuse_sbuf_classify_failure_locked(struct rfuse_iqueue *riq, u32 need_pages,
-				      bool has_run)
+rfuse_sbuf_classify_failure_locked(u32 total_pages, u32 free_pages,
+				   u32 need_pages, bool has_run)
 {
-	if (need_pages > riq->sbuf_page_count)
+	if (need_pages > total_pages)
 		return RFUSE_PAYLOAD_REASON_OVERSIZE;
 	if (has_run)
 		return RFUSE_PAYLOAD_REASON_NONE;
-	if (riq->sbuf_free_pages < need_pages)
+	if (free_pages < need_pages)
 		return RFUSE_PAYLOAD_REASON_EXHAUSTION;
 	return RFUSE_PAYLOAD_REASON_FRAGMENTATION;
 }
@@ -354,12 +362,14 @@ static void rfuse_sbuf_capture_failure_locked(struct rfuse_iqueue *riq,
 						 u32 need_pages,
 						 struct rfuse_sbuf_failure_state *state)
 {
-	state->free_pages = riq->sbuf_free_pages;
-	state->total_pages = riq->sbuf_page_count;
+	state->total_pages = rfuse_sbuf_pool_pages(riq);
+	state->free_pages = state->total_pages -
+		bitmap_weight(riq->sbuf_bitmap, state->total_pages);
 	state->search_hint = riq->sbuf_search_hint;
 	state->has_run = rfuse_sbuf_can_reserve_locked(riq, need_pages);
-	state->reason = rfuse_sbuf_classify_failure_locked(riq, need_pages,
-							      state->has_run);
+	state->reason = rfuse_sbuf_classify_failure_locked(state->total_pages,
+							state->free_pages,
+							need_pages, state->has_run);
 }
 
 static const char *rfuse_sbuf_reason_str(enum rfuse_sbuf_alloc_reason reason)
@@ -430,7 +440,7 @@ static int rfuse_sbuf_try_alloc(struct rfuse_req *r_req, size_t need,
 	need_pages = DIV_ROUND_UP(need, PAGE_SIZE);
 	if (!need_pages)
 		return -EINVAL;
-	if (need_pages > riq->sbuf_page_count) {
+	if (need_pages > rfuse_sbuf_pool_pages(riq)) {
 		spin_lock(&riq->sbuf_lock);
 		rfuse_sbuf_reset_unreserved_req_locked(r_req);
 		rfuse_sbuf_capture_failure_locked(riq, need_pages, state);
@@ -452,32 +462,26 @@ static int rfuse_sbuf_try_alloc(struct rfuse_req *r_req, size_t need,
 static int rfuse_sbuf_reserve_locked(struct rfuse_req *r_req, u32 need_pages)
 {
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(r_req->fm->fc, r_req->riq_id);
+	u32 total_pages = rfuse_sbuf_pool_pages(riq);
 	struct rfuse_sbuf_search search;
 
 	if (WARN_ON(!need_pages))
 		return -EINVAL;
 	if (WARN_ON(r_req->sbuf_reserved))
 		return -EEXIST;
-	if (need_pages > riq->sbuf_page_count)
+	if (need_pages > total_pages)
 		return -E2BIG;
 
 	search = rfuse_sbuf_find_run_locked(riq, need_pages);
 	if (!search.found) {
-		rfuse_sbuf_refresh_max_free_hint_locked(riq);
+		rfuse_sbuf_refresh_free_hint_locked(riq);
 		return -EAGAIN;
 	}
 
 	bitmap_set(riq->sbuf_bitmap, search.page_index, need_pages);
-	if (WARN_ON(riq->sbuf_free_pages < need_pages)) {
-		bitmap_clear(riq->sbuf_bitmap, search.page_index, need_pages);
-		return -ENOSPC;
-	}
-	riq->sbuf_free_pages -= need_pages;
-	riq->sbuf.used = riq->sbuf.size -
-			    ((size_t)riq->sbuf_free_pages << PAGE_SHIFT);
 	rfuse_sbuf_publish_req_locked(r_req, search.page_index, need_pages);
 	riq->sbuf_search_hint = search.page_index + need_pages;
-	if (riq->sbuf_search_hint >= riq->sbuf_page_count)
+	if (riq->sbuf_search_hint >= total_pages)
 		riq->sbuf_search_hint = 0;
 
 	return 0;
@@ -499,6 +503,7 @@ static bool rfuse_sbuf_range_allocated_locked(struct rfuse_iqueue *riq,
 static bool rfuse_sbuf_release_locked(struct rfuse_req *r_req)
 {
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(r_req->fm->fc, r_req->riq_id);
+	u32 total_pages = rfuse_sbuf_pool_pages(riq);
 	u32 page_index = r_req->sbuf_page_index;
 	u32 page_count = r_req->sbuf_page_count;
 	u32 merged_len;
@@ -507,24 +512,17 @@ static bool rfuse_sbuf_release_locked(struct rfuse_req *r_req)
 		return false;
 	if (WARN_ON(!page_count))
 		return false;
-	if (WARN_ON(page_index + page_count > riq->sbuf_page_count))
+	if (WARN_ON(page_index >= total_pages ||
+		    page_count > total_pages - page_index))
 		return false;
 	if (WARN_ON(!rfuse_sbuf_range_allocated_locked(riq, page_index, page_count)))
 		return false;
 
 	bitmap_clear(riq->sbuf_bitmap, page_index, page_count);
-	riq->sbuf_free_pages += page_count;
-	if (WARN_ON(riq->sbuf_free_pages > riq->sbuf_page_count)) {
-		bitmap_set(riq->sbuf_bitmap, page_index, page_count);
-		riq->sbuf_free_pages -= page_count;
-		return false;
-	}
-	riq->sbuf.used = riq->sbuf.size -
-			    ((size_t)riq->sbuf_free_pages << PAGE_SHIFT);
 	merged_len = rfuse_sbuf_measure_free_run_locked(riq, page_index,
 							  page_count);
-	if (merged_len > READ_ONCE(riq->sbuf_max_free_hint))
-		WRITE_ONCE(riq->sbuf_max_free_hint, merged_len);
+	if (merged_len > READ_ONCE(riq->sbuf_free_hint))
+		WRITE_ONCE(riq->sbuf_free_hint, merged_len);
 	rfuse_sbuf_clear_req_locked(r_req);
 	return true;
 }
@@ -860,15 +858,12 @@ static int rfuse_sbuf_pool_init(struct rfuse_iqueue *riq)
 
 	riq->sbuf.uaddr = NULL;
 	riq->sbuf.size = RFUSE_PAYLOAD_POOL_SIZE;
-	riq->sbuf.used = 0;
 	spin_lock_init(&riq->sbuf_lock);
 	init_waitqueue_head(&riq->sbuf_waitq);
-	riq->sbuf_page_count = RFUSE_PAYLOAD_POOL_PAGES;
-	riq->sbuf_free_pages = riq->sbuf_page_count;
 	riq->sbuf_search_hint = 0;
-	WRITE_ONCE(riq->sbuf_max_free_hint,
-		   riq->sbuf_page_count);
-	riq->sbuf_bitmap = bitmap_zalloc(riq->sbuf_page_count, GFP_KERNEL);
+	WRITE_ONCE(riq->sbuf_free_hint,
+		   rfuse_sbuf_pool_pages(riq));
+	riq->sbuf_bitmap = bitmap_zalloc(rfuse_sbuf_pool_pages(riq), GFP_KERNEL);
 	if (!riq->sbuf_bitmap) {
 		vfree(riq->sbuf.kaddr);
 		riq->sbuf.kaddr = NULL;
@@ -1348,7 +1343,7 @@ static int select_numa_aware(struct fuse_conn *fc,
 			continue;
 
 		if ((READ_ONCE(riq->num_background) <= READ_ONCE(riq->congestion_threshold)) ||
-			  (READ_ONCE(riq->sbuf_max_free_hint) >= requested_pages))
+			  (READ_ONCE(riq->sbuf_free_hint) >= requested_pages))
 			return riq_id;
 	}
 
@@ -2071,12 +2066,105 @@ static void rfuse_request_wait_answer(struct rfuse_req *r_req){
 	wait_event(r_req->waitq, test_bit(FR_FINISHED, &r_req->flags));
 }
 
+static const char *rfuse_opcode_name(u32 opcode)
+{
+	static const char * const names[] = {
+		[FUSE_LOOKUP] = "FUSE_LOOKUP",
+		[FUSE_FORGET] = "FUSE_FORGET",
+		[FUSE_GETATTR] = "FUSE_GETATTR",
+		[FUSE_SETATTR] = "FUSE_SETATTR",
+		[FUSE_READLINK] = "FUSE_READLINK",
+		[FUSE_SYMLINK] = "FUSE_SYMLINK",
+		[FUSE_MKNOD] = "FUSE_MKNOD",
+		[FUSE_MKDIR] = "FUSE_MKDIR",
+		[FUSE_UNLINK] = "FUSE_UNLINK",
+		[FUSE_RMDIR] = "FUSE_RMDIR",
+		[FUSE_RENAME] = "FUSE_RENAME",
+		[FUSE_LINK] = "FUSE_LINK",
+		[FUSE_OPEN] = "FUSE_OPEN",
+		[FUSE_READ] = "FUSE_READ",
+		[FUSE_WRITE] = "FUSE_WRITE",
+		[FUSE_STATFS] = "FUSE_STATFS",
+		[FUSE_RELEASE] = "FUSE_RELEASE",
+		[FUSE_FSYNC] = "FUSE_FSYNC",
+		[FUSE_SETXATTR] = "FUSE_SETXATTR",
+		[FUSE_GETXATTR] = "FUSE_GETXATTR",
+		[FUSE_LISTXATTR] = "FUSE_LISTXATTR",
+		[FUSE_REMOVEXATTR] = "FUSE_REMOVEXATTR",
+		[FUSE_FLUSH] = "FUSE_FLUSH",
+		[FUSE_INIT] = "FUSE_INIT",
+		[FUSE_OPENDIR] = "FUSE_OPENDIR",
+		[FUSE_READDIR] = "FUSE_READDIR",
+		[FUSE_RELEASEDIR] = "FUSE_RELEASEDIR",
+		[FUSE_FSYNCDIR] = "FUSE_FSYNCDIR",
+		[FUSE_GETLK] = "FUSE_GETLK",
+		[FUSE_SETLK] = "FUSE_SETLK",
+		[FUSE_SETLKW] = "FUSE_SETLKW",
+		[FUSE_ACCESS] = "FUSE_ACCESS",
+		[FUSE_CREATE] = "FUSE_CREATE",
+		[FUSE_INTERRUPT] = "FUSE_INTERRUPT",
+		[FUSE_BMAP] = "FUSE_BMAP",
+		[FUSE_DESTROY] = "FUSE_DESTROY",
+		[FUSE_IOCTL] = "FUSE_IOCTL",
+		[FUSE_POLL] = "FUSE_POLL",
+		[FUSE_NOTIFY_REPLY] = "FUSE_NOTIFY_REPLY",
+		[FUSE_BATCH_FORGET] = "FUSE_BATCH_FORGET",
+		[FUSE_FALLOCATE] = "FUSE_FALLOCATE",
+		[FUSE_READDIRPLUS] = "FUSE_READDIRPLUS",
+		[FUSE_RENAME2] = "FUSE_RENAME2",
+		[FUSE_LSEEK] = "FUSE_LSEEK",
+		[FUSE_COPY_FILE_RANGE] = "FUSE_COPY_FILE_RANGE",
+		[FUSE_SETUPMAPPING] = "FUSE_SETUPMAPPING",
+		[FUSE_REMOVEMAPPING] = "FUSE_REMOVEMAPPING",
+		[FUSE_SYNCFS] = "FUSE_SYNCFS",
+	};
+
+	if (opcode == CUSE_INIT)
+		return "CUSE_INIT";
+	if (opcode < ARRAY_SIZE(names) && names[opcode])
+		return names[opcode];
+	return "UNKNOWN";
+}
+
 static int rfuse_queue_request(struct rfuse_req *r_req)
 {
 	struct fuse_mount *fm = r_req->fm;
 	struct fuse_conn *fc = fm->fc;
 	struct rfuse_iqueue *riq = rfuse_get_specific_iqueue(fc, r_req->riq_id);
 	struct rfuse_address_entry *entry;
+	u64 size;
+	u64 offset = 0;
+	u64 fh = 0;
+	bool has_fh = false;
+
+	/* I/O uses the requested byte count; other ops use input argument bytes. */
+	switch (r_req->in.opcode) {
+	case FUSE_READ:
+	case FUSE_READDIR:
+	case FUSE_READDIRPLUS:
+		size = ((struct fuse_read_in *)&r_req->args)->size;
+		offset = ((struct fuse_read_in *)&r_req->args)->offset;
+		fh = ((struct fuse_read_in *)&r_req->args)->fh;
+		has_fh = true;
+		break;
+	case FUSE_WRITE:
+		size = ((struct fuse_write_in *)&r_req->args)->size;
+		offset = ((struct fuse_write_in *)&r_req->args)->offset;
+		fh = ((struct fuse_write_in *)&r_req->args)->fh;
+		has_fh = true;
+		break;
+	default:
+		size = (u64)r_req->in.arglen[0] + r_req->in.arglen[1];
+		break;
+	}
+	if (has_fh)
+		pr_info("RFUSE: queue request op=%s(%u) nodeid=%llu fh=%llu size=%llu offset=%llu\n",
+			rfuse_opcode_name(r_req->in.opcode), r_req->in.opcode,
+			r_req->in.nodeid, fh, size, offset);
+	else
+		pr_info("RFUSE: queue request op=%s(%u) nodeid=%llu size=%llu offset=%llu\n",
+			rfuse_opcode_name(r_req->in.opcode), r_req->in.opcode,
+			r_req->in.nodeid, size, offset);
 
 	if(test_bit(FR_BACKGROUND, &r_req->flags)){
 		__set_bit(FR_ASYNC,&r_req->flags);

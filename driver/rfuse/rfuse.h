@@ -175,7 +175,6 @@ struct rfuse_sbuf_map {
 	void *uaddr;
 	void *kaddr;
 	uint32_t size;
-	uint32_t used;
 };
 
 /**
@@ -251,21 +250,19 @@ struct rfuse_iqueue{
 	/*
 	 * Shared sbuf allocator state, protected by sbuf_lock.
 	 * sbuf_bitmap is the allocator source of truth.
-	 * sbuf_free_pages is a cached aggregate counter for fast
-	 * rejection/debugging only, and sbuf_search_hint is advisory only.
+	 * Pool capacity is derived from sbuf.size, fixed after initialization.
+	 * sbuf_search_hint and sbuf_free_hint are advisory only.
 	 */
 	spinlock_t sbuf_lock;
 	wait_queue_head_t sbuf_waitq;
 	unsigned long *sbuf_bitmap;
-	uint32_t sbuf_page_count;
-	uint32_t sbuf_free_pages;
 	uint32_t sbuf_search_hint;
 	/*
 	 * LDY: sbuf allocator의 next-fit search cursor와 별개인 metadata.
 	 * 현재 riq sbuf pool에서 가능한 최대 contiguous free run의
 	 * advisory upper bound를 "page" 단위로 유지한다.
 	 */
-	uint32_t sbuf_max_free_hint;
+	uint32_t sbuf_free_hint;
 	/* LDY: riq별 최근 file stream을 구분하기 위한 hint.
 	 * 같은 fuse_inode에서 나온 request가 반복되면 streaming 요청으로 보고,
 	 * 이후 scheduler에서 current CPU 제외 여부를 판단하는 데 사용한다.
@@ -275,11 +272,11 @@ struct rfuse_iqueue{
 	u64 stream_hint;
 };
 
-static_assert(sizeof(struct rfuse_iqueue) == 456);
+static_assert(sizeof(struct rfuse_iqueue) == 448);
 static_assert(offsetof(struct rfuse_iqueue, connected) == 192);
 static_assert(offsetof(struct rfuse_iqueue, sbuf_bitmap) == 424);
-static_assert(offsetof(struct rfuse_iqueue, sbuf_page_count) == 432);
-static_assert(offsetof(struct rfuse_iqueue, sbuf_max_free_hint) == 444);
-static_assert(offsetof(struct rfuse_iqueue, stream_hint) == 448);
+static_assert(offsetof(struct rfuse_iqueue, sbuf_search_hint) == 432);
+static_assert(offsetof(struct rfuse_iqueue, sbuf_free_hint) == 436);
+static_assert(offsetof(struct rfuse_iqueue, stream_hint) == 440);
 
 #endif

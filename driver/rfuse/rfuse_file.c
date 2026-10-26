@@ -13,7 +13,7 @@
 #include <linux/ktime.h>
 
 #ifndef USE_OFUSE_PATH
-#define USE_OFUSE_PATH 1
+#define USE_OFUSE_PATH 0
 #endif
 
 struct rfuse_release_in {
@@ -2702,7 +2702,7 @@ void rfuse_readahead(struct readahead_control *rac)
 			rp->descs[i].length = PAGE_SIZE;
 		}
 		rp->num_pages = nr_pages;
-		rfuse_send_readpages(ria, rac->file, true);
+		rfuse_send_readpages(ria, rac->file);
 	}
 }
 #endif
